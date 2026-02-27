@@ -1,0 +1,31 @@
+{
+  "buildConfig": {
+    "scheme": "ExampleApp",
+    "configuration": "Debug",
+    "enableCache": true,
+    "cacheDir": ".build"
+  },
+  "deviceConfig": {
+    "deviceId": "",
+    "preferredDevice": "iPhone X",
+    "fallbackSimulator": "iPhone 17",
+    "simulatorOS": "latest"
+  },
+  "buildOptions": {
+    "showBuildLog": true,
+    "derivedDataPath": ".build",
+    "parallelBuild": true,
+    "maxConcurrentBuildTasks": 4
+  },
+  "cacheConfig": {
+    "enabled": true,
+    "location": ".build",
+    "autoCleanup": false,
+    "cleanupInterval": 604800
+  },
+  "notifications": {
+    "onSuccess": true,
+    "onFailure": true,
+    "showBuildTime": true
+  }
+}

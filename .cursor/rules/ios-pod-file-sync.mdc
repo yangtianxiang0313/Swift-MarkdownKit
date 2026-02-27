@@ -1,0 +1,33 @@
+---
+description: iOS CocoaPods 项目新增文件后需运行 pod install 才能同步到 Xcode
+alwaysApply: true
+---
+
+# iOS Pod 项目文件同步
+
+XHSMarkdownKit 使用 CocoaPods，新增或删除库内文件后不会自动出现在 Xcode 中。
+
+## 库代码（Sources/XHSMarkdownKit/）
+
+podspec 使用 `s.source_files = 'Sources/XHSMarkdownKit/**/*.swift'`，新文件需在 **pod install 时** 才被纳入工程。
+
+**操作**：新增或删除 `.swift` 文件后，执行：
+
+```bash
+cd Example && pod install
+```
+
+## ExampleApp 自身（Example/ExampleApp/）
+
+ExampleApp.xcodeproj 是普通 Xcode 工程，文件列表在 project.pbxproj 中。Xcode 不会自动监控并添加新文件。
+
+**操作**：在 Xcode 中手动 Add Files to "ExampleApp"，或修改 project.pbxproj。
+
+## 若 pod install 后仍无新文件
+
+可清理缓存后重装：
+
+```bash
+pod cache clean --all
+cd Example && pod install
+```

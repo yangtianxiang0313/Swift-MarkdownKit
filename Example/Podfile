@@ -1,0 +1,37 @@
+# 小红书私有 Pod 源
+source 'git@code.devops.xiaohongshu.com:iOS/xhs-source-spec.git'
+source 'git@code.devops.xiaohongshu.com:iOS/XHS-Framework-Spec.git'
+source 'git@code.devops.xiaohongshu.com:iOS/xhs-business-framework-spec.git'
+# 公有 Pod 源
+source 'https://cdn.cocoapods.org/'
+
+platform :ios, '15.0'
+use_frameworks!
+
+# 指定项目路径
+project 'ExampleApp.xcodeproj'
+
+target 'ExampleApp' do
+  # 使用本地路径引用 XHSMarkdownKit
+  pod 'XHSMarkdownKit', :path => '../'
+  
+  # Lookin 调试工具
+  pod 'LookinServer', :configurations => ['Debug']
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    target.build_configurations.each do |config|
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
+    end
+  end
+  
+  # 禁用用户脚本沙盒（解决 Xcode 26 沙箱问题）
+  installer.generated_projects.each do |project|
+    project.targets.each do |target|
+      target.build_configurations.each do |config|
+        config.build_settings['ENABLE_USER_SCRIPT_SANDBOXING'] = 'NO'
+      end
+    end
+  end
+end
