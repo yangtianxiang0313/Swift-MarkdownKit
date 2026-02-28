@@ -139,11 +139,13 @@ final class RenderPerformanceTests: XCTestCase {
     
     func testContainerViewLayoutPerformance() {
         let markdown = generateMarkdown(targetLength: 3000)
-        let result = MarkdownKit.render(markdown, theme: .default)
-        let containerView = MarkdownContainerView()
+        var config = MarkdownConfiguration.default
+        config.maxWidth = 320
+        let result = MarkdownKit.render(markdown, theme: .default, configuration: config)
+        let containerView = MarkdownKit.makeContainerView(theme: .default, maxWidth: 320)
         
         measure {
-            containerView.apply(result, maxWidth: 320)
+            containerView.apply(result)
         }
     }
     
@@ -151,14 +153,16 @@ final class RenderPerformanceTests: XCTestCase {
         let markdown1 = generateMarkdown(targetLength: 2000)
         let markdown2 = markdown1 + "\n\n新增段落内容。"
         
-        let result1 = MarkdownKit.render(markdown1, theme: .default)
-        let result2 = MarkdownKit.render(markdown2, theme: .default)
+        var config = MarkdownConfiguration.default
+        config.maxWidth = 320
+        let result1 = MarkdownKit.render(markdown1, theme: .default, configuration: config)
+        let result2 = MarkdownKit.render(markdown2, theme: .default, configuration: config)
         
-        let containerView = MarkdownContainerView()
-        containerView.apply(result1, maxWidth: 320)
+        let containerView = MarkdownKit.makeContainerView(theme: .default, maxWidth: 320)
+        containerView.apply(result1)
         
         measure {
-            containerView.applyDiff(result2, maxWidth: 320)
+            containerView.apply(result2)
         }
     }
     

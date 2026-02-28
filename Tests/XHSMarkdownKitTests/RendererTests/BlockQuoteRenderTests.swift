@@ -27,12 +27,11 @@ final class BlockQuoteRenderTests: XCTestCase {
         
         XCTAssertFalse(result.fragments.isEmpty)
         
-        guard let textFragment = result.fragments.first as? TextFragment else {
-            XCTFail("引用应该生成 TextFragment")
+        guard let asp = result.fragments.first as? AttributedStringProviding,
+              let attrString = asp.attributedString else {
+            XCTFail("引用应该生成文本 Fragment")
             return
         }
-        
-        let attrString = textFragment.attributedString
         XCTAssertTrue(attrString.string.contains("This is a quote"))
     }
     
@@ -152,12 +151,11 @@ final class BlockQuoteRenderTests: XCTestCase {
         
         let result = MarkdownKit.render(markdown, theme: theme)
         
-        guard let textFragment = result.fragments.first as? TextFragment else {
-            XCTFail("未找到 TextFragment")
+        guard let asp = result.fragments.first as? AttributedStringProviding,
+              let attrString = asp.attributedString else {
+            XCTFail("未找到文本 Fragment")
             return
         }
-        
-        let attrString = textFragment.attributedString
         
         // 检查是否应用了段落样式（包含缩进）
         if let paragraphStyle = attrString.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle {

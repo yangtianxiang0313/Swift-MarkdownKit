@@ -36,11 +36,8 @@ class MarkdownPreviewViewController: UIViewController {
     }()
     
     private lazy var containerView: MarkdownContainerView = {
-        let engine = MarkdownRenderEngine.makeDefault()
-        let view = MarkdownContainerView(engine: engine)
-        view.onContentHeightChanged = { [weak self] height in
-            self?.updatePreviewContentSize()
-        }
+        let view = MarkdownContainerView()
+        view.delegate = self
         return view
     }()
     
@@ -208,21 +205,15 @@ class MarkdownPreviewViewController: UIViewController {
     
     private func renderMarkdown() {
         let markdown = textView.text ?? ""
-        let maxWidth = previewScrollView.bounds.width - 24
+        guard previewScrollView.bounds.width > 24 else { return }
         
-        guard maxWidth > 0 else { return }
-        
-        let result = MarkdownKit.render(markdown, theme: currentTheme)
-        containerView.apply(result)
-        updatePreviewContentSize()
+        updateContainerFrame()
+        containerView.setText(markdown)
     }
     
-    private func updatePreviewContentSize() {
+    private func updateContainerFrame() {
         let width = previewScrollView.bounds.width
         guard width > 0 else { return }
-        
-        let height = containerView.contentHeight + 24
-        previewScrollView.contentSize = CGSize(width: width, height: height)
         
         containerView.frame = CGRect(
             x: 12,
@@ -232,10 +223,24 @@ class MarkdownPreviewViewController: UIViewController {
         )
     }
     
+    private func updatePreviewContentSize() {
+        let width = previewScrollView.bounds.width
+        guard width > 0 else { return }
+        
+        updateContainerFrame()
+        previewScrollView.contentSize = CGSize(width: width, height: containerView.contentHeight + 24)
+    }
+    
     // MARK: - Sample Markdown
     
     static let testHeight = """
-    超过一行测试算高超过一行测试算高超过一行测试算高超过一行测试算高超过一行测试算高超过一行测试算高超过一行测试算高
+    ## 嵌套引用
+    
+    > 外层引用
+    > > 内层引用
+    > > - 无序列表1
+    > > - 无序列表2
+    > > > 更深层引用
     """
     
     static let basicSample = """
@@ -304,8 +309,8 @@ class MarkdownPreviewViewController: UIViewController {
     This is **bold** text.
     \"\"\"
     
-    let result = MarkdownKit.render(markdown, theme: .default)
-    label.attributedText = result.attributedString
+    let container = MarkdownContainerView()
+    container.setText(markdown)
     ```
     
     ## Python 代码
@@ -321,7 +326,7 @@ class MarkdownPreviewViewController: UIViewController {
     
     ## 行内代码
     
-    使用 `MarkdownKit.render()` 方法渲染 Markdown。
+    使用 `containerView.setText()` 方法渲染 Markdown。
     """
     
     static let tableSample = """
@@ -473,8 +478,8 @@ class MarkdownPreviewViewController: UIViewController {
     3. 使用：
     
        ```swift
-       let result = MarkdownKit.render(text)
-       containerView.apply(result)
+       let container = MarkdownContainerView()
+       container.setText(text)
        ```
     
     ## 8. 引用块内的代码块
@@ -530,24 +535,12 @@ class MarkdownPreviewViewController: UIViewController {
     
     ```swift
     // 这是一个较长的代码块，用于测试横向滚动
-    struct MarkdownRenderer: MarkupVisitor {
-        public typealias Result = NSAttributedString
-        
-        public let theme: MarkdownTheme
-        public let configuration: MarkdownConfiguration
-        public let registry: NodeRendererRegistry
-        
-        public init(theme: MarkdownTheme = .default, configuration: MarkdownConfiguration = .default, registry: NodeRendererRegistry = .shared) {
-            self.theme = theme
-            self.configuration = configuration
-            self.registry = registry
-        }
-        
-        public mutating func render(_ document: Document) -> MarkdownRenderResult {
-            // 实现渲染逻辑...
-            return MarkdownRenderResult(fragments: [], parserState: .initial)
-        }
-    }
+    let container = MarkdownContainerView(theme: .default, pipeline: MarkdownRenderPipeline())
+    container.animationDriver = TypingDriver(charactersPerSecond: 30, tickInterval: 1.0 / 60.0)
+    container.delegate = self
+    
+    container.appendStreamChunk("# Hello World\n\nThis is a **streaming** demo with `TypingDriver` animation.")
+    container.finishStreaming()
     ```
     
     ## 14. 空内容测试
@@ -573,5 +566,13 @@ class MarkdownPreviewViewController: UIViewController {
 extension MarkdownPreviewViewController: UITextViewDelegate {
     func textViewDidChange(_ textView: UITextView) {
         renderMarkdown()
+    }
+}
+
+// MARK: - MarkdownContainerViewDelegate
+
+extension MarkdownPreviewViewController: MarkdownContainerViewDelegate {
+    func containerView(_ view: MarkdownContainerView, didChangeContentHeight height: CGFloat) {
+        updatePreviewContentSize()
     }
 }

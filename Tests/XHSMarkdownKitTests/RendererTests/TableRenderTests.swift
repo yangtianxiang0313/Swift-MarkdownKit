@@ -140,7 +140,7 @@ final class TableRenderTests: XCTestCase {
         // 应该有: TextFragment(段落) + ViewFragment(表格) + TextFragment(段落)
         XCTAssertTrue(result.fragments.count >= 3, "应该至少有3个 Fragment")
         
-        let textFragments = result.fragments.compactMap { $0 as? TextFragment }
+        let textFragments = result.fragments.compactMap { $0 as? AttributedStringProviding }
         let viewFragments = result.fragments.compactMap { $0 as? ViewFragment }
         
         XCTAssertTrue(textFragments.count >= 2, "应该有至少2个文本 Fragment")

@@ -129,12 +129,12 @@ final class CodeBlockRenderTests: XCTestCase {
         
         let result = MarkdownKit.render(markdown, theme: theme)
         
-        guard let textFragment = result.fragments.first as? TextFragment else {
+        guard let asp = result.fragments.first as? AttributedStringProviding,
+              let attrString = asp.attributedString else {
             // 可能是 ViewFragment，跳过字体检查
             return
         }
         
-        let attrString = textFragment.attributedString
         
         // 查找代码文本的字体属性
         let range = (attrString.string as NSString).range(of: "monospace")
@@ -160,11 +160,11 @@ final class CodeBlockRenderTests: XCTestCase {
         
         let result = MarkdownKit.render(markdown, theme: theme)
         
-        guard let textFragment = result.fragments.first as? TextFragment else {
+        guard let asp = result.fragments.first as? AttributedStringProviding,
+              let attrString = asp.attributedString else {
             return
         }
         
-        let attrString = textFragment.attributedString
         
         // 检查是否有背景色属性
         let range = NSRange(location: 0, length: min(1, attrString.length))

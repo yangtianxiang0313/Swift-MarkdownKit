@@ -7,6 +7,7 @@ class StreamingDemoViewController: UIViewController {
     
     // MARK: - UI Components
     
+    /// 流式内容 ScrollView（外层可见区域高度由约束固定）
     private lazy var scrollView: UIScrollView = {
         let sv = UIScrollView()
         sv.backgroundColor = UIColor.systemGray6
@@ -15,17 +16,27 @@ class StreamingDemoViewController: UIViewController {
         return sv
     }()
     
-    private lazy var containerView: MarkdownContainerView = {
-        let engine = MarkdownRenderEngine.makeDefault()
-        let view = MarkdownContainerView(engine: engine)
-        view.onContentHeightChanged = { [weak self] height in
-            self?.updateScrollViewContentSize()
-            if self?.autoScrollEnabled == true {
-                self?.scrollToBottom()
-            }
-        }
-        return view
+    /// 配置区域包装（可滚动，避免内容过多时挤压展示区）
+    private lazy var configAreaScrollView: UIScrollView = {
+        let sv = UIScrollView()
+        sv.showsVerticalScrollIndicator = true
+        sv.alwaysBounceVertical = false
+        return sv
     }()
+    
+    /// 是否启用逐字动画（否则即时显示）
+    private var animationEnabled = true
+    
+    /// 容器视图（由 makeContainerView 创建，切换动画开关时重建）
+    private var _containerView: MarkdownContainerView!
+    private var containerView: MarkdownContainerView { _containerView }
+    
+    private func makeContainerView() -> MarkdownContainerView {
+        let view = MarkdownContainerView()
+        view.animationDriver = animationEnabled ? TypingDriver() : InstantDriver()
+        view.delegate = self
+        return view
+    }
     
     /// 内容选择器
     private lazy var caseSelector: UIButton = {
@@ -54,18 +65,18 @@ class StreamingDemoViewController: UIViewController {
     /// 渲染速度标签
     private lazy var speedLabel: UILabel = {
         let label = UILabel()
-        label.text = "渲染: 1字/秒"
+        label.text = "渲染: 1.0秒/次(全部)"
         label.font = .systemFont(ofSize: 13)
         label.textColor = .secondaryLabel
         return label
     }()
     
-    /// 渲染速度滑块（0-100，映射到不同速度档位）
+    /// 渲染速度滑块（0-100：0~8=burst，8~100=渐进加速）
     private lazy var speedSlider: UISlider = {
         let slider = UISlider()
         slider.minimumValue = 0
         slider.maximumValue = 100
-        slider.value = 30  // 默认 1字/秒
+        slider.value = 4  // 默认 burst 模式
         slider.minimumTrackTintColor = .systemBlue
         slider.addTarget(self, action: #selector(speedChanged), for: .valueChanged)
         return slider
@@ -161,6 +172,24 @@ class StreamingDemoViewController: UIViewController {
         label.text = "🚀 自动加速: 线性"
         label.font = .systemFont(ofSize: 13, weight: .medium)
         label.textColor = .systemBlue
+        return label
+    }()
+    
+    /// 逐字动画开关
+    private lazy var animationSwitch: UISwitch = {
+        let sw = UISwitch()
+        sw.isOn = true
+        sw.onTintColor = .systemPurple
+        sw.addTarget(self, action: #selector(animationSwitchChanged), for: .valueChanged)
+        return sw
+    }()
+    
+    /// 逐字动画标签
+    private lazy var animationLabel: UILabel = {
+        let label = UILabel()
+        label.text = "✨ 逐字动画: 开"
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = .systemPurple
         return label
     }()
     
@@ -270,25 +299,30 @@ class StreamingDemoViewController: UIViewController {
     private var isPaused = false
     private var autoScrollEnabled = true
     
+    /// 流式展示区域最大高度（只增不减，避免下方展开时压缩）
+    
     /// 当前选中的 case 索引
     private var selectedCaseIndex = 0
     
     // MARK: - 速度配置
     
-    /// 渲染速度配置
-    private var renderSpeed: SpeedConfig = .charsPerSecond(1)
+    /// 渲染速度配置（默认 burst 模式：每 1 秒一次性塞入全部积压，便于观察 Markdown 内打字机动画）
+    private var renderSpeed: SpeedConfig = .burstEvery(interval: 1.0)
     
-    /// 网络接收速度配置
-    private var networkSpeed: SpeedConfig = .charsPerSecond(3)
+    /// 网络接收速度配置（模拟服务端推送节奏）
+    private var networkSpeed: SpeedConfig = .charsPerSecond(20)
     
     /// 速度配置枚举
     private enum SpeedConfig {
+        case burstEvery(interval: TimeInterval)                     // 每 N 秒一次性塞入全部积压（便于观察动画）
         case charsPerInterval(chars: Int, interval: TimeInterval)  // N字/间隔
         case charsPerSecond(Int)                                    // N字/秒
         case charsPerFrame(Int)                                     // N字/帧（高速模式）
         
         var description: String {
             switch self {
+            case .burstEvery(let interval):
+                return String(format: "%.1f秒/次(全部)", interval)
             case .charsPerInterval(let chars, let interval):
                 if interval >= 1 {
                     return "\(chars)字/\(Int(interval))秒"
@@ -305,13 +339,14 @@ class StreamingDemoViewController: UIViewController {
         /// 转换为 Timer 间隔和每次字符数
         func timerConfig() -> (interval: TimeInterval, chars: Int, useDisplayLink: Bool) {
             switch self {
+            case .burstEvery(let interval):
+                return (interval, 99999, false)  // 每 N 秒，一次消费全部积压
             case .charsPerInterval(let chars, let interval):
                 return (interval, chars, false)
             case .charsPerSecond(let n):
                 if n <= 10 {
                     return (1.0 / Double(n), 1, false)
                 } else {
-                    // 高速模式用更短间隔
                     return (0.05, max(1, n / 20), false)
                 }
             case .charsPerFrame(let n):
@@ -499,14 +534,34 @@ class StreamingDemoViewController: UIViewController {
             action: #selector(showSettings)
         )
         
+        let streamSectionLabel = UILabel()
+        streamSectionLabel.text = "流式展示区"
+        streamSectionLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        streamSectionLabel.textColor = .secondaryLabel
+        
+        _containerView = makeContainerView()
+        
         view.addSubview(caseSelector)
+        view.addSubview(streamSectionLabel)
         view.addSubview(scrollView)
         scrollView.addSubview(containerView)
-        view.addSubview(configStack)
-        view.addSubview(controlStack)
-        view.addSubview(statusLabel)
+        containerView.translatesAutoresizingMaskIntoConstraints = true
         
-        // 配置区域
+        let configContainer = UIView()
+        configContainer.addSubview(configStack)
+        configContainer.addSubview(controlStack)
+        configContainer.addSubview(statusLabel)
+        configAreaScrollView.addSubview(configContainer)
+        view.addSubview(configAreaScrollView)
+        
+        // 配置区域标题
+        let configTitleLabel = UILabel()
+        configTitleLabel.text = "参数配置"
+        configTitleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        configTitleLabel.textColor = .label
+        
+        // 配置行
+        let animationRow = createRow(label: "逐字动画", control: animationSwitch)
         let networkSpeedRow = createRow(label: "网络接收", control: networkSpeedSlider)
         let speedRow = createRow(label: "渲染速度", control: speedSlider)
         let autoScrollRow = createRow(label: "滚动跟随", control: autoScrollSwitch)
@@ -517,21 +572,21 @@ class StreamingDemoViewController: UIViewController {
             button: algorithmButton
         )
         
-        // 速度相关
+        // 配置区域内容
+        configStack.addArrangedSubview(configTitleLabel)
+        configStack.addArrangedSubview(animationRow)
+        configStack.addArrangedSubview(animationLabel)
         configStack.addArrangedSubview(networkSpeedRow)
         configStack.addArrangedSubview(networkSpeedLabel)
         configStack.addArrangedSubview(speedRow)
         configStack.addArrangedSubview(speedLabel)
         configStack.addArrangedSubview(backlogLabel)
-        
-        // 功能开关
         configStack.addArrangedSubview(autoScrollRow)
         configStack.addArrangedSubview(autoAccelerateRow)
         configStack.addArrangedSubview(autoAccelerateLabel)
         configStack.addArrangedSubview(networkModeRow)
         configStack.addArrangedSubview(networkModeLabel)
         
-        // 网络质量滑块（仅在不稳定模式下显示）
         let networkQualityRow = createRow(label: "网络质量", control: networkQualitySlider)
         configStack.addArrangedSubview(networkQualityRow)
         configStack.addArrangedSubview(networkQualityLabel)
@@ -545,34 +600,52 @@ class StreamingDemoViewController: UIViewController {
         
         // 约束
         caseSelector.translatesAutoresizingMaskIntoConstraints = false
+        streamSectionLabel.translatesAutoresizingMaskIntoConstraints = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        configAreaScrollView.translatesAutoresizingMaskIntoConstraints = false
+        configContainer.translatesAutoresizingMaskIntoConstraints = false
         configStack.translatesAutoresizingMaskIntoConstraints = false
         controlStack.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        
+
         NSLayoutConstraint.activate([
             caseSelector.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
             caseSelector.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
             caseSelector.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             caseSelector.heightAnchor.constraint(equalToConstant: 40),
             
-            scrollView.topAnchor.constraint(equalTo: caseSelector.bottomAnchor, constant: 12),
+            streamSectionLabel.topAnchor.constraint(equalTo: caseSelector.bottomAnchor, constant: 12),
+            streamSectionLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            
+            scrollView.topAnchor.constraint(equalTo: streamSectionLabel.bottomAnchor, constant: 6),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            scrollView.bottomAnchor.constraint(equalTo: configStack.topAnchor, constant: -12),
+            scrollView.heightAnchor.constraint(equalTo: view.safeAreaLayoutGuide.heightAnchor, multiplier: 0.52),
+            scrollView.bottomAnchor.constraint(equalTo: configAreaScrollView.topAnchor, constant: -12),
             
-            configStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            configStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            configAreaScrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            configAreaScrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            configAreaScrollView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
+            
+            configContainer.topAnchor.constraint(equalTo: configAreaScrollView.contentLayoutGuide.topAnchor),
+            configContainer.leadingAnchor.constraint(equalTo: configAreaScrollView.contentLayoutGuide.leadingAnchor),
+            configContainer.trailingAnchor.constraint(equalTo: configAreaScrollView.contentLayoutGuide.trailingAnchor),
+            configContainer.bottomAnchor.constraint(equalTo: configAreaScrollView.contentLayoutGuide.bottomAnchor),
+            configContainer.widthAnchor.constraint(equalTo: configAreaScrollView.frameLayoutGuide.widthAnchor),
+            
+            configStack.topAnchor.constraint(equalTo: configContainer.topAnchor),
+            configStack.leadingAnchor.constraint(equalTo: configContainer.leadingAnchor),
+            configStack.trailingAnchor.constraint(equalTo: configContainer.trailingAnchor),
             configStack.bottomAnchor.constraint(equalTo: controlStack.topAnchor, constant: -12),
             
-            controlStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            controlStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            controlStack.leadingAnchor.constraint(equalTo: configContainer.leadingAnchor),
+            controlStack.trailingAnchor.constraint(equalTo: configContainer.trailingAnchor),
             controlStack.heightAnchor.constraint(equalToConstant: 44),
             controlStack.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -12),
             
-            statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            statusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            statusLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12)
+            statusLabel.leadingAnchor.constraint(equalTo: configContainer.leadingAnchor),
+            statusLabel.trailingAnchor.constraint(equalTo: configContainer.trailingAnchor),
+            statusLabel.bottomAnchor.constraint(equalTo: configContainer.bottomAnchor, constant: -12)
         ])
     }
     
@@ -688,7 +761,6 @@ class StreamingDemoViewController: UIViewController {
     @objc private func startStreaming() {
         guard streamingTimer == nil && networkTimer == nil else { return }
         
-        containerView.startStreaming()
         startNetworkTimer()
         startRenderTimer()
         
@@ -714,8 +786,14 @@ class StreamingDemoViewController: UIViewController {
     }
     
     /// 启动渲染定时器（消费已接收的数据）
+    /// 动画关闭时强制 burst 模式，否则 Demo 层渐进 append 会制造假打字机效果
     private func startRenderTimer() {
-        let config = renderSpeed.timerConfig()
+        let config: (interval: TimeInterval, chars: Int, useDisplayLink: Bool)
+        if animationEnabled {
+            config = renderSpeed.timerConfig()
+        } else {
+            config = SpeedConfig.burstEvery(interval: 1.0).timerConfig()
+        }
         streamingTimer?.invalidate()
         streamingTimer = Timer.scheduledTimer(
             timeInterval: config.interval,
@@ -763,8 +841,7 @@ class StreamingDemoViewController: UIViewController {
         networkTimer = nil
         
         let fullText = testCases[selectedCaseIndex].content
-        containerView.render(fullText)
-        containerView.endStreaming()
+        containerView.setText(fullText)
         
         currentIndex = streamingBuffer.count
         renderedIndex = streamingBuffer.count
@@ -799,7 +876,7 @@ class StreamingDemoViewController: UIViewController {
         backlogChars = 0
         
         setupStreamingBuffer()
-        containerView.clear()
+        containerView.setText("")
         
         startButton.isEnabled = true
         pauseButton.isEnabled = false
@@ -811,28 +888,33 @@ class StreamingDemoViewController: UIViewController {
     }
     
     @objc private func speedChanged() {
-        // 滑块值 0-100 映射到不同速度档位
+        // 滑块值 0-100：0~8=burst（便于观察动画），8~100=渐进加速
         let value = speedSlider.value
         
-        if value < 10 {
+        if value < 8 {
+            // Burst 模式：每 0.5~2 秒一次性塞入全部积压，便于观察 Markdown 内打字机动画
+            let interval = 2.0 - Float(value) / 8 * 1.5  // 2秒 -> 0.5秒
+            renderSpeed = .burstEvery(interval: TimeInterval(interval))
+        } else if value < 18 {
             // 超慢速: 1字/3秒 ~ 1字/1秒
-            let interval = 3.0 - (Double(value) / 10.0 * 2.0)  // 3秒 -> 1秒
+            let v = value - 8
+            let interval = 3.0 - (Double(v) / 10.0 * 2.0)
             renderSpeed = .charsPerInterval(chars: 1, interval: interval)
-        } else if value < 30 {
+        } else if value < 38 {
             // 慢速: 1字/秒 ~ 3字/秒
-            let cps = 1 + Int((value - 10) / 10 * 2)
+            let cps = 1 + Int((value - 18) / 10 * 2)
             renderSpeed = .charsPerSecond(cps)
-        } else if value < 60 {
+        } else if value < 68 {
             // 正常: 3字/秒 ~ 15字/秒
-            let cps = 3 + Int((value - 30) / 30 * 12)
+            let cps = 3 + Int((value - 38) / 30 * 12)
             renderSpeed = .charsPerSecond(cps)
-        } else if value < 85 {
+        } else if value < 93 {
             // 快速: 15字/秒 ~ 50字/秒
-            let cps = 15 + Int((value - 60) / 25 * 35)
+            let cps = 15 + Int((value - 68) / 25 * 35)
             renderSpeed = .charsPerSecond(cps)
         } else {
             // 极速: 2字/帧 ~ 10字/帧
-            let cpf = 2 + Int((value - 85) / 15 * 8)
+            let cpf = 2 + Int((value - 93) / 7 * 8)
             renderSpeed = .charsPerFrame(cpf)
         }
         
@@ -871,6 +953,42 @@ class StreamingDemoViewController: UIViewController {
     
     @objc private func autoScrollChanged() {
         autoScrollEnabled = autoScrollSwitch.isOn
+    }
+    
+    @objc private func animationSwitchChanged() {
+        animationEnabled = animationSwitch.isOn
+        animationLabel.text = animationEnabled ? "✨ 逐字动画: 开" : "⚡ 逐字动画: 关"
+        animationLabel.textColor = animationEnabled ? .systemPurple : .secondaryLabel
+        
+        // 需重建容器以切换 AnimationDriver
+        replaceContainer()
+    }
+    
+    private func replaceContainer() {
+        streamingTimer?.invalidate()
+        streamingTimer = nil
+        networkTimer?.invalidate()
+        networkTimer = nil
+        currentIndex = 0
+        renderedIndex = 0
+        lastAppendedIndex = 0
+        isPaused = false
+        skipTickCount = 0
+        jitterTicksRemaining = 0
+        tickCounter = 0
+        backlogChars = 0
+        setupStreamingBuffer()
+        
+        _containerView.removeFromSuperview()
+        _containerView = makeContainerView()
+        scrollView.addSubview(containerView)
+        containerView.translatesAutoresizingMaskIntoConstraints = true
+        
+        startButton.isEnabled = true
+        pauseButton.isEnabled = false
+        fastForwardButton.isEnabled = false
+        statusLabel.text = "点击「开始」模拟流式渲染"
+        updateScrollViewContentSize()
     }
     
     @objc private func autoAccelerateChanged() {
@@ -1079,7 +1197,7 @@ class StreamingDemoViewController: UIViewController {
             if currentIndex >= streamingBuffer.count && renderedIndex >= streamingBuffer.count {
                 streamingTimer?.invalidate()
                 streamingTimer = nil
-                containerView.endStreaming()
+                containerView.finishStreaming()
                 startButton.isEnabled = false
                 pauseButton.isEnabled = false
                 fastForwardButton.isEnabled = false
@@ -1090,13 +1208,13 @@ class StreamingDemoViewController: UIViewController {
         
         tickCounter += 1
         
-        // 获取基础渲染字符数
-        let config = renderSpeed.timerConfig()
+        // 获取基础渲染字符数（动画关闭时强制 burst，避免 Demo 层制造假打字机效果）
+        let config = animationEnabled ? renderSpeed.timerConfig() : SpeedConfig.burstEvery(interval: 1.0).timerConfig()
         var baseChars = config.chars
         
-        // === 自动加速（根据积压量调整）===
+        // === 自动加速（根据积压量调整，burst 模式下 baseChars 已足够大可忽略）===
         let charsToRender: Int
-        if autoAccelerateEnabled {
+        if animationEnabled, autoAccelerateEnabled {
             let progress = Double(renderedIndex) / Double(streamingBuffer.count)
             charsToRender = accelerateAlgorithm.acceleratedChars(
                 baseChars: baseChars,
@@ -1147,7 +1265,8 @@ class StreamingDemoViewController: UIViewController {
             let cps = Double(actualChars) / interval
             actualSpeed = String(format: "%.1f字/秒", cps)
         }
-        speedLabel.text = "渲染: \(renderSpeed.description) → 实际: \(actualSpeed)"
+        let renderDesc = animationEnabled ? renderSpeed.description : "1.0秒/次(全部)[动画关]"
+        speedLabel.text = "渲染: \(renderDesc) → 实际: \(actualSpeed)"
     }
     
     private func updateBacklogLabel() {
@@ -1171,22 +1290,23 @@ class StreamingDemoViewController: UIViewController {
         // 使用 appendText 追加增量，走流式 Diff 路径，触发 AnimatableContent 的逐字动画
         guard lastAppendedIndex < renderedIndex else { return }
         let delta = String(streamingBuffer[lastAppendedIndex..<renderedIndex])
-        containerView.appendText(delta)
+        containerView.appendStreamChunk(delta)
         lastAppendedIndex = renderedIndex
         updateScrollViewContentSize()
     }
     
     private func updateScrollViewContentSize() {
-        let contentHeight = containerView.contentHeight + 24
+        let contentH = containerView.contentHeight
+        let padding: CGFloat = 24
         scrollView.contentSize = CGSize(
             width: scrollView.bounds.width,
-            height: contentHeight
+            height: contentH + padding
         )
         containerView.frame = CGRect(
             x: 12,
             y: 12,
             width: scrollView.bounds.width - 24,
-            height: containerView.contentHeight
+            height: contentH
         )
     }
     
@@ -1196,6 +1316,17 @@ class StreamingDemoViewController: UIViewController {
             y: max(0, scrollView.contentSize.height - scrollView.bounds.height)
         )
         scrollView.setContentOffset(bottomOffset, animated: true)
+    }
+}
+
+// MARK: - MarkdownContainerViewDelegate
+
+extension StreamingDemoViewController: MarkdownContainerViewDelegate {
+    func containerView(_ view: MarkdownContainerView, didChangeContentHeight height: CGFloat) {
+        updateScrollViewContentSize()
+        if autoScrollEnabled {
+            scrollToBottom()
+        }
     }
 }
 
@@ -1225,12 +1356,11 @@ extension StreamingDemoViewController {
     ## Swift 示例
     
     ```swift
-    let engine = MarkdownRenderEngine.makeDefault()
-    let container = MarkdownContainerView(engine: engine)
+    let container = MarkdownContainerView()
+    container.animationDriver = TypingDriver()
     
-    container.startStreaming()
-    container.appendText("New content...")
-    container.endStreaming()
+    container.appendStreamChunk("New content...")
+    container.finishStreaming()
     ```
     
     ## Python 示例
