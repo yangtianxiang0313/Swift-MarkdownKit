@@ -17,10 +17,10 @@ Pod::Spec.new do |s|
     - Document 缓存
   DESC
   
-  s.homepage     = 'https://code.devops.xiaohongshu.com/xhs-ios/XHSMarkdownKit'
+  s.homepage     = 'https://code.devops.xiaohongshu.com/yangtianxiang/xhsmarkdownkit'
   s.license      = { :type => 'MIT', :file => 'LICENSE' }
   s.author       = { '沃顿' => 'yangtianxiang@xiaohongshu.com' }
-  s.source       = { :git => 'https://code.devops.xiaohongshu.com/xhs-ios/XHSMarkdownKit.git', :tag => s.version.to_s }
+  s.source       = { :git => 'https://code.devops.xiaohongshu.com/yangtianxiang/XHSMarkdownKit.git', :tag => s.version.to_s }
   
   s.ios.deployment_target = '15.0'
   s.swift_version = '5.9'
