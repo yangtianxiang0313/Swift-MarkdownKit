@@ -22,7 +22,7 @@ Pod::Spec.new do |s|
   s.author       = { '沃顿' => 'yangtianxiang@xiaohongshu.com' }
   s.source       = { :git => 'https://code.devops.xiaohongshu.com/yangtianxiang/XHSMarkdownKit.git', :tag => s.version.to_s }
   
-  s.ios.deployment_target = '15.0'
+  s.ios.deployment_target = '14.0'
   s.swift_version = '5.9'
   
   s.source_files = 'Sources/XHSMarkdownKit/**/*.swift'

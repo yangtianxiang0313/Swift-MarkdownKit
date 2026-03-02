@@ -5,7 +5,7 @@ source 'git@code.devops.xiaohongshu.com:iOS/xhs-business-framework-spec.git'
 # 公有 Pod 源
 source 'https://cdn.cocoapods.org/'
 
-platform :ios, '15.0'
+platform :ios, '14.0'
 use_frameworks!
 
 # 指定项目路径
@@ -22,7 +22,7 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     target.build_configurations.each do |config|
-      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '14.0'
     end
   end
   

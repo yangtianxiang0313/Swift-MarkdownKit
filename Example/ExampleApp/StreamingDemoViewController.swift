@@ -1087,7 +1087,6 @@ class StreamingDemoViewController: UIViewController {
         
         alert.addTextField { textField in
             textField.placeholder = "名称"
-            textField.text = "自定义 \(Date().formatted(date: .omitted, time: .shortened))"
         }
         
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
