@@ -37,6 +37,12 @@ public struct DefaultTableViewStrategy: TableViewStrategy {
 
     public func configure(view: UIView, tableData: TableData, context: FragmentContext, theme: MarkdownTheme) {
         guard let tableView = view as? MarkdownTableView else { return }
-        tableView.configure(tableData: tableData, theme: theme.table)
+        
+        let config = TableConfiguration(
+            tableData: tableData,
+            tableStyle: theme.table
+        )
+        
+        tableView.configure(config)
     }
 }

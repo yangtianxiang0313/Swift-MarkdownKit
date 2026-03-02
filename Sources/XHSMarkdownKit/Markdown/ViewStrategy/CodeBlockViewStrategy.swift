@@ -37,10 +37,19 @@ public struct DefaultCodeBlockViewStrategy: CodeBlockViewStrategy {
 
     public func configure(view: UIView, content: CodeBlockContent, context: FragmentContext, theme: MarkdownTheme) {
         guard let codeView = view as? CodeBlockView else { return }
-        codeView.configure(
+        
+        // ViewStrategy 职责：解析 theme → Configuration
+        let config = CodeBlockConfiguration(
             code: content.code,
             language: content.language,
-            theme: theme.code
+            backgroundColor: theme.code.block.backgroundColor,
+            font: theme.code.font,
+            cornerRadius: theme.code.block.cornerRadius,
+            borderWidth: theme.code.block.borderWidth,
+            borderColor: theme.code.block.borderColor.cgColor,
+            padding: theme.code.block.padding
         )
+        
+        codeView.configure(config)
     }
 }

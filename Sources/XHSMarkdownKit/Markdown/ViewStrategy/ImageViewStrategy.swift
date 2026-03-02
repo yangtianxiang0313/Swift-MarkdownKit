@@ -33,6 +33,16 @@ public struct DefaultImageViewStrategy: ImageViewStrategy {
     public func makeView() -> UIView { MarkdownImageView() }
     public func configure(view: UIView, content: ImageContent, context: FragmentContext, theme: MarkdownTheme) {
         guard let imageView = view as? MarkdownImageView else { return }
-        imageView.configure(source: content.source, maxWidth: context[MaxWidthKey.self], theme: theme.image)
+        
+        let config = ImageConfiguration(
+            source: content.source,
+            maxWidth: context[MaxWidthKey.self],
+            cornerRadius: theme.image.cornerRadius,
+            placeholderHeight: theme.image.placeholderHeight,
+            placeholderColor: theme.image.placeholderColor,
+            maxImageWidth: theme.image.maxWidth
+        )
+        
+        imageView.configure(config)
     }
 }

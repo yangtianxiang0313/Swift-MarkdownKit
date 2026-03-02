@@ -11,6 +11,7 @@ public final class MarkdownTableView: UIView, HeightEstimatable {
     }()
 
     private let contentView = TableContentView()
+    private var config: TableConfiguration?
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
@@ -21,9 +22,10 @@ public final class MarkdownTableView: UIView, HeightEstimatable {
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
-    public func configure(tableData: TableData, theme: MarkdownTheme.TableStyle) {
-        contentView.tableData = tableData
-        contentView.tableStyle = theme
+    public func configure(_ config: TableConfiguration) {
+        self.config = config
+        contentView.tableData = config.tableData
+        contentView.tableStyle = config.tableStyle
         contentView.setNeedsDisplay()
         setNeedsLayout()
     }

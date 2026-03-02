@@ -15,10 +15,7 @@ public final class BlockQuoteTextView: UIView, HeightEstimatable, StreamableCont
 
     private var barViews: [UIView] = []
     private var fullAttributedString: NSAttributedString?
-    private var depth: Int = 1
-    private var barColor: UIColor = .separator
-    private var barWidth: CGFloat = 3.0
-    private var barLeftMargin: CGFloat = 8.0
+    private var config: BlockQuoteTextConfiguration?
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
@@ -28,29 +25,28 @@ public final class BlockQuoteTextView: UIView, HeightEstimatable, StreamableCont
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
-    public func configure(attributedString: NSAttributedString, depth: Int, theme: MarkdownTheme.BlockQuoteStyle) {
-        self.fullAttributedString = attributedString
-        self.depth = depth
-        self.barColor = theme.barColor
-        self.barWidth = theme.barWidth
-        self.barLeftMargin = theme.barLeftMargin
-        textView.attributedText = attributedString
+    public func configure(_ config: BlockQuoteTextConfiguration) {
+        self.fullAttributedString = config.attributedString
+        self.config = config
+        textView.attributedText = config.attributedString
         setupBars()
     }
 
     private func setupBars() {
+        guard let config = config else { return }
         barViews.forEach { $0.removeFromSuperview() }
         barViews.removeAll()
-        for _ in 0..<depth {
+        for _ in 0..<config.depth {
             let bar = UIView()
-            bar.backgroundColor = barColor
+            bar.backgroundColor = config.barColor
             addSubview(bar)
             barViews.append(bar)
         }
     }
 
     private var textLeftOffset: CGFloat {
-        CGFloat(depth) * (barWidth + barLeftMargin)
+        guard let config = config else { return 0 }
+        return CGFloat(config.depth) * (config.barWidth + config.barLeftMargin)
     }
 
     public func estimatedHeight(atDisplayedLength: Int, maxWidth: CGFloat) -> CGFloat {
@@ -78,9 +74,11 @@ public final class BlockQuoteTextView: UIView, HeightEstimatable, StreamableCont
 
     public override func layoutSubviews() {
         super.layoutSubviews()
+        guard let config = config else { return }
+        
         for (i, bar) in barViews.enumerated() {
-            let x = CGFloat(i) * (barWidth + barLeftMargin)
-            bar.frame = CGRect(x: x, y: 0, width: barWidth, height: bounds.height)
+            let x = CGFloat(i) * (config.barWidth + config.barLeftMargin)
+            bar.frame = CGRect(x: x, y: 0, width: config.barWidth, height: bounds.height)
         }
         textView.frame = CGRect(x: textLeftOffset, y: 0, width: max(0, bounds.width - textLeftOffset), height: bounds.height)
     }

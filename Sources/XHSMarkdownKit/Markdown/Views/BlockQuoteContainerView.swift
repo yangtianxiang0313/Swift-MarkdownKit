@@ -5,9 +5,7 @@ public final class BlockQuoteContainerView: UIView, HeightEstimatable {
     private var childFragments: [RenderFragment] = []
     private var childViews: [UIView] = []
     private var barView: UIView?
-    private var barColor: UIColor = .separator
-    private var barWidth: CGFloat = 3.0
-    private var barSpacing: CGFloat = 8.0
+    private var config: BlockQuoteContainerConfiguration?
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
@@ -16,11 +14,9 @@ public final class BlockQuoteContainerView: UIView, HeightEstimatable {
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
-    public func configure(childFragments: [RenderFragment], depth: Int, theme: MarkdownTheme.BlockQuoteStyle) {
-        self.childFragments = childFragments
-        self.barColor = theme.barColor
-        self.barWidth = theme.barWidth
-        self.barSpacing = theme.barLeftMargin
+    public func configure(_ config: BlockQuoteContainerConfiguration) {
+        self.childFragments = config.childFragments
+        self.config = config
 
         childViews.forEach { $0.removeFromSuperview() }
         childViews.removeAll()
@@ -37,13 +33,15 @@ public final class BlockQuoteContainerView: UIView, HeightEstimatable {
     }
 
     private var contentLeftOffset: CGFloat {
-        barWidth + barSpacing
+        guard let config = config else { return 0 }
+        return config.barWidth + config.barLeftMargin
     }
 
     private func setupBar() {
+        guard let config = config else { return }
         barView?.removeFromSuperview()
         let bar = UIView()
-        bar.backgroundColor = barColor
+        bar.backgroundColor = config.barColor
         addSubview(bar)
         barView = bar
     }
@@ -65,10 +63,12 @@ public final class BlockQuoteContainerView: UIView, HeightEstimatable {
 
     public override func layoutSubviews() {
         super.layoutSubviews()
+        guard let config = config else { return }
+        
         let offset = contentLeftOffset
         let contentWidth = max(0, bounds.width - offset)
 
-        barView?.frame = CGRect(x: 0, y: 0, width: barWidth, height: bounds.height)
+        barView?.frame = CGRect(x: 0, y: 0, width: config.barWidth, height: bounds.height)
 
         var y: CGFloat = 0
         for (i, fragment) in childFragments.enumerated() {

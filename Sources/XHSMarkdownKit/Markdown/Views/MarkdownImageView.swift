@@ -3,8 +3,7 @@ import UIKit
 public final class MarkdownImageView: UIView, HeightEstimatable {
 
     private let imageView = UIImageView()
-    private var placeholderHeight: CGFloat = 200
-    private var maxImageWidth: CGFloat = 300
+    private var config: ImageConfiguration?
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
@@ -16,20 +15,21 @@ public final class MarkdownImageView: UIView, HeightEstimatable {
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
-    public func configure(source: String?, maxWidth: CGFloat, theme: MarkdownTheme.ImageStyle) {
-        imageView.layer.cornerRadius = theme.cornerRadius
-        placeholderHeight = theme.placeholderHeight
-        maxImageWidth = min(maxWidth, theme.maxWidth)
-        imageView.backgroundColor = theme.placeholderColor
+    public func configure(_ config: ImageConfiguration) {
+        self.config = config
+        imageView.layer.cornerRadius = config.cornerRadius
+        imageView.backgroundColor = config.placeholderColor
     }
 
     public func estimatedHeight(atDisplayedLength: Int, maxWidth: CGFloat) -> CGFloat {
+        guard let config = config else { return 200 }
+        
         if let image = imageView.image {
             let ratio = image.size.height / max(1, image.size.width)
-            let displayWidth = min(maxWidth, maxImageWidth)
+            let displayWidth = min(maxWidth, config.maxImageWidth)
             return displayWidth * ratio
         }
-        return placeholderHeight
+        return config.placeholderHeight
     }
 
     public override func layoutSubviews() {

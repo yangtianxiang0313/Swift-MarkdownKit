@@ -31,8 +31,7 @@ public final class CodeBlockView: UIView, HeightEstimatable, StreamableContent {
     }()
 
     private var fullCode: String = ""
-    private var codeFont: UIFont = .monospacedSystemFont(ofSize: 14, weight: .regular)
-    private var codeStyle: MarkdownTheme.CodeBlockStyle = .default
+    private var config: CodeBlockConfiguration?
     private var headerHeight: CGFloat { languageLabel.text?.isEmpty == false ? 32 : 0 }
 
     public override init(frame: CGRect) {
@@ -48,34 +47,36 @@ public final class CodeBlockView: UIView, HeightEstimatable, StreamableContent {
 
     // MARK: - Configure
 
-    public func configure(code: String, language: String?, theme: MarkdownTheme.CodeStyle) {
-        self.fullCode = code
-        self.codeStyle = theme.block
-        self.codeFont = theme.font
-        backgroundColor = theme.block.backgroundColor
-        layer.cornerRadius = theme.block.cornerRadius
-        layer.borderWidth = theme.block.borderWidth
-        layer.borderColor = theme.block.borderColor.cgColor
+    public func configure(_ config: CodeBlockConfiguration) {
+        self.fullCode = config.code
+        self.config = config
+        
+        backgroundColor = config.backgroundColor
+        layer.cornerRadius = config.cornerRadius
+        layer.borderWidth = config.borderWidth
+        layer.borderColor = config.borderColor
 
-        if let lang = language, !lang.isEmpty {
+        if let lang = config.language, !lang.isEmpty {
             languageLabel.text = lang.uppercased()
             headerView.isHidden = false
-            headerView.backgroundColor = theme.block.backgroundColor
+            headerView.backgroundColor = config.backgroundColor
         } else {
             languageLabel.text = nil
             headerView.isHidden = true
         }
 
-        codeTextView.font = codeFont
+        codeTextView.font = config.font
         codeTextView.textColor = .label
-        codeTextView.text = code
+        codeTextView.text = config.code
         setNeedsLayout()
     }
 
     // MARK: - HeightEstimatable
 
     public func estimatedHeight(atDisplayedLength: Int, maxWidth: CGFloat) -> CGFloat {
-        let padding = codeStyle.padding
+        guard let config = config else { return 0 }
+        let padding = config.padding
+        
         let displayedCode: String
         if atDisplayedLength >= fullCode.count {
             displayedCode = fullCode
@@ -84,7 +85,7 @@ public final class CodeBlockView: UIView, HeightEstimatable, StreamableContent {
             displayedCode = String(fullCode[..<index])
         }
 
-        let attrString = NSAttributedString(string: displayedCode, attributes: [.font: codeFont])
+        let attrString = NSAttributedString(string: displayedCode, attributes: [.font: config.font])
         let boundingRect = attrString.boundingRect(
             with: CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
@@ -106,7 +107,8 @@ public final class CodeBlockView: UIView, HeightEstimatable, StreamableContent {
 
     public override func layoutSubviews() {
         super.layoutSubviews()
-        let padding = codeStyle.padding
+        guard let config = config else { return }
+        let padding = config.padding
         let hh = headerHeight
 
         headerView.frame = CGRect(x: 0, y: 0, width: bounds.width, height: hh)
@@ -121,7 +123,8 @@ public final class CodeBlockView: UIView, HeightEstimatable, StreamableContent {
     }
 
     private func updateCodeContentSize() {
-        let attrString = NSAttributedString(string: codeTextView.text ?? "", attributes: [.font: codeFont])
+        guard let config = config else { return }
+        let attrString = NSAttributedString(string: codeTextView.text ?? "", attributes: [.font: config.font])
         let size = attrString.boundingRect(
             with: CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],

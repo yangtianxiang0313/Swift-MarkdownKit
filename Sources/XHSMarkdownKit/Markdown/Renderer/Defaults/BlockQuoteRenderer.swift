@@ -12,16 +12,14 @@ public final class BlockQuoteContainerFragment: ContainerFragment, TransitionPre
     public let enterTransition: (any ViewTransition)? = nil
     public let exitTransition: (any ViewTransition)? = nil
 
-    private let depth: Int
-    private let theme: MarkdownTheme
+    private let config: BlockQuoteContainerConfiguration
 
-    public init(fragmentId: String, childFragments: [RenderFragment], depth: Int, theme: MarkdownTheme) {
+    public init(fragmentId: String, config: BlockQuoteContainerConfiguration) {
         self.fragmentId = fragmentId
         self.nodeType = .blockQuote
         self.reuseIdentifier = .blockQuoteContainer
-        self.childFragments = childFragments
-        self.depth = depth
-        self.theme = theme
+        self.childFragments = config.childFragments
+        self.config = config
     }
 
     public func makeView() -> UIView {
@@ -30,11 +28,7 @@ public final class BlockQuoteContainerFragment: ContainerFragment, TransitionPre
 
     public func configure(_ view: UIView) {
         guard let containerView = view as? BlockQuoteContainerView else { return }
-        containerView.configure(
-            childFragments: childFragments,
-            depth: depth,
-            theme: theme.blockQuote
-        )
+        containerView.configure(config)
     }
 }
 
@@ -49,11 +43,18 @@ public struct DefaultBlockQuoteRenderer: NodeRenderer {
         let children = childRenderer.renderChildrenWithPath(of: node, context: childContext, pathPrefix: "bq")
         let fragmentId = context.fragmentId(nodeType: "blockQuote", index: 0)
 
-        return [BlockQuoteContainerFragment(
-            fragmentId: fragmentId,
+        // 创建 Configuration
+        let config = BlockQuoteContainerConfiguration(
             childFragments: children,
             depth: context.blockQuoteDepth + 1,
-            theme: context.theme
+            barColor: context.theme.blockQuote.barColor,
+            barWidth: context.theme.blockQuote.barWidth,
+            barLeftMargin: context.theme.blockQuote.barLeftMargin
+        )
+
+        return [BlockQuoteContainerFragment(
+            fragmentId: fragmentId,
+            config: config
         )]
     }
 }
