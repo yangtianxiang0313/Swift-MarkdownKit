@@ -1,170 +1,205 @@
 import Foundation
 import XYMarkdown
 
-// MARK: - Base Adapter
+public final class XYNodeAdapterFactory {
+    public typealias AdapterBuilder = (Markup, XYNodeAdapterFactory) -> MarkdownNode
 
-class XYNodeAdapter: MarkdownNode {
-    let markup: Markup
-    var nodeType: FragmentNodeType { .document }
-    lazy var children: [MarkdownNode] = {
-        markup.children.map { XYNodeAdapter.adapt($0) }
-    }()
+    private var builders: [ObjectIdentifier: AdapterBuilder] = [:]
 
-    init(markup: Markup) {
-        self.markup = markup
+    public init(registerDefaults: Bool = true) {
+        if registerDefaults {
+            registerDefaultAdapters()
+        }
     }
 
-    static func adapt(_ markup: Markup) -> MarkdownNode {
-        switch markup {
-        case let node as XYMarkdown.Document:
-            return XYDocumentNode(markup: node)
-        case let node as XYMarkdown.Paragraph:
-            return XYParagraphNode(markup: node)
-        case let node as XYMarkdown.Heading:
-            return XYHeadingNode(markup: node)
-        case let node as XYMarkdown.CodeBlock:
-            return XYCodeBlockNode(markup: node)
-        case let node as XYMarkdown.BlockQuote:
-            return XYBlockQuoteNode(markup: node)
-        case let node as XYMarkdown.OrderedList:
-            return XYOrderedListNode(markup: node)
-        case let node as XYMarkdown.UnorderedList:
-            return XYUnorderedListNode(markup: node)
-        case let node as XYMarkdown.ListItem:
-            return XYListItemNode(markup: node)
-        case let node as XYMarkdown.Table:
-            return XYTableNode(markup: node)
-        case let node as XYMarkdown.ThematicBreak:
-            return XYThematicBreakNode(markup: node)
-        case let node as XYMarkdown.Image:
-            return XYImageNode(markup: node)
-        case let node as XYMarkdown.Text:
-            return XYTextNode(markup: node)
-        case let node as XYMarkdown.Strong:
-            return XYStrongNode(markup: node)
-        case let node as XYMarkdown.Emphasis:
-            return XYEmphasisNode(markup: node)
-        case let node as XYMarkdown.InlineCode:
-            return XYInlineCodeNode(markup: node)
-        case let node as XYMarkdown.Link:
-            return XYLinkNode(markup: node)
-        case let node as XYMarkdown.Strikethrough:
-            return XYStrikethroughNode(markup: node)
-        case _ as XYMarkdown.SoftBreak:
-            return XYSoftBreakNode(markup: markup)
-        case _ as XYMarkdown.LineBreak:
-            return XYLineBreakNode(markup: markup)
-        default:
-            return XYNodeAdapter(markup: markup)
+    public func register<M: Markup>(
+        _ markupType: M.Type,
+        builder: @escaping (M, XYNodeAdapterFactory) -> MarkdownNode
+    ) {
+        builders[ObjectIdentifier(markupType)] = { markup, factory in
+            guard let typedMarkup = markup as? M else {
+                preconditionFailure("Adapter expected \(M.self), got \(type(of: markup))")
+            }
+            return builder(typedMarkup, factory)
         }
+    }
+
+    public func adapt(_ markup: Markup) -> MarkdownNode {
+        let key = ObjectIdentifier(type(of: markup))
+        guard let builder = builders[key] else {
+            return XYUnknownNode(markup: markup, factory: self)
+        }
+        return builder(markup, self)
+    }
+
+    public static func makeDefault() -> XYNodeAdapterFactory {
+        XYNodeAdapterFactory()
+    }
+
+    private func registerDefaultAdapters() {
+        register(XYMarkdown.Document.self) { XYDocumentNode(markup: $0, factory: $1) }
+        register(XYMarkdown.Paragraph.self) { XYParagraphNode(markup: $0, factory: $1) }
+        register(XYMarkdown.Heading.self) { XYHeadingNode(markup: $0, factory: $1) }
+        register(XYMarkdown.CodeBlock.self) { XYCodeBlockNode(markup: $0, factory: $1) }
+        register(XYMarkdown.BlockQuote.self) { XYBlockQuoteNode(markup: $0, factory: $1) }
+        register(XYMarkdown.OrderedList.self) { XYOrderedListNode(markup: $0, factory: $1) }
+        register(XYMarkdown.UnorderedList.self) { XYUnorderedListNode(markup: $0, factory: $1) }
+        register(XYMarkdown.ListItem.self) { XYListItemNode(markup: $0, factory: $1) }
+        register(XYMarkdown.Table.self) { XYTableNode(markup: $0, factory: $1) }
+        register(XYMarkdown.ThematicBreak.self) { XYThematicBreakNode(markup: $0, factory: $1) }
+        register(XYMarkdown.Image.self) { XYImageNode(markup: $0, factory: $1) }
+        register(XYMarkdown.Text.self) { XYTextNode(markup: $0, factory: $1) }
+        register(XYMarkdown.Strong.self) { XYStrongNode(markup: $0, factory: $1) }
+        register(XYMarkdown.Emphasis.self) { XYEmphasisNode(markup: $0, factory: $1) }
+        register(XYMarkdown.InlineCode.self) { XYInlineCodeNode(markup: $0, factory: $1) }
+        register(XYMarkdown.Link.self) { XYLinkNode(markup: $0, factory: $1) }
+        register(XYMarkdown.Strikethrough.self) { XYStrikethroughNode(markup: $0, factory: $1) }
+        register(XYMarkdown.SoftBreak.self) { XYSoftBreakNode(markup: $0, factory: $1) }
+        register(XYMarkdown.LineBreak.self) { XYLineBreakNode(markup: $0, factory: $1) }
+    }
+}
+
+// MARK: - Base Adapters
+
+class XYNodeAdapter: MarkdownNode {
+    let factory: XYNodeAdapterFactory
+    var nodeType: FragmentNodeType { .document }
+    var children: [MarkdownNode] { [] }
+
+    init(factory: XYNodeAdapterFactory) {
+        self.factory = factory
+    }
+}
+
+class XYTypedNodeAdapter<Source: Markup>: XYNodeAdapter {
+    let markup: Source
+    override var children: [MarkdownNode] {
+        markup.children.map { factory.adapt($0) }
+    }
+
+    init(markup: Source, factory: XYNodeAdapterFactory) {
+        self.markup = markup
+        super.init(factory: factory)
+    }
+}
+
+final class XYUnknownNode: XYNodeAdapter {
+    private let markup: Markup
+    override var children: [MarkdownNode] {
+        markup.children.map { factory.adapt($0) }
+    }
+
+    init(markup: Markup, factory: XYNodeAdapterFactory) {
+        self.markup = markup
+        super.init(factory: factory)
     }
 }
 
 // MARK: - Block Adapters
 
-final class XYDocumentNode: XYNodeAdapter, DocumentNode {
+final class XYDocumentNode: XYTypedNodeAdapter<XYMarkdown.Document>, DocumentNode {
     override var nodeType: FragmentNodeType { .document }
 }
 
-final class XYParagraphNode: XYNodeAdapter, ParagraphNode {
+final class XYParagraphNode: XYTypedNodeAdapter<XYMarkdown.Paragraph>, ParagraphNode {
     override var nodeType: FragmentNodeType { .paragraph }
     var inlineChildren: [MarkdownNode] { children }
 }
 
-final class XYHeadingNode: XYNodeAdapter, HeadingNode {
+final class XYHeadingNode: XYTypedNodeAdapter<XYMarkdown.Heading>, HeadingNode {
     override var nodeType: FragmentNodeType { .heading(level) }
-    var level: Int { (markup as? XYMarkdown.Heading)?.level ?? 1 }
+    var level: Int { markup.level }
     var inlineChildren: [MarkdownNode] { children }
 }
 
-final class XYCodeBlockNode: XYNodeAdapter, CodeBlockNode {
+final class XYCodeBlockNode: XYTypedNodeAdapter<XYMarkdown.CodeBlock>, CodeBlockNode {
     override var nodeType: FragmentNodeType { .codeBlock }
-    var code: String { (markup as? XYMarkdown.CodeBlock)?.code ?? "" }
-    var language: String? { (markup as? XYMarkdown.CodeBlock)?.language }
+    var code: String { markup.code }
+    var language: String? { markup.language }
 }
 
-final class XYBlockQuoteNode: XYNodeAdapter, BlockQuoteNode {
+final class XYBlockQuoteNode: XYTypedNodeAdapter<XYMarkdown.BlockQuote>, BlockQuoteNode {
     override var nodeType: FragmentNodeType { .blockQuote }
 }
 
-final class XYOrderedListNode: XYNodeAdapter, OrderedListNode {
+final class XYOrderedListNode: XYTypedNodeAdapter<XYMarkdown.OrderedList>, OrderedListNode {
     override var nodeType: FragmentNodeType { .orderedList }
 }
 
-final class XYUnorderedListNode: XYNodeAdapter, UnorderedListNode {
+final class XYUnorderedListNode: XYTypedNodeAdapter<XYMarkdown.UnorderedList>, UnorderedListNode {
     override var nodeType: FragmentNodeType { .unorderedList }
 }
 
-final class XYListItemNode: XYNodeAdapter, ListItemNode {
+final class XYListItemNode: XYTypedNodeAdapter<XYMarkdown.ListItem>, ListItemNode {
     override var nodeType: FragmentNodeType { .listItem }
     var checkbox: Bool? {
-        guard let item = markup as? XYMarkdown.ListItem,
-              let cb = item.checkbox else { return nil }
-        return cb == .checked
+        guard let checkbox = markup.checkbox else { return nil }
+        return checkbox == .checked
     }
 }
 
-final class XYTableNode: XYNodeAdapter, TableNode {
+final class XYTableNode: XYTypedNodeAdapter<XYMarkdown.Table>, TableNode {
     override var nodeType: FragmentNodeType { .table }
 
     var headerCells: [[MarkdownNode]] {
-        guard let table = markup as? XYMarkdown.Table else { return [] }
-        return table.head.cells.map { cell in
-            cell.children.map { XYNodeAdapter.adapt($0) }
+        markup.head.cells.map { cell in
+            cell.children.map { factory.adapt($0) }
         }
     }
 
     var bodyRows: [[[MarkdownNode]]] {
-        guard let table = markup as? XYMarkdown.Table else { return [] }
-        return table.body.rows.map { row in
+        markup.body.rows.map { row in
             row.cells.map { cell in
-                cell.children.map { XYNodeAdapter.adapt($0) }
+                cell.children.map { factory.adapt($0) }
             }
         }
     }
 
     var columnAlignments: [TableColumnAlignment] {
-        guard let table = markup as? XYMarkdown.Table else { return [] }
-        return table.columnAlignments.map { alignment in
-            switch alignment {
-            case .left: return .left
-            case .center: return .center
-            case .right: return .right
-            default: return .none
-            }
-        }
+        markup.columnAlignments.map { $0?.xhsAlignment ?? .none }
     }
 }
 
-final class XYThematicBreakNode: XYNodeAdapter, ThematicBreakNode {
+final class XYThematicBreakNode: XYTypedNodeAdapter<XYMarkdown.ThematicBreak>, ThematicBreakNode {
     override var nodeType: FragmentNodeType { .thematicBreak }
 }
 
-final class XYImageNode: XYNodeAdapter, ImageNode {
+final class XYImageNode: XYTypedNodeAdapter<XYMarkdown.Image>, ImageNode {
     override var nodeType: FragmentNodeType { .image }
-    var source: String? { (markup as? XYMarkdown.Image)?.source }
-    var title: String? { (markup as? XYMarkdown.Image)?.title }
-    var altText: String { (markup as? XYMarkdown.Image)?.plainText ?? "" }
+    var source: String? { markup.source }
+    var title: String? { markup.title }
+    var altText: String { markup.plainText }
 }
 
 // MARK: - Inline Adapters
 
-final class XYTextNode: XYNodeAdapter, TextNode {
-    var text: String { (markup as? XYMarkdown.Text)?.string ?? "" }
+final class XYTextNode: XYTypedNodeAdapter<XYMarkdown.Text>, TextNode {
+    var text: String { markup.string }
 }
 
-final class XYStrongNode: XYNodeAdapter, StrongNode {}
-final class XYEmphasisNode: XYNodeAdapter, EmphasisNode {}
+final class XYStrongNode: XYTypedNodeAdapter<XYMarkdown.Strong>, StrongNode {}
+final class XYEmphasisNode: XYTypedNodeAdapter<XYMarkdown.Emphasis>, EmphasisNode {}
 
-final class XYInlineCodeNode: XYNodeAdapter, InlineCodeNode {
-    var code: String { (markup as? XYMarkdown.InlineCode)?.code ?? "" }
+final class XYInlineCodeNode: XYTypedNodeAdapter<XYMarkdown.InlineCode>, InlineCodeNode {
+    var code: String { markup.code }
 }
 
-final class XYLinkNode: XYNodeAdapter, LinkNode {
-    var destination: String? { (markup as? XYMarkdown.Link)?.destination }
-    var title: String? { (markup as? XYMarkdown.Link)?.title }
+final class XYLinkNode: XYTypedNodeAdapter<XYMarkdown.Link>, LinkNode {
+    var destination: String? { markup.destination }
+    var title: String? { markup.title }
 }
 
-final class XYStrikethroughNode: XYNodeAdapter, StrikethroughNode {}
-final class XYSoftBreakNode: XYNodeAdapter, SoftBreakNode {}
-final class XYLineBreakNode: XYNodeAdapter, LineBreakNode {}
+final class XYStrikethroughNode: XYTypedNodeAdapter<XYMarkdown.Strikethrough>, StrikethroughNode {}
+final class XYSoftBreakNode: XYTypedNodeAdapter<XYMarkdown.SoftBreak>, SoftBreakNode {}
+final class XYLineBreakNode: XYTypedNodeAdapter<XYMarkdown.LineBreak>, LineBreakNode {}
+
+private extension XYMarkdown.Table.ColumnAlignment {
+    var xhsAlignment: TableColumnAlignment {
+        switch self {
+        case .left: return .left
+        case .center: return .center
+        case .right: return .right
+        @unknown default: return .none
+        }
+    }
+}

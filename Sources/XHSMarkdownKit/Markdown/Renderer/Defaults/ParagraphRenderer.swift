@@ -22,18 +22,17 @@ public struct DefaultParagraphRenderer: LeafNodeRenderer {
         let theme = context.theme
         let fragmentId = context.fragmentId(nodeType: "paragraph", index: 0)
 
-        return [ViewFragment(
+        return [TextFragment(
             fragmentId: fragmentId,
             nodeType: .paragraph,
             reuseIdentifier: .textView,
             context: fragmentContext,
-            content: attrString,
-            totalContentLength: attrString.length,
+            attributedString: attrString,
             enterTransition: strategy.enterTransition,
             exitTransition: strategy.exitTransition,
             makeView: { strategy.makeView() },
-            configure: { view in
-                strategy.configure(view: view, attributedString: attrString, context: fragmentContext, theme: theme)
+            configure: { view, renderedText in
+                strategy.configure(view: view, attributedString: renderedText, context: fragmentContext, theme: theme)
             }
         )]
     }

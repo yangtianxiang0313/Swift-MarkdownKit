@@ -9,7 +9,8 @@ public enum FragmentOptimizer {
     ) -> [RenderFragment] {
         var result = fragments
 
-        result = merge(result)
+        // Merge stage is intentionally disabled for now.
+        // Keep original fragment boundaries and only run filter + spacing.
         result = filter(result)
         setSpacing(on: &result, resolver: spacingResolver, theme: theme)
 
@@ -18,7 +19,11 @@ public enum FragmentOptimizer {
 
     // MARK: - Merge
 
-    private static func merge(_ fragments: [RenderFragment]) -> [RenderFragment] {
+    private static func merge(
+        _ fragments: [RenderFragment],
+        resolver: BlockSpacingResolving,
+        theme: MarkdownTheme
+    ) -> [RenderFragment] {
         guard fragments.count > 1 else { return fragments }
         var result: [RenderFragment] = []
 
@@ -28,7 +33,13 @@ public enum FragmentOptimizer {
             while i + 1 < fragments.count,
                   let mergeable = current as? MergeableFragment,
                   mergeable.canMerge(with: fragments[i + 1]) {
-                current = mergeable.merged(with: fragments[i + 1])
+                let next = fragments[i + 1]
+                let spacing = resolver.spacing(
+                    after: current.nodeType,
+                    before: next.nodeType,
+                    theme: theme
+                )
+                current = mergeable.merged(with: next, interFragmentSpacing: spacing)
                 i += 1
             }
             result.append(current)

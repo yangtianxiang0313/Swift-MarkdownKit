@@ -1,6 +1,6 @@
 import UIKit
 
-public struct CodeBlockContent {
+public struct CodeBlockContent: FragmentContent {
     public let code: String
     public let language: String?
     public let stateKey: String
@@ -9,6 +9,13 @@ public struct CodeBlockContent {
         self.code = code
         self.language = language
         self.stateKey = stateKey
+    }
+    
+    // MARK: - FragmentContent
+
+    public func isEqual(to other: any FragmentContent) -> Bool {
+        guard let rhs = other as? CodeBlockContent else { return false }
+        return stateKey == rhs.stateKey
     }
 }
 

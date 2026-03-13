@@ -7,6 +7,15 @@ public protocol MarkdownNode: AnyObject {
     var children: [MarkdownNode] { get }
 }
 
+// MARK: - Protocol Conformance Check
+
+extension MarkdownNode {
+    /// 检查节点是否符合指定协议
+    public func `conforms`<T>(to type: T.Type) -> Bool {
+        return self is T
+    }
+}
+
 // MARK: - Specific Node Protocols
 
 public protocol DocumentNode: MarkdownNode {}
@@ -60,6 +69,6 @@ public protocol LineBreakNode: MarkdownNode {}
 
 // MARK: - Supporting Types
 
-public enum TableColumnAlignment {
+public enum TableColumnAlignment: Equatable {
     case left, center, right, none
 }

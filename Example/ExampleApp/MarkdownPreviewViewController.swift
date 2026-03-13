@@ -536,10 +536,10 @@ class MarkdownPreviewViewController: UIViewController {
     ```swift
     // 这是一个较长的代码块，用于测试横向滚动
     let container = MarkdownContainerView(theme: .default, pipeline: MarkdownRenderPipeline())
-    container.animationDriver = TypingDriver(charactersPerSecond: 30, tickInterval: 1.0 / 60.0)
+    container.setAnimationPreset(.typing(charactersPerSecond: 30))
     container.delegate = self
     
-    container.appendStreamChunk("# Hello World\n\nThis is a **streaming** demo with `TypingDriver` animation.")
+    container.appendStreamChunk("# Hello World\n\nThis is a **streaming** demo with animation preset API.")
     container.finishStreaming()
     ```
     

@@ -15,16 +15,37 @@ let package = Package(
         ),
     ],
     dependencies: [
-        // XYMarkdown 作为解析层
-        // 注意：如果 XYMarkdown 有 SPM 支持，取消下面的注释
-        // .package(url: "https://code.devops.xiaohongshu.com/xhs-ios/XYMarkdown.git", from: "0.0.2"),
+        // 本地 vendored 依赖（XYMarkdown / XYCmark）
     ],
     targets: [
         .target(
+            name: "XYCmark",
+            path: "Sources/XYCmark/Sources/libcmark_gfm",
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("include")
+            ]
+        ),
+        .target(
+            name: "CAtomic",
+            path: "Sources/XYMarkdown/Sources/CAtomic",
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("include")
+            ]
+        ),
+        .target(
+            name: "XYMarkdown",
+            dependencies: [
+                "XYCmark",
+                "CAtomic"
+            ],
+            path: "Sources/XYMarkdown/Sources/Markdown"
+        ),
+        .target(
             name: "XHSMarkdownKit",
             dependencies: [
-                // 如果 XYMarkdown 有 SPM 支持，取消下面的注释
-                // "XYMarkdown",
+                "XYMarkdown",
             ],
             path: "Sources/XHSMarkdownKit"
         ),
@@ -33,7 +54,7 @@ let package = Package(
             dependencies: ["XHSMarkdownKit"],
             path: "Tests/XHSMarkdownKitTests",
             resources: [
-                .copy("Fixtures")
+                .copy("../Fixtures")
             ]
         ),
     ]

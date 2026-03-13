@@ -16,7 +16,7 @@ public struct DefaultThematicBreakRenderer: LeafNodeRenderer {
             nodeType: .thematicBreak,
             reuseIdentifier: .thematicBreakView,
             context: fragmentContext,
-            content: (),
+            content: EmptyFragmentContent(),
             totalContentLength: 1,
             enterTransition: strategy.enterTransition,
             exitTransition: strategy.exitTransition,

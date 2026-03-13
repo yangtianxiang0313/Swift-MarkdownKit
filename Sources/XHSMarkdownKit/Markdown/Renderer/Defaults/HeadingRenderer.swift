@@ -43,18 +43,17 @@ public struct DefaultHeadingRenderer: LeafNodeRenderer {
         let fragmentContext = context.makeFragmentContext()
         let fragmentId = context.fragmentId(nodeType: "heading", index: level)
 
-        return [ViewFragment(
+        return [TextFragment(
             fragmentId: fragmentId,
             nodeType: .heading(level),
             reuseIdentifier: .textView,
             context: fragmentContext,
-            content: attrString,
-            totalContentLength: attrString.length,
+            attributedString: attrString,
             enterTransition: strategy.enterTransition,
             exitTransition: strategy.exitTransition,
             makeView: { strategy.makeView() },
-            configure: { view in
-                strategy.configure(view: view, attributedString: attrString, context: fragmentContext, theme: theme)
+            configure: { view, renderedText in
+                strategy.configure(view: view, attributedString: renderedText, context: fragmentContext, theme: theme)
             }
         )]
     }

@@ -51,8 +51,10 @@ public struct RenderContext {
     }
 
     public func enteringList() -> RenderContext {
-        addingIndent(theme.list.nestingIndent)
-            .setting(ListDepthKey.self, to: listDepth + 1)
+        let nextDepth = listDepth + 1
+        let indentDelta: CGFloat = nextDepth > 1 ? theme.list.nestingIndent : 0
+        return addingIndent(indentDelta)
+            .setting(ListDepthKey.self, to: nextDepth)
     }
 
     public func enteringBlockQuote() -> RenderContext {

@@ -30,16 +30,17 @@ public final class ViewFragment: LeafFragment, ProgressivelyRevealable, Transiti
     // MARK: - Content
 
     public let context: FragmentContext
-    public let content: Any
+    public let content: any FragmentContent
+    private let maxWidthHint: CGFloat
 
     // MARK: - Init
 
-    public init(
+    public init<Content: FragmentContent>(
         fragmentId: String,
         nodeType: FragmentNodeType,
         reuseIdentifier: ReuseIdentifier,
         context: FragmentContext = FragmentContext(),
-        content: Any,
+        content: Content,
         totalContentLength: Int = 1,
         enterTransition: (any ViewTransition)? = nil,
         exitTransition: (any ViewTransition)? = nil,
@@ -51,6 +52,7 @@ public final class ViewFragment: LeafFragment, ProgressivelyRevealable, Transiti
         self.reuseIdentifier = reuseIdentifier
         self.context = context
         self.content = content
+        self.maxWidthHint = context[MaxWidthKey.self]
         self.totalContentLength = totalContentLength
         self.enterTransition = enterTransition
         self.exitTransition = exitTransition
@@ -63,6 +65,21 @@ public final class ViewFragment: LeafFragment, ProgressivelyRevealable, Transiti
 
 extension ViewFragment: AttributedStringProviding {
     public var attributedString: NSAttributedString? {
-        content as? NSAttributedString
+        content.attributedStringValue
+    }
+}
+
+// MARK: - RenderFragment Content Equality
+
+extension ViewFragment {
+    public func isContentEqual(to other: any RenderFragment) -> Bool {
+        guard let rhs = other as? ViewFragment else { return false }
+        guard fragmentId == rhs.fragmentId else { return false }
+        guard nodeType == rhs.nodeType else { return false }
+        guard spacingAfter == rhs.spacingAfter else { return false }
+        guard reuseIdentifier.rawValue == rhs.reuseIdentifier.rawValue else { return false }
+        guard maxWidthHint == rhs.maxWidthHint else { return false }
+        guard totalContentLength == rhs.totalContentLength else { return false }
+        return content.isEqual(to: rhs.content)
     }
 }

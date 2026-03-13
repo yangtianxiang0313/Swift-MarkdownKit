@@ -1,6 +1,6 @@
 import UIKit
 
-public struct ImageContent {
+public struct ImageContent: FragmentContent {
     public let source: String?
     public let title: String?
     public let altText: String
@@ -9,6 +9,13 @@ public struct ImageContent {
         self.source = source
         self.title = title
         self.altText = altText
+    }
+
+    public func isEqual(to other: any FragmentContent) -> Bool {
+        guard let rhs = other as? ImageContent else { return false }
+        return source == rhs.source
+            && title == rhs.title
+            && altText == rhs.altText
     }
 }
 

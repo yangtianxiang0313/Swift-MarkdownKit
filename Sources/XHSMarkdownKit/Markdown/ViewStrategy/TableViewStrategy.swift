@@ -1,6 +1,6 @@
 import UIKit
 
-public struct TableData {
+public struct TableData: FragmentContent {
     public let headers: [NSAttributedString]
     public let rows: [[NSAttributedString]]
     public let alignments: [TableColumnAlignment]
@@ -9,6 +9,24 @@ public struct TableData {
         self.headers = headers
         self.rows = rows
         self.alignments = alignments
+    }
+
+    public func isEqual(to other: any FragmentContent) -> Bool {
+        guard let rhs = other as? TableData else { return false }
+        return alignments == rhs.alignments
+            && headers.elementsEqual(rhs.headers, by: { $0.isEqual($1) })
+            && rowsEqual(lhs: rows, rhs: rhs.rows)
+    }
+
+    private func rowsEqual(lhs: [[NSAttributedString]], rhs: [[NSAttributedString]]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        for (lhsRow, rhsRow) in zip(lhs, rhs) {
+            guard lhsRow.count == rhsRow.count else { return false }
+            for (lhsCell, rhsCell) in zip(lhsRow, rhsRow) where !lhsCell.isEqual(rhsCell) {
+                return false
+            }
+        }
+        return true
     }
 }
 

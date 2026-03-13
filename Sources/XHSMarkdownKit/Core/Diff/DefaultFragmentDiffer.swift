@@ -11,6 +11,8 @@ public struct DefaultFragmentDiffer: FragmentDiffing {
         let oldSet = Set(oldIds)
         let newSet = Set(newIds)
         let oldMap = Dictionary(uniqueKeysWithValues: old.map { ($0.fragmentId, $0) })
+        let oldIndexMap = Dictionary(uniqueKeysWithValues: old.enumerated().map { ($0.element.fragmentId, $0.offset) })
+        let newIndexMap = Dictionary(uniqueKeysWithValues: new.enumerated().map { ($0.element.fragmentId, $0.offset) })
 
         for (index, fragment) in new.enumerated() {
             if !oldSet.contains(fragment.fragmentId) {
@@ -22,6 +24,13 @@ public struct DefaultFragmentDiffer: FragmentDiffing {
             if !newSet.contains(fragment.fragmentId) {
                 changes.append(.remove(fragmentId: fragment.fragmentId, at: index))
             }
+        }
+
+        for fragmentId in newIds where oldSet.contains(fragmentId) {
+            guard let oldIndex = oldIndexMap[fragmentId], let newIndex = newIndexMap[fragmentId], oldIndex != newIndex else {
+                continue
+            }
+            changes.append(.move(fragmentId: fragmentId, from: oldIndex, to: newIndex))
         }
 
         for newFragment in new {
@@ -46,10 +55,6 @@ public struct DefaultFragmentDiffer: FragmentDiffing {
     }
 
     private func fragmentContentEqual(_ a: RenderFragment, _ b: RenderFragment) -> Bool {
-        if let aText = a as? AttributedStringProviding,
-           let bText = b as? AttributedStringProviding {
-            return aText.attributedString == bText.attributedString
-        }
-        return false
+        a.isContentEqual(to: b)
     }
 }

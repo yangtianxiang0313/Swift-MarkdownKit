@@ -135,6 +135,16 @@ class CustomRendererDemoViewController: UIViewController {
 
 // MARK: - Custom Renderer
 
+private struct CustomCodeFragmentContent: FragmentContent {
+    let code: String
+    let language: String
+
+    func isEqual(to other: any FragmentContent) -> Bool {
+        guard let rhs = other as? CustomCodeFragmentContent else { return false }
+        return code == rhs.code && language == rhs.language
+    }
+}
+
 final class CustomCodeBlockRenderer: LeafNodeRenderer {
 
     func renderLeaf(node: MarkdownNode, context: RenderContext) -> [RenderFragment] {
@@ -142,12 +152,14 @@ final class CustomCodeBlockRenderer: LeafNodeRenderer {
         let code = codeBlock.code
         let language = codeBlock.language ?? "text"
         let fragmentId = context.fragmentId(nodeType: "customCode", index: 0)
+        let content = CustomCodeFragmentContent(code: code, language: language)
 
         return [ViewFragment(
             fragmentId: fragmentId,
             nodeType: .codeBlock,
             reuseIdentifier: ReuseIdentifier(rawValue: "customCodeBlock"),
-            content: (code: code, language: language),
+            content: content,
+            totalContentLength: code.count,
             makeView: { CustomCodeBlockView() },
             configure: { view in
                 guard let codeView = view as? CustomCodeBlockView else { return }
@@ -157,7 +169,7 @@ final class CustomCodeBlockRenderer: LeafNodeRenderer {
     }
 }
 
-class CustomCodeBlockView: UIView, HeightEstimatable {
+class CustomCodeBlockView: UIView, HeightEstimatable, StreamableContent {
 
     private let languageLabel: UILabel = {
         let label = UILabel()
@@ -174,6 +186,8 @@ class CustomCodeBlockView: UIView, HeightEstimatable {
         return label
     }()
 
+    private var fullCode: String = ""
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = UIColor.systemGray6
@@ -187,19 +201,28 @@ class CustomCodeBlockView: UIView, HeightEstimatable {
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
     func configure(code: String, language: String) {
+        fullCode = code
         languageLabel.text = language.uppercased()
         codeLabel.text = code
     }
 
     func estimatedHeight(atDisplayedLength: Int, maxWidth: CGFloat) -> CGFloat {
         let codeWidth = maxWidth - 24
-        let size = (codeLabel.text ?? "").boundingRect(
+        let clamped = max(0, min(atDisplayedLength, fullCode.count))
+        let displayed = String(fullCode.prefix(clamped))
+        let size = displayed.boundingRect(
             with: CGSize(width: codeWidth, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin],
             attributes: [.font: codeLabel.font as Any],
             context: nil
         )
         return ceil(size.height) + 50
+    }
+
+    func reveal(upTo length: Int) {
+        let clamped = max(0, min(length, fullCode.count))
+        codeLabel.text = String(fullCode.prefix(clamped))
+        setNeedsLayout()
     }
 
     override func layoutSubviews() {
