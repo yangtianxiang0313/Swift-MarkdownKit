@@ -121,7 +121,7 @@ final class MarkdownContainerViewTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(mapper.callCount, 1)
     }
 
-    func testContainerViewSetContractRenderModelWithAnimationPlanUsesMapper() throws {
+    func testContainerViewSetContractRenderModelAutoCompilesAnimationPlanUsesMapper() throws {
         let view = MarkdownContainerView(theme: .default)
         view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
 
@@ -132,16 +132,7 @@ final class MarkdownContainerViewTests: XCTestCase {
 
         let engine = MarkdownContractEngine()
         let model = try engine.render("# Title")
-        let animationPlan = MarkdownContract.CompiledAnimationPlan(
-            intents: [],
-            timeline: .init(
-                tracks: [],
-                phases: [],
-                constraints: []
-            )
-        )
-
-        view.setContractRenderModel(model, animationPlan: animationPlan)
+        view.setContractRenderModel(model)
 
         XCTAssertGreaterThanOrEqual(mapper.callCount, 1)
     }

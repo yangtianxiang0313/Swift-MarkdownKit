@@ -54,8 +54,7 @@ This document defines the implementation checklist for rewriting the animation a
   - Single-writer executor with versioned transactions.
 
 ### Orchestration + Policy
-- `Sources/XHSMarkdownKit/Core/AnimationOrchestration/AnimationPlanProvider.swift`
-- `Sources/XHSMarkdownKit/Core/AnimationOrchestration/DefaultAnimationPlanProvider.swift`
+- `Sources/XHSMarkdownKit/Core/AnimationOrchestration/ContractAnimationPlanMapper.swift`
 - `Sources/XHSMarkdownKit/Core/AnimationOrchestration/ConflictPolicy.swift`
 - `Sources/XHSMarkdownKit/Core/AnimationOrchestration/FragmentLifecycleController.swift`
 
@@ -94,7 +93,7 @@ This document defines the implementation checklist for rewriting the animation a
 
 ### Phase 2 (Orchestration)
 - Add DAG dependencies and barrier semantics.
-- Add plan provider from fragment changes.
+- Add contract plan mapping from `CompiledAnimationPlan` to runtime `AnimationPlan`.
 - Add version cancellation behavior.
 - Deliverable: serial/parallel step sequencing works.
 
@@ -125,7 +124,7 @@ This document defines the implementation checklist for rewriting the animation a
 
 ## Implementation Status (Current)
 - Done: runtime/plan/orchestration/effect/capability/layout layers are split into dedicated directories.
-- Done: container animation entry is `AnimationEngine` + `AnimationPlanProvider`; legacy driver path removed from production pipeline.
+- Done: container animation entry is `AnimationEngine` + contract-native planning (`RenderModelDiffer` + `RenderModelAnimationCompiler` + `ContractAnimationPlanMapper`); legacy provider path removed from production pipeline.
 - Done: schedule policies support `groupedByPhase` / `serialByChange` / `parallelByChange`.
 - Done: submission policies support `interruptCurrent` and `queueLatest`.
 - Done: queue-latest rebasing is implemented via transaction `planBuilder`; queued latest updates are rebuilt against committed state at execution time.

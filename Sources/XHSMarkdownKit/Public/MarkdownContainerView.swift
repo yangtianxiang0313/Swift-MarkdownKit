@@ -18,8 +18,9 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
             registerConfigurableEffects(charactersPerSecond: typingCharactersPerSecond)
         }
     }
-    public var animationPlanProvider: AnimationPlanProvider = DefaultAnimationPlanProvider()
     public var contractAnimationPlanMapper: any ContractAnimationPlanMapping = DefaultContractAnimationPlanMapper()
+    public var contractRenderModelDiffer: any MarkdownContract.RenderModelDiffer = MarkdownContract.DefaultRenderModelDiffer()
+    public var contractAnimationCompiler: any MarkdownContract.RenderModelAnimationCompiler = MarkdownContract.DefaultRenderModelAnimationCompiler()
     public var conflictPolicy: ConflictPolicy = .default
     public var animationEffectKey: AnimationEffectKey = .instant
     public var animationSchedulingMode: AnimationSchedulingMode {
@@ -82,9 +83,18 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
         _ model: MarkdownContract.RenderModel,
         animationPlan: MarkdownContract.CompiledAnimationPlan? = nil
     ) {
+        let resolvedPlan: MarkdownContract.CompiledAnimationPlan?
+        if let animationPlan {
+            resolvedPlan = animationPlan
+        } else {
+            let oldModel = currentContractModel ?? Self.emptyRenderModel(documentId: model.documentId)
+            let diff = contractRenderModelDiffer.diff(old: oldModel, new: model)
+            resolvedPlan = diff.isEmpty ? nil : contractAnimationCompiler.compile(old: oldModel, new: model, diff: diff)
+        }
+
         currentContractModel = model
         contractStreamingSession = nil
-        pendingContractAnimationPlan = animationPlan
+        pendingContractAnimationPlan = resolvedPlan
         rerender()
     }
 
@@ -210,23 +220,19 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
             sourceFragmentsHint: oldFragments,
             targetFragments: newFragments,
             submissionMode: policy.submissionMode,
-            planBuilder: { [differ, animationPlanProvider, contractAnimationPlanMapper, policy, contractAnimationPlan] source, target in
+            planBuilder: { [differ, contractAnimationPlanMapper, policy, contractAnimationPlan] source, target in
                 let rebuiltChanges = differ.diff(old: source, new: target)
                 if let contractAnimationPlan {
-                    return contractAnimationPlanMapper.makePlan(
+                    let mappedPlan = contractAnimationPlanMapper.makePlan(
                         contractPlan: contractAnimationPlan,
                         oldFragments: source,
                         newFragments: target,
                         changes: rebuiltChanges,
                         defaultEffectKey: policy.defaultEffectKey
                     )
+                    return Self.schedule(mappedPlan, mode: policy.schedulingMode)
                 }
-                return animationPlanProvider.makePlan(
-                    oldFragments: source,
-                    newFragments: target,
-                    changes: rebuiltChanges,
-                    policy: policy
-                )
+                return .empty
             }
         )
         animationEngine.submit(transaction, to: self)
@@ -326,6 +332,45 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
     private func notifyHeightChange() {
         invalidateIntrinsicContentSize()
         delegate?.containerView(self, didChangeContentHeight: contentHeight)
+    }
+
+    private static func emptyRenderModel(documentId: String) -> MarkdownContract.RenderModel {
+        MarkdownContract.RenderModel(documentId: documentId, blocks: [])
+    }
+
+    private static func schedule(_ plan: AnimationPlan, mode: AnimationSchedulingMode) -> AnimationPlan {
+        switch mode {
+        case .groupedByPhase:
+            return plan
+        case .serialByChange:
+            var previous: AnimationStep.StepID?
+            let steps = plan.steps.map { step -> AnimationStep in
+                let dependencies = previous.map { Set([$0]) } ?? []
+                let rewritten = AnimationStep(
+                    id: step.id,
+                    dependencies: dependencies,
+                    effectKey: step.effectKey,
+                    changes: step.changes,
+                    oldFragments: step.oldFragments,
+                    newFragments: step.newFragments
+                )
+                previous = step.id
+                return rewritten
+            }
+            return AnimationPlan(steps: steps)
+        case .parallelByChange:
+            let steps = plan.steps.map { step in
+                AnimationStep(
+                    id: step.id,
+                    dependencies: [],
+                    effectKey: step.effectKey,
+                    changes: step.changes,
+                    oldFragments: step.oldFragments,
+                    newFragments: step.newFragments
+                )
+            }
+            return AnimationPlan(steps: steps)
+        }
     }
 }
 
