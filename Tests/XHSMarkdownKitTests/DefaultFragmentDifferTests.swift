@@ -28,9 +28,9 @@ final class DefaultFragmentDifferTests: XCTestCase {
         let differ = DefaultFragmentDiffer()
         let child = makeChildFragment(id: "child.1")
 
-        let old = BlockQuoteContainerFragment(
+        let old = ContractBlockQuoteContainerFragment(
             fragmentId: "bq.1",
-            config: BlockQuoteContainerConfiguration(
+            config: ContractBlockQuoteContainerConfiguration(
                 childFragments: [child],
                 depth: 1,
                 barColor: .lightGray,
@@ -38,9 +38,9 @@ final class DefaultFragmentDifferTests: XCTestCase {
                 barLeftMargin: 8
             )
         )
-        let new = BlockQuoteContainerFragment(
+        let new = ContractBlockQuoteContainerFragment(
             fragmentId: "bq.1",
-            config: BlockQuoteContainerConfiguration(
+            config: ContractBlockQuoteContainerConfiguration(
                 childFragments: [child],
                 depth: 1,
                 barColor: .red,
@@ -59,10 +59,10 @@ final class DefaultFragmentDifferTests: XCTestCase {
 
         var oldContext = FragmentContext()
         oldContext[MaxWidthKey.self] = 200
-        let oldFragment = ViewFragment(
+        let oldFragment = ContractViewFragment(
             fragmentId: "img.1",
             nodeType: .image,
-            reuseIdentifier: .markdownImageView,
+            reuseIdentifier: .contractImageView,
             context: oldContext,
             content: EmptyFragmentContent(),
             makeView: { UIView() },
@@ -71,10 +71,10 @@ final class DefaultFragmentDifferTests: XCTestCase {
 
         var newContext = FragmentContext()
         newContext[MaxWidthKey.self] = 320
-        let newFragment = ViewFragment(
+        let newFragment = ContractViewFragment(
             fragmentId: "img.1",
             nodeType: .image,
-            reuseIdentifier: .markdownImageView,
+            reuseIdentifier: .contractImageView,
             context: newContext,
             content: EmptyFragmentContent(),
             makeView: { UIView() },
@@ -92,11 +92,11 @@ final class DefaultFragmentDifferTests: XCTestCase {
         }
     }
 
-    private func makeChildFragment(id: String) -> ViewFragment {
-        ViewFragment(
+    private func makeChildFragment(id: String) -> ContractViewFragment {
+        ContractViewFragment(
             fragmentId: id,
             nodeType: .paragraph,
-            reuseIdentifier: .textView,
+            reuseIdentifier: .contractTextView,
             content: EmptyFragmentContent(),
             makeView: { UIView() },
             configure: { _ in }

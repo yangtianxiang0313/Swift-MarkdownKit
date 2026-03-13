@@ -1,6 +1,6 @@
 import UIKit
 
-/// MarkdownImageView 的配置结构体
+/// Contract image 视图配置
 public struct ImageConfiguration {
     
     // MARK: - 内容

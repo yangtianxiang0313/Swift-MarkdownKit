@@ -16,7 +16,7 @@ class CustomRendererDemoViewController: UIViewController {
     }()
 
     private lazy var demoSelector: UISegmentedControl = {
-        let control = UISegmentedControl(items: ["默认", "自定义代码块"])
+        let control = UISegmentedControl(items: ["默认", "自定义代码块", "Contract节点"])
         control.selectedSegmentIndex = 0
         control.addTarget(self, action: #selector(demoChanged), for: .valueChanged)
         return control
@@ -39,6 +39,7 @@ class CustomRendererDemoViewController: UIViewController {
     private let descriptions = [
         "使用默认渲染器渲染 Markdown 内容。",
         "使用自定义渲染器覆盖代码块的默认样式。",
+        "使用 Contract 链路解析 directive / HTML 标签，并替换 block/inline 的渲染实现。",
     ]
 
     private let demoMarkdown = """
@@ -68,6 +69,20 @@ class CustomRendererDemoViewController: UIViewController {
     ---
 
     结束！
+    """
+
+    private let contractCustomMarkdown = """
+    # Contract 自定义节点演示
+
+    @Card(title: "推荐卡片") {
+    这是 directive 节点，渲染时被替换成自定义 UI。
+    }
+
+    正文里支持 inline HTML：发布状态 <badge text="new" /> 与 <badge text="hot" />。
+
+    <spotlight type="warning">
+    这是 html block 节点，也被替换成自定义 UI。
+    </spotlight>
     """
 
     // MARK: - Lifecycle
@@ -115,25 +130,120 @@ class CustomRendererDemoViewController: UIViewController {
             renderDefaultDemo()
         case 1:
             renderCustomCodeBlockDemo()
+        case 2:
+            renderContractCustomElementDemo()
         default:
             break
         }
     }
 
     private func renderDefaultDemo() {
-        containerView.pipeline = MarkdownRenderPipeline()
-        containerView.setText(demoMarkdown)
+        containerView.contractRenderAdapter = MarkdownContract.RenderModelUIKitAdapter()
+        do {
+            try containerView.setContractMarkdown(demoMarkdown)
+        } catch {
+            descriptionLabel.text = "Contract 渲染失败：\(error.localizedDescription)"
+        }
     }
 
     private func renderCustomCodeBlockDemo() {
-        let registry = RendererRegistry.makeDefault()
-        registry.register(CustomCodeBlockRenderer(), for: .codeBlock)
-        containerView.pipeline = MarkdownRenderPipeline(rendererRegistry: registry)
-        containerView.setText(demoMarkdown)
+        let adapter = MarkdownContract.RenderModelUIKitAdapter()
+        adapter.registerBlockRenderer(for: .codeBlock) { block, _, _ in
+            let code = block.contractAttrString(for: "code") ?? ""
+            let language = block.contractAttrString(for: "language") ?? "text"
+            let content = CustomCodeFragmentContent(code: code, language: language)
+
+            return [ContractViewFragment(
+                fragmentId: block.id,
+                nodeType: .codeBlock,
+                reuseIdentifier: ReuseIdentifier(rawValue: "contract.customCodeBlock"),
+                content: content,
+                totalContentLength: code.count,
+                makeView: { CustomCodeBlockView() },
+                configure: { view in
+                    guard let codeView = view as? CustomCodeBlockView else { return }
+                    codeView.configure(code: code, language: language)
+                }
+            )]
+        }
+        containerView.contractRenderAdapter = adapter
+        do {
+            try containerView.setContractMarkdown(demoMarkdown)
+        } catch {
+            descriptionLabel.text = "Contract 渲染失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func renderContractCustomElementDemo() {
+        let adapter = MarkdownContract.RenderModelUIKitAdapter()
+        adapter.registerBlockRenderer(forCustomElement: "Card") { block, _, _ in
+            let title = block.contractAttrString(for: "title") ?? "Card"
+            let text = "🧩 Contract Card\n\(title)"
+            return [Self.makeCalloutFragment(
+                fragmentId: block.id,
+                text: text,
+                color: .systemBlue
+            )]
+        }
+        adapter.registerBlockRenderer(forCustomElement: "spotlight") { block, _, _ in
+            let type = block.contractAttrString(for: "type") ?? "info"
+            let text = "💡 HTML Spotlight (\(type.uppercased()))"
+            return [Self.makeCalloutFragment(
+                fragmentId: block.id,
+                text: text,
+                color: .systemOrange
+            )]
+        }
+        adapter.registerInlineRenderer(forCustomElement: "badge") { span, _, _, _ in
+            let text = span.contractAttrString(for: "text") ?? "badge"
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.monospacedSystemFont(ofSize: 12, weight: .semibold),
+                .foregroundColor: UIColor.white,
+                .backgroundColor: UIColor.systemPink
+            ]
+            return NSAttributedString(string: " \(text.uppercased()) ", attributes: attrs)
+        }
+
+        containerView.contractRenderAdapter = adapter
+
+        do {
+            try containerView.setContractMarkdown(contractCustomMarkdown)
+        } catch {
+            descriptionLabel.text = "Contract 渲染失败：\(error.localizedDescription)"
+        }
+    }
+
+    private static func makeCalloutFragment(
+        fragmentId: String,
+        text: String,
+        color: UIColor
+    ) -> RenderFragment {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 4
+        let attributed = NSAttributedString(
+            string: text,
+            attributes: [
+                .font: UIFont.systemFont(ofSize: 14, weight: .semibold),
+                .foregroundColor: color,
+                .paragraphStyle: paragraph
+            ]
+        )
+
+        return ContractTextFragment(
+            fragmentId: fragmentId,
+            nodeType: .paragraph,
+            reuseIdentifier: .contractTextView,
+            attributedString: attributed,
+            makeView: { ContractTextView() },
+            configure: { view, _ in
+                guard let textView = view as? ContractTextView else { return }
+                textView.configure(attributedString: attributed, indent: 0)
+            }
+        )
     }
 }
 
-// MARK: - Custom Renderer
+// MARK: - Contract Custom Content
 
 private struct CustomCodeFragmentContent: FragmentContent {
     let code: String
@@ -142,30 +252,6 @@ private struct CustomCodeFragmentContent: FragmentContent {
     func isEqual(to other: any FragmentContent) -> Bool {
         guard let rhs = other as? CustomCodeFragmentContent else { return false }
         return code == rhs.code && language == rhs.language
-    }
-}
-
-final class CustomCodeBlockRenderer: LeafNodeRenderer {
-
-    func renderLeaf(node: MarkdownNode, context: RenderContext) -> [RenderFragment] {
-        guard let codeBlock = node as? CodeBlockNode else { return [] }
-        let code = codeBlock.code
-        let language = codeBlock.language ?? "text"
-        let fragmentId = context.fragmentId(nodeType: "customCode", index: 0)
-        let content = CustomCodeFragmentContent(code: code, language: language)
-
-        return [ViewFragment(
-            fragmentId: fragmentId,
-            nodeType: .codeBlock,
-            reuseIdentifier: ReuseIdentifier(rawValue: "customCodeBlock"),
-            content: content,
-            totalContentLength: code.count,
-            makeView: { CustomCodeBlockView() },
-            configure: { view in
-                guard let codeView = view as? CustomCodeBlockView else { return }
-                codeView.configure(code: code, language: language)
-            }
-        )]
     }
 }
 
@@ -229,5 +315,45 @@ class CustomCodeBlockView: UIView, HeightEstimatable, StreamableContent {
         super.layoutSubviews()
         languageLabel.frame = CGRect(x: 12, y: 8, width: bounds.width - 24, height: 18)
         codeLabel.frame = CGRect(x: 12, y: 34, width: bounds.width - 24, height: bounds.height - 46)
+    }
+}
+
+private extension MarkdownContract.RenderBlock {
+    var contractAttrs: [String: MarkdownContract.Value] {
+        guard let attrs = metadata["attrs"], case let .object(map) = attrs else {
+            return [:]
+        }
+        return map
+    }
+
+    func contractAttrString(for key: String) -> String? {
+        if let value = contractAttrs[key], case let .string(text) = value {
+            return text
+        }
+        if let nested = contractAttrs["attributes"], case let .object(map) = nested,
+           let value = map[key], case let .string(text) = value {
+            return text
+        }
+        return nil
+    }
+}
+
+private extension MarkdownContract.InlineSpan {
+    var contractAttrs: [String: MarkdownContract.Value] {
+        guard let attrs = metadata["attrs"], case let .object(map) = attrs else {
+            return [:]
+        }
+        return map
+    }
+
+    func contractAttrString(for key: String) -> String? {
+        if let value = contractAttrs[key], case let .string(text) = value {
+            return text
+        }
+        if let nested = contractAttrs["attributes"], case let .object(map) = nested,
+           let value = map[key], case let .string(text) = value {
+            return text
+        }
+        return nil
     }
 }

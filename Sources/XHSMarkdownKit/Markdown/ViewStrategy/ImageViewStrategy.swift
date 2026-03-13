@@ -32,24 +32,5 @@ public extension ImageViewStrategy {
 }
 
 public enum ImageViewStrategyKey: ContextKey {
-    public static let defaultValue: ImageViewStrategy = DefaultImageViewStrategy()
-}
-
-public struct DefaultImageViewStrategy: ImageViewStrategy {
-    public init() {}
-    public func makeView() -> UIView { MarkdownImageView() }
-    public func configure(view: UIView, content: ImageContent, context: FragmentContext, theme: MarkdownTheme) {
-        guard let imageView = view as? MarkdownImageView else { return }
-        
-        let config = ImageConfiguration(
-            source: content.source,
-            maxWidth: context[MaxWidthKey.self],
-            cornerRadius: theme.image.cornerRadius,
-            placeholderHeight: theme.image.placeholderHeight,
-            placeholderColor: theme.image.placeholderColor,
-            maxImageWidth: theme.image.maxWidth
-        )
-        
-        imageView.configure(config)
-    }
+    public static let defaultValue: ImageViewStrategy = DefaultContractImageViewStrategy()
 }

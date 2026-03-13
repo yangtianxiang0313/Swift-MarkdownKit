@@ -271,6 +271,15 @@ class StreamingDemoViewController: UIViewController {
         return control
     }()
 
+    /// 渲染链路（contract）
+    private lazy var renderPathControl: UISegmentedControl = {
+        let control = UISegmentedControl(items: ["Contract"])
+        control.selectedSegmentIndex = 0
+        control.selectedSegmentTintColor = .systemBrown.withAlphaComponent(0.2)
+        control.addTarget(self, action: #selector(renderPathChanged), for: .valueChanged)
+        return control
+    }()
+
     /// 首包延迟标签
     private lazy var firstByteDelayLabel: UILabel = {
         let label = UILabel()
@@ -448,6 +457,10 @@ class StreamingDemoViewController: UIViewController {
     private var autoScrollEnabled = true
     private var hasCompletedStreaming = false
 
+    private enum RenderPath: Int {
+        case contract = 0
+    }
+
     private enum DeliveryMode: Int {
         case twoStage = 0
         case sseDirect = 1
@@ -470,6 +483,8 @@ class StreamingDemoViewController: UIViewController {
     private var streamStartTime: Date?
     private var observedNetworkCPS: Double = 0
     private var observedRenderCPS: Double = 0
+    private var renderPath: RenderPath = .contract
+    private var lastContractUpdateSequence: Int = 0
     
     /// 流式展示区域最大高度（只增不减，避免下方展开时压缩）
     
@@ -746,6 +761,7 @@ class StreamingDemoViewController: UIViewController {
         let schedulingRow = createRow(label: "调度模式", control: schedulingControl)
         let submitModeRow = createRow(label: "提交策略", control: submitModeControl)
         let deliveryModeRow = createRow(label: "交付模式", control: deliveryModeControl)
+        let renderPathRow = createRow(label: "渲染链路", control: renderPathControl)
         let networkSpeedRow = createRow(label: "网络接收", control: networkSpeedSlider)
         let speedRow = createRow(label: "渲染速度", control: speedSlider)
         let firstByteDelayRow = createRow(label: "首包延迟", control: firstByteDelaySlider)
@@ -767,8 +783,9 @@ class StreamingDemoViewController: UIViewController {
         configStack.addArrangedSubview(typingSpeedLabel)
         configStack.addArrangedSubview(schedulingRow)
         configStack.addArrangedSubview(submitModeRow)
-        configStack.addArrangedSubview(pipelineConfigLabel)
         configStack.addArrangedSubview(deliveryModeRow)
+        configStack.addArrangedSubview(renderPathRow)
+        configStack.addArrangedSubview(pipelineConfigLabel)
         configStack.addArrangedSubview(networkSpeedRow)
         configStack.addArrangedSubview(networkSpeedLabel)
         configStack.addArrangedSubview(speedRow)
@@ -964,6 +981,8 @@ class StreamingDemoViewController: UIViewController {
         guard streamingTimer == nil && networkTimer == nil else { return }
         
         hasCompletedStreaming = false
+        lastContractUpdateSequence = 0
+        containerView.resetContractStreamingSession()
         streamStartTime = Date()
         startNetworkTimer()
         if deliveryMode == .twoStage {
@@ -974,7 +993,8 @@ class StreamingDemoViewController: UIViewController {
         pauseButton.isEnabled = true
         fastForwardButton.isEnabled = true
         
-        statusLabel.text = deliveryMode == .twoStage ? "正在流式渲染（双阶段）..." : "正在流式渲染（SSE直推）..."
+        let modeText = deliveryMode == .twoStage ? "正在流式渲染（双阶段）..." : "正在流式渲染（SSE直推）..."
+        statusLabel.text = "\(modeText) [Contract]"
     }
     
     /// 启动网络接收定时器（模拟服务端发送数据）
@@ -1040,7 +1060,8 @@ class StreamingDemoViewController: UIViewController {
         if isPaused {
             statusLabel.text = "已暂停"
         } else {
-            statusLabel.text = deliveryMode == .twoStage ? "正在流式渲染（双阶段）..." : "正在流式渲染（SSE直推）..."
+            let modeText = deliveryMode == .twoStage ? "正在流式渲染（双阶段）..." : "正在流式渲染（SSE直推）..."
+            statusLabel.text = "\(modeText) [Contract]"
         }
         
         if isPaused {
@@ -1063,10 +1084,15 @@ class StreamingDemoViewController: UIViewController {
         networkTimer = nil
         
         let fullText = testCases[selectedCaseIndex].content
-        containerView.setText(fullText)
+        do {
+            try containerView.setContractMarkdown(fullText)
+        } catch {
+            statusLabel.text = "Contract 快进失败：\(error.localizedDescription)"
+        }
         
         currentIndex = streamingBuffer.count
         renderedIndex = streamingBuffer.count
+        lastAppendedIndex = renderedIndex
         
         startButton.isEnabled = false
         pauseButton.isEnabled = false
@@ -1095,6 +1121,7 @@ class StreamingDemoViewController: UIViewController {
         lastAppendedIndex = 0
         isPaused = false
         hasCompletedStreaming = false
+        lastContractUpdateSequence = 0
         
         // 重置网络模拟状态
         skipTickCount = 0
@@ -1103,7 +1130,7 @@ class StreamingDemoViewController: UIViewController {
         backlogChars = 0
         
         setupStreamingBuffer()
-        containerView.setText("")
+        try? containerView.setContractMarkdown("")
         
         startButton.isEnabled = true
         pauseButton.isEnabled = false
@@ -1116,6 +1143,7 @@ class StreamingDemoViewController: UIViewController {
         observedNetworkCPS = 0
         observedRenderCPS = 0
         updateThroughputLabel()
+        updatePipelineConfigLabel()
     }
 
     @objc private func animationPresetChanged() {
@@ -1166,8 +1194,18 @@ class StreamingDemoViewController: UIViewController {
             restartRenderTimerIfNeeded()
         }
         updateAutoAccelerateLabel()
+        updatePipelineConfigLabel()
         updateSpeedModelLabel()
         updateThroughputLabel()
+    }
+
+    @objc private func renderPathChanged() {
+        renderPath = RenderPath(rawValue: renderPathControl.selectedSegmentIndex) ?? .contract
+        lastContractUpdateSequence = 0
+        updatePipelineConfigLabel()
+        updateSpeedModelLabel()
+        updateThroughputLabel()
+        resetStreaming()
     }
 
     @objc private func firstByteDelayChanged() {
@@ -1199,10 +1237,13 @@ class StreamingDemoViewController: UIViewController {
 
         let submit = (submitMode == .interruptCurrent) ? "interruptCurrent" : "queueLatest"
         let enabled = animationEnabled ? "ON" : "OFF"
-        pipelineConfigLabel.text = "动画配置: enabled=\(enabled)  preset=\(preset)  cps=\(typingCharactersPerSecond)  scheduling=\(scheduling)  submit=\(submit)"
+        let path = "contract"
+        let seq = "  seq=\(lastContractUpdateSequence)"
+        pipelineConfigLabel.text = "动画配置: path=\(path)  enabled=\(enabled)  preset=\(preset)  cps=\(typingCharactersPerSecond)  scheduling=\(scheduling)  submit=\(submit)\(seq)"
     }
 
     private func updateThroughputLabel() {
+        let pathText = "Contract"
         let modeText = deliveryMode == .twoStage ? "双阶段(网络→渲染→动画)" : "SSE直推(网络→动画)"
         let renderPart: String
         if deliveryMode == .twoStage {
@@ -1210,19 +1251,23 @@ class StreamingDemoViewController: UIViewController {
         } else {
             renderPart = "渲染速度(滑块)已禁用"
         }
+        let seqPart = "  |  contractSeq: \(lastContractUpdateSequence)"
         throughputLabel.text = String(
-            format: "实时速率: 网络接收 %.1f cps  |  %@  |  模式: %@",
+            format: "实时速率: 网络接收 %.1f cps  |  %@  |  模式: %@  |  链路: %@%@",
             observedNetworkCPS,
             renderPart,
-            modeText
+            modeText,
+            pathText,
+            seqPart
         )
     }
 
     private func updateSpeedModelLabel() {
+        let appendAPI = "appendContractStreamChunk"
         if deliveryMode == .twoStage {
-            speedModelLabel.text = "模型解释: 网络速度只影响“已接收(currentIndex)”，渲染速度只影响“appendStreamChunk 频率(renderedIndex)”，动画速度由 preset + 打字速度(cps)决定。"
+            speedModelLabel.text = "模型解释: 网络速度只影响“已接收(currentIndex)”，渲染速度只影响“\(appendAPI) 频率(renderedIndex)”，动画速度由 preset + 打字速度(cps)决定。"
         } else {
-            speedModelLabel.text = "模型解释: SSE直推下网络速度直接决定 appendStreamChunk 频率；渲染速度滑块不参与，仅用于对照。首包延迟和包倍率用于模拟服务端首字延迟与 chunk 粒度。"
+            speedModelLabel.text = "模型解释: SSE直推下网络速度直接决定 \(appendAPI) 频率；渲染速度滑块不参与，仅用于对照。首包延迟和包倍率用于模拟服务端首字延迟与 chunk 粒度。"
         }
     }
     
@@ -1484,11 +1529,17 @@ class StreamingDemoViewController: UIViewController {
         networkTimer = nil
         streamingTimer?.invalidate()
         streamingTimer = nil
-        containerView.finishStreaming()
+        do {
+            let update = try containerView.finishContractStreaming()
+            lastContractUpdateSequence = update.sequence
+        } catch {
+            statusLabel.text = "Contract 收尾失败：\(error.localizedDescription)"
+        }
         startButton.isEnabled = false
         pauseButton.isEnabled = false
         fastForwardButton.isEnabled = false
         statusLabel.text = animationEnabled ? "数据接收完成，动画收尾中..." : "渲染完成 (\(streamingBuffer.count) 字符)"
+        updatePipelineConfigLabel()
     }
     
     /// 网络接收 tick - 模拟服务端发送数据
@@ -1684,17 +1735,27 @@ class StreamingDemoViewController: UIViewController {
     }
     
     private func renderCurrentText() {
-        // 使用 appendStreamChunk 追加增量，走流式 Diff 路径，触发 AnimatableContent 的逐字动画
+        // 使用 appendContractStreamChunk 追加增量，走流式 Diff 路径，触发 AnimatableContent 的逐字动画
         guard lastAppendedIndex < renderedIndex else { return }
         let delta = String(streamingBuffer[lastAppendedIndex..<renderedIndex])
         if animationEnabled {
-            containerView.appendStreamChunk(delta)
+            do {
+                let update = try containerView.appendContractStreamChunk(delta)
+                lastContractUpdateSequence = update.sequence
+            } catch {
+                statusLabel.text = "Contract 增量失败：\(error.localizedDescription)"
+            }
         } else {
             // 动画关闭时直接整段刷新，避免 Demo 侧 tick 粒度制造“假打字机”观感
             let full = String(streamingBuffer[0..<renderedIndex])
-            containerView.setText(full)
+            do {
+                try containerView.setContractMarkdown(full)
+            } catch {
+                statusLabel.text = "Contract 全量刷新失败：\(error.localizedDescription)"
+            }
         }
         lastAppendedIndex = renderedIndex
+        updatePipelineConfigLabel()
         updateScrollViewContentSize()
     }
     
@@ -1780,8 +1841,8 @@ extension StreamingDemoViewController {
     let container = MarkdownContainerView()
     container.setAnimationPreset(.typing(charactersPerSecond: 30))
     
-    container.appendStreamChunk("New content...")
-    container.finishStreaming()
+    try? container.appendContractStreamChunk("New content...")
+    try? container.finishContractStreaming()
     ```
     
     ## Python 示例

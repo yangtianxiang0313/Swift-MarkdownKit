@@ -9,11 +9,10 @@ public struct ReuseIdentifier: Hashable, RawRepresentable {
 }
 
 public extension ReuseIdentifier {
-    static let textView = ReuseIdentifier(rawValue: "textView")
-    static let blockQuoteText = ReuseIdentifier(rawValue: "blockQuoteText")
-    static let blockQuoteContainer = ReuseIdentifier(rawValue: "blockQuoteContainer")
-    static let codeBlockView = ReuseIdentifier(rawValue: "codeBlockView")
-    static let markdownTableView = ReuseIdentifier(rawValue: "markdownTableView")
-    static let thematicBreakView = ReuseIdentifier(rawValue: "thematicBreakView")
-    static let markdownImageView = ReuseIdentifier(rawValue: "markdownImageView")
+    static let contractTextView = ReuseIdentifier(rawValue: "contract.textView")
+    static let contractBlockQuoteContainer = ReuseIdentifier(rawValue: "contract.blockQuoteContainer")
+    static let contractCodeBlockView = ReuseIdentifier(rawValue: "contract.codeBlockView")
+    static let contractTableView = ReuseIdentifier(rawValue: "contract.tableView")
+    static let contractThematicBreakView = ReuseIdentifier(rawValue: "contract.thematicBreakView")
+    static let contractImageView = ReuseIdentifier(rawValue: "contract.imageView")
 }

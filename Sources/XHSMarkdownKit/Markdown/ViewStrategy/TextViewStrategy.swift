@@ -13,22 +13,5 @@ public extension TextViewStrategy {
 }
 
 public enum TextViewStrategyKey: ContextKey {
-    public static let defaultValue: TextViewStrategy = DefaultTextViewStrategy()
-}
-
-public struct DefaultTextViewStrategy: TextViewStrategy {
-    public init() {}
-
-    public func makeView() -> UIView {
-        MarkdownTextView()
-    }
-
-    public func configure(view: UIView, attributedString: NSAttributedString, context: FragmentContext, theme: MarkdownTheme) {
-        guard let textView = view as? MarkdownTextView else { return }
-        let indent = context[IndentKey.self]
-        textView.configure(
-            attributedString: attributedString,
-            indent: indent
-        )
-    }
+    public static let defaultValue: TextViewStrategy = DefaultContractTextViewStrategy()
 }

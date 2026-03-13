@@ -9,8 +9,7 @@ public enum FragmentOptimizer {
     ) -> [RenderFragment] {
         var result = fragments
 
-        // Merge stage is intentionally disabled for now.
-        // Keep original fragment boundaries and only run filter + spacing.
+        result = merge(result, resolver: spacingResolver, theme: theme)
         result = filter(result)
         setSpacing(on: &result, resolver: spacingResolver, theme: theme)
 

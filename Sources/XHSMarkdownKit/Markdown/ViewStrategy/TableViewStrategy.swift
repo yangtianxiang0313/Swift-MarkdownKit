@@ -43,24 +43,5 @@ public extension TableViewStrategy {
 }
 
 public enum TableViewStrategyKey: ContextKey {
-    public static let defaultValue: TableViewStrategy = DefaultTableViewStrategy()
-}
-
-public struct DefaultTableViewStrategy: TableViewStrategy {
-    public init() {}
-
-    public func makeView() -> UIView {
-        MarkdownTableView()
-    }
-
-    public func configure(view: UIView, tableData: TableData, context: FragmentContext, theme: MarkdownTheme) {
-        guard let tableView = view as? MarkdownTableView else { return }
-        
-        let config = TableConfiguration(
-            tableData: tableData,
-            tableStyle: theme.table
-        )
-        
-        tableView.configure(config)
-    }
+    public static let defaultValue: TableViewStrategy = DefaultContractTableViewStrategy()
 }

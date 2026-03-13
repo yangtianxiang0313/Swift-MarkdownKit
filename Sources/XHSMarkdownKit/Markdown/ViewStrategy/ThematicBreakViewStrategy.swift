@@ -13,14 +13,5 @@ public extension ThematicBreakViewStrategy {
 }
 
 public enum ThematicBreakViewStrategyKey: ContextKey {
-    public static let defaultValue: ThematicBreakViewStrategy = DefaultThematicBreakViewStrategy()
-}
-
-public struct DefaultThematicBreakViewStrategy: ThematicBreakViewStrategy {
-    public init() {}
-    public func makeView() -> UIView { ThematicBreakView() }
-    public func configure(view: UIView, context: FragmentContext, theme: MarkdownTheme) {
-        guard let breakView = view as? ThematicBreakView else { return }
-        breakView.configure(color: theme.thematicBreak.color, height: theme.thematicBreak.height)
-    }
+    public static let defaultValue: ThematicBreakViewStrategy = DefaultContractThematicBreakViewStrategy()
 }

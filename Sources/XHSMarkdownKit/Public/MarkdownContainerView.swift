@@ -19,6 +19,7 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
         }
     }
     public var animationPlanProvider: AnimationPlanProvider = DefaultAnimationPlanProvider()
+    public var contractAnimationPlanMapper: any ContractAnimationPlanMapping = DefaultContractAnimationPlanMapper()
     public var conflictPolicy: ConflictPolicy = .default
     public var animationEffectKey: AnimationEffectKey = .instant
     public var animationSchedulingMode: AnimationSchedulingMode {
@@ -40,12 +41,13 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
         }
     }
 
-    // MARK: - Pipeline
+    // MARK: - Contract
 
-    public var pipeline: MarkdownRenderPipeline
     public var theme: MarkdownTheme {
         didSet { rerender() }
     }
+    public var contractKit = MarkdownContract.UniversalMarkdownKit()
+    public var contractRenderAdapter = MarkdownContract.RenderModelUIKitAdapter()
 
     // MARK: - Delegate
 
@@ -53,21 +55,19 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
 
     // MARK: - State
 
-    public let stateStore = FragmentStateStore()
-    private var currentText: String = ""
     private(set) public var fragments: [RenderFragment] = []
-    private var preprocessor = MarkdownPreprocessor()
     private var lastWidth: CGFloat = 0
     private var transactionVersion: Int = 0
+    private var currentContractModel: MarkdownContract.RenderModel?
+    private var contractStreamingSession: MarkdownContract.StreamingMarkdownSession?
+    private var pendingContractAnimationPlan: MarkdownContract.CompiledAnimationPlan?
 
     // MARK: - Init
 
     public init(
-        theme: MarkdownTheme = .default,
-        pipeline: MarkdownRenderPipeline = MarkdownRenderPipeline()
+        theme: MarkdownTheme = .default
     ) {
         self.theme = theme
-        self.pipeline = pipeline
         super.init(frame: .zero)
         clipsToBounds = true
         bindAnimationEngine()
@@ -78,23 +78,99 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
 
     // MARK: - Public API
 
-    public func setText(_ text: String) {
-        currentText = text
-        preprocessor.reset()
+    public func setContractRenderModel(
+        _ model: MarkdownContract.RenderModel,
+        animationPlan: MarkdownContract.CompiledAnimationPlan? = nil
+    ) {
+        currentContractModel = model
+        contractStreamingSession = nil
+        pendingContractAnimationPlan = animationPlan
         rerender()
     }
 
-    public func appendStreamChunk(_ chunk: String) {
-        preprocessor.append(chunk)
-        currentText = preprocessor.preclosedText
-        rerender()
+    /// Parse markdown through the contract engine and render via `contractRenderAdapter`.
+    public func setContractMarkdown(
+        _ markdown: String,
+        parserID: MarkdownContract.ParserID? = nil,
+        rendererID: MarkdownContract.RendererID? = nil,
+        parseOptions: MarkdownContractParserOptions = MarkdownContractParserOptions(),
+        rewritePipeline: MarkdownContract.CanonicalRewritePipeline = MarkdownContract.CanonicalRewritePipeline(),
+        renderOptions: MarkdownContract.CanonicalRenderOptions = MarkdownContract.CanonicalRenderOptions()
+    ) throws {
+        let model = try contractKit.render(
+            markdown,
+            parserID: parserID,
+            rendererID: rendererID,
+            parseOptions: parseOptions,
+            rewritePipeline: rewritePipeline,
+            renderOptions: renderOptions
+        )
+        setContractRenderModel(model, animationPlan: nil)
     }
 
-    public func finishStreaming() {
-        currentText = preprocessor.currentText
-        preprocessor.reset()
+    /// Reset a streaming contract session. Use with `appendContractStreamChunk` and `finishContractStreaming`.
+    public func resetContractStreamingSession(
+        engine: MarkdownContractEngine = MarkdownContractEngine(),
+        differ: any MarkdownContract.RenderModelDiffer = MarkdownContract.DefaultRenderModelDiffer(),
+        animationCompiler: any MarkdownContract.RenderModelAnimationCompiler = MarkdownContract.DefaultRenderModelAnimationCompiler(),
+        parseOptions: MarkdownContractParserOptions = MarkdownContractParserOptions(),
+        renderOptions: MarkdownContract.CanonicalRenderOptions = MarkdownContract.CanonicalRenderOptions()
+    ) {
+        contractStreamingSession = MarkdownContract.StreamingMarkdownSession(
+            engine: engine,
+            differ: differ,
+            animationCompiler: animationCompiler,
+            parseOptions: parseOptions,
+            renderOptions: renderOptions
+        )
+    }
+
+    /// Append streaming markdown in contract mode and return canonical diff/animation DTO update.
+    @discardableResult
+    public func appendContractStreamChunk(
+        _ chunk: String
+    ) throws -> MarkdownContract.StreamingRenderUpdate {
+        if contractStreamingSession == nil {
+            contractStreamingSession = MarkdownContract.StreamingMarkdownSession()
+        }
+
+        guard let session = contractStreamingSession else {
+            throw MarkdownContract.ModelError(
+                code: .requiredFieldMissing,
+                message: "Streaming session not initialized",
+                path: "contractStreamingSession"
+            )
+        }
+
+        let update = try session.appendChunk(chunk)
+        currentContractModel = update.model
+        pendingContractAnimationPlan = update.animationPlan
+        rerender()
+        return update
+    }
+
+    /// Finish contract streaming and emit a final streaming update.
+    @discardableResult
+    public func finishContractStreaming() throws -> MarkdownContract.StreamingRenderUpdate {
+        if contractStreamingSession == nil {
+            contractStreamingSession = MarkdownContract.StreamingMarkdownSession()
+        }
+
+        guard let session = contractStreamingSession else {
+            throw MarkdownContract.ModelError(
+                code: .requiredFieldMissing,
+                message: "Streaming session not initialized",
+                path: "contractStreamingSession"
+            )
+        }
+
+        let update = try session.finish()
+        currentContractModel = update.model
+        pendingContractAnimationPlan = update.animationPlan
         rerender()
         animationEngine.streamDidFinish(in: self)
+        contractStreamingSession = nil
+        return update
     }
 
     /// 强制跳过所有剩余动画，立即展示全部内容
@@ -109,6 +185,13 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
     // MARK: - FragmentContaining
 
     public func update(_ newFragments: [RenderFragment]) {
+        update(newFragments, contractAnimationPlan: nil)
+    }
+
+    private func update(
+        _ newFragments: [RenderFragment],
+        contractAnimationPlan: MarkdownContract.CompiledAnimationPlan?
+    ) {
         let oldFragments = fragments
         let changes = differ.diff(old: oldFragments, new: newFragments)
         fragments = newFragments
@@ -127,8 +210,17 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
             sourceFragmentsHint: oldFragments,
             targetFragments: newFragments,
             submissionMode: policy.submissionMode,
-            planBuilder: { [differ, animationPlanProvider, policy] source, target in
+            planBuilder: { [differ, animationPlanProvider, contractAnimationPlanMapper, policy, contractAnimationPlan] source, target in
                 let rebuiltChanges = differ.diff(old: source, new: target)
+                if let contractAnimationPlan {
+                    return contractAnimationPlanMapper.makePlan(
+                        contractPlan: contractAnimationPlan,
+                        oldFragments: source,
+                        newFragments: target,
+                        changes: rebuiltChanges,
+                        defaultEffectKey: policy.defaultEffectKey
+                    )
+                }
                 return animationPlanProvider.makePlan(
                     oldFragments: source,
                     newFragments: target,
@@ -201,14 +293,19 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
     private func rerender() {
         guard bounds.width > 0 else { return }
 
-        let newFragments = pipeline.render(
-            currentText,
-            maxWidth: bounds.width,
-            theme: theme,
-            stateStore: stateStore
-        )
+        guard let contractModel = currentContractModel else {
+            update([], contractAnimationPlan: nil)
+            return
+        }
 
-        update(newFragments)
+        let newFragments = contractRenderAdapter.render(
+            model: contractModel,
+            theme: theme,
+            maxWidth: bounds.width
+        )
+        let contractAnimationPlan = pendingContractAnimationPlan
+        pendingContractAnimationPlan = nil
+        update(newFragments, contractAnimationPlan: contractAnimationPlan)
     }
 
     private func calculateContentHeight() -> CGFloat {

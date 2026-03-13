@@ -1,6 +1,6 @@
 import UIKit
 
-/// CodeBlockView 的配置结构体
+/// Contract code block 视图配置
 /// 封装了渲染代码块所需的所有参数，View 不依赖 MarkdownTheme
 public struct CodeBlockConfiguration {
     

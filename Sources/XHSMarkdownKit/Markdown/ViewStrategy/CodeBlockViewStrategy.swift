@@ -32,31 +32,5 @@ public extension CodeBlockViewStrategy {
 }
 
 public enum CodeBlockViewStrategyKey: ContextKey {
-    public static let defaultValue: CodeBlockViewStrategy = DefaultCodeBlockViewStrategy()
-}
-
-public struct DefaultCodeBlockViewStrategy: CodeBlockViewStrategy {
-    public init() {}
-
-    public func makeView() -> UIView {
-        CodeBlockView()
-    }
-
-    public func configure(view: UIView, content: CodeBlockContent, context: FragmentContext, theme: MarkdownTheme) {
-        guard let codeView = view as? CodeBlockView else { return }
-        
-        // ViewStrategy 职责：解析 theme → Configuration
-        let config = CodeBlockConfiguration(
-            code: content.code,
-            language: content.language,
-            backgroundColor: theme.code.block.backgroundColor,
-            font: theme.code.font,
-            cornerRadius: theme.code.block.cornerRadius,
-            borderWidth: theme.code.block.borderWidth,
-            borderColor: theme.code.block.borderColor.cgColor,
-            padding: theme.code.block.padding
-        )
-        
-        codeView.configure(config)
-    }
+    public static let defaultValue: CodeBlockViewStrategy = DefaultContractCodeBlockViewStrategy()
 }

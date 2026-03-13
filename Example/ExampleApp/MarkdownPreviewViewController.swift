@@ -13,7 +13,7 @@ class MarkdownPreviewViewController: UIViewController {
         control.addTarget(self, action: #selector(segmentChanged), for: .valueChanged)
         return control
     }()
-    
+
     private lazy var textView: UITextView = {
         let tv = UITextView()
         tv.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
@@ -60,6 +60,7 @@ class MarkdownPreviewViewController: UIViewController {
         ("代码块", codeSample),
         ("表格", tableSample),
         ("混合内容", mixedSample),
+        ("Contract自定义节点", contractCustomSample),
         ("边界测试", edgeCaseSample)
     ]
     
@@ -97,7 +98,7 @@ class MarkdownPreviewViewController: UIViewController {
         view.addSubview(textView)
         view.addSubview(previewScrollView)
         previewScrollView.addSubview(containerView)
-        
+
         segmentedControl.translatesAutoresizingMaskIntoConstraints = false
         textView.translatesAutoresizingMaskIntoConstraints = false
         previewScrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -131,7 +132,7 @@ class MarkdownPreviewViewController: UIViewController {
     @objc private func segmentChanged() {
         updateLayout(for: segmentedControl.selectedSegmentIndex)
     }
-    
+
     @objc private func showSamples() {
         let alertController = UIAlertController(title: "选择示例", message: nil, preferredStyle: .actionSheet)
         
@@ -208,7 +209,13 @@ class MarkdownPreviewViewController: UIViewController {
         guard previewScrollView.bounds.width > 24 else { return }
         
         updateContainerFrame()
-        containerView.setText(markdown)
+
+        do {
+            try containerView.setContractMarkdown(markdown)
+            navigationItem.prompt = "Contract 渲染链路"
+        } catch {
+            navigationItem.prompt = "Contract 渲染失败：\(error.localizedDescription)"
+        }
     }
     
     private func updateContainerFrame() {
@@ -310,7 +317,7 @@ class MarkdownPreviewViewController: UIViewController {
     \"\"\"
     
     let container = MarkdownContainerView()
-    container.setText(markdown)
+    try? container.setContractMarkdown(markdown)
     ```
     
     ## Python 代码
@@ -326,7 +333,7 @@ class MarkdownPreviewViewController: UIViewController {
     
     ## 行内代码
     
-    使用 `containerView.setText()` 方法渲染 Markdown。
+    使用 `containerView.setContractMarkdown()` 方法渲染 Markdown。
     """
     
     static let tableSample = """
@@ -387,6 +394,20 @@ class MarkdownPreviewViewController: UIViewController {
     ---
     
     **结束**
+    """
+
+    static let contractCustomSample = """
+    # Contract 自定义节点
+
+    @Card(title: "推荐内容") {
+    这是一个 directive 自定义容器。
+    }
+
+    正文中支持 inline HTML：欢迎体验 <badge text="NEW" /> Contract 链路。
+
+    <spotlight type="info">
+    这是一个 block HTML 自定义节点。
+    </spotlight>
     """
     
     // MARK: - 边界测试用例
@@ -479,7 +500,7 @@ class MarkdownPreviewViewController: UIViewController {
     
        ```swift
        let container = MarkdownContainerView()
-       container.setText(text)
+       try? container.setContractMarkdown(text)
        ```
     
     ## 8. 引用块内的代码块
@@ -535,12 +556,12 @@ class MarkdownPreviewViewController: UIViewController {
     
     ```swift
     // 这是一个较长的代码块，用于测试横向滚动
-    let container = MarkdownContainerView(theme: .default, pipeline: MarkdownRenderPipeline())
+    let container = MarkdownContainerView(theme: .default)
     container.setAnimationPreset(.typing(charactersPerSecond: 30))
     container.delegate = self
     
-    container.appendStreamChunk("# Hello World\n\nThis is a **streaming** demo with animation preset API.")
-    container.finishStreaming()
+    try? container.appendContractStreamChunk("# Hello World\n\nThis is a **streaming** demo with animation preset API.")
+    try? container.finishContractStreaming()
     ```
     
     ## 14. 空内容测试

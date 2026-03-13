@@ -1,6 +1,6 @@
 import UIKit
 
-/// MarkdownTableView 的配置结构体
+/// Contract table 视图配置
 public struct TableConfiguration {
     
     // MARK: - 内容
