@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(XHSMarkdownCore)
+import XHSMarkdownCore
+#endif
 import XYMarkdown
 
 public struct XYMarkdownContractParser: MarkdownContractParser {
@@ -176,6 +179,10 @@ private struct Converter {
             return result
 
         case let table as Table:
+            let headers = Array(table.head.cells.map { MarkdownContract.Value.string($0.plainText) })
+            let rows = Array(table.body.rows.map { row in
+                MarkdownContract.Value.array(Array(row.cells.map { MarkdownContract.Value.string($0.plainText) }))
+            })
             let alignments: [MarkdownContract.Value] = table.columnAlignments.map { alignment in
                 switch alignment {
                 case .left: return .string("left")
@@ -185,7 +192,12 @@ private struct Converter {
                 @unknown default: return .null
                 }
             }
-            return ["columnAlignments": .array(alignments)]
+            return [
+                "headers": .array(headers),
+                "rows": .array(rows),
+                "alignments": .array(alignments),
+                "columnAlignments": .array(alignments)
+            ]
 
         case let image as Image:
             var result: [String: MarkdownContract.Value] = [

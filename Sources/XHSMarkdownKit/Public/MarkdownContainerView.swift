@@ -1,16 +1,11 @@
 import UIKit
+#if canImport(XHSMarkdownCore)
+import XHSMarkdownCore
+#endif
 
-public final class MarkdownContainerView: UIView, FragmentContaining {
+public final class MarkdownContainerView: UIView, SceneAnimationHost {
 
-    // MARK: - FragmentContaining
-
-    public var differ: FragmentDiffing = DefaultFragmentDiffer()
-
-    public let viewPool = ViewPool()
-    public var containerView: UIView { self }
-    public var managedViews: [String: UIView] = [:]
-
-    // MARK: - Animation V3
+    // MARK: - Animation
 
     public var animationEngine: AnimationEngine = MainThreadAnimationEngine() {
         didSet {
@@ -18,28 +13,31 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
             registerConfigurableEffects(charactersPerSecond: typingCharactersPerSecond)
         }
     }
+
     public var contractAnimationPlanMapper: any ContractAnimationPlanMapping = DefaultContractAnimationPlanMapper()
     public var contractRenderModelDiffer: any MarkdownContract.RenderModelDiffer = MarkdownContract.DefaultRenderModelDiffer()
     public var contractAnimationCompiler: any MarkdownContract.RenderModelAnimationCompiler = MarkdownContract.DefaultRenderModelAnimationCompiler()
+    public var sceneDiffer: any SceneDiffering = DefaultSceneDiffer()
+
     public var conflictPolicy: ConflictPolicy = .default
     public var animationEffectKey: AnimationEffectKey = .instant
+
     public var animationSchedulingMode: AnimationSchedulingMode {
         get { conflictPolicy.schedulingMode }
         set { conflictPolicy.schedulingMode = newValue }
     }
+
     public var animationSubmissionMode: AnimationSubmitMode {
         get { conflictPolicy.submissionMode }
         set { conflictPolicy.submissionMode = newValue }
     }
+
     public var typingCharactersPerSecond: Int = 30 {
-        didSet {
-            registerConfigurableEffects(charactersPerSecond: typingCharactersPerSecond)
-        }
+        didSet { registerConfigurableEffects(charactersPerSecond: typingCharactersPerSecond) }
     }
-    public var typingFragmentAppearanceMode: TypingEffect.FragmentAppearanceMode = .sequential {
-        didSet {
-            registerConfigurableEffects(charactersPerSecond: typingCharactersPerSecond)
-        }
+
+    public var typingEntityAppearanceMode: TypingEffect.EntityAppearanceMode = .sequential {
+        didSet { registerConfigurableEffects(charactersPerSecond: typingCharactersPerSecond) }
     }
 
     // MARK: - Contract
@@ -47,18 +45,31 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
     public var theme: MarkdownTheme {
         didSet { rerender() }
     }
-    public var contractKit = MarkdownContract.UniversalMarkdownKit()
+
+    public var contractKit: MarkdownContract.UniversalMarkdownKit
+    public var contractStreamingEngine: MarkdownContractEngine?
     public var contractRenderAdapter = MarkdownContract.RenderModelUIKitAdapter()
 
     // MARK: - Delegate
 
     public weak var delegate: MarkdownContainerViewDelegate?
 
+    // MARK: - Scene Host
+
+    public var currentSceneSnapshot: RenderScene {
+        currentScene
+    }
+
     // MARK: - State
 
-    private(set) public var fragments: [RenderFragment] = []
+    private let stackView = UIStackView()
+    private lazy var sceneApplier = SceneApplier(stackView: stackView)
+
+    private var managedViews: [String: UIView] = [:]
+    private var currentScene: RenderScene
     private var lastWidth: CGFloat = 0
     private var transactionVersion: Int = 0
+
     private var currentContractModel: MarkdownContract.RenderModel?
     private var contractStreamingSession: MarkdownContract.StreamingMarkdownSession?
     private var pendingContractAnimationPlan: MarkdownContract.CompiledAnimationPlan?
@@ -66,11 +77,20 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
     // MARK: - Init
 
     public init(
-        theme: MarkdownTheme = .default
+        theme: MarkdownTheme = .default,
+        contractKit: MarkdownContract.UniversalMarkdownKit = MarkdownContract.UniversalMarkdownKit(),
+        contractStreamingEngine: MarkdownContractEngine? = nil
     ) {
         self.theme = theme
+        self.contractKit = contractKit
+        self.contractStreamingEngine = contractStreamingEngine
+
+        self.currentScene = RenderScene.empty(documentId: "document")
+
         super.init(frame: .zero)
         clipsToBounds = true
+
+        setupStackView()
         bindAnimationEngine()
         registerConfigurableEffects(charactersPerSecond: typingCharactersPerSecond)
     }
@@ -98,7 +118,6 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
         rerender()
     }
 
-    /// Parse markdown through the contract engine and render via `contractRenderAdapter`.
     public func setContractMarkdown(
         _ markdown: String,
         parserID: MarkdownContract.ParserID? = nil,
@@ -118,16 +137,22 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
         setContractRenderModel(model, animationPlan: nil)
     }
 
-    /// Reset a streaming contract session. Use with `appendContractStreamChunk` and `finishContractStreaming`.
     public func resetContractStreamingSession(
-        engine: MarkdownContractEngine = MarkdownContractEngine(),
+        engine: MarkdownContractEngine? = nil,
         differ: any MarkdownContract.RenderModelDiffer = MarkdownContract.DefaultRenderModelDiffer(),
         animationCompiler: any MarkdownContract.RenderModelAnimationCompiler = MarkdownContract.DefaultRenderModelAnimationCompiler(),
         parseOptions: MarkdownContractParserOptions = MarkdownContractParserOptions(),
         renderOptions: MarkdownContract.CanonicalRenderOptions = MarkdownContract.CanonicalRenderOptions()
     ) {
+        if let engine {
+            contractStreamingEngine = engine
+        }
+        guard let resolvedEngine = contractStreamingEngine else {
+            contractStreamingSession = nil
+            return
+        }
         contractStreamingSession = MarkdownContract.StreamingMarkdownSession(
-            engine: engine,
+            engine: resolvedEngine,
             differ: differ,
             animationCompiler: animationCompiler,
             parseOptions: parseOptions,
@@ -135,13 +160,17 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
         )
     }
 
-    /// Append streaming markdown in contract mode and return canonical diff/animation DTO update.
     @discardableResult
-    public func appendContractStreamChunk(
-        _ chunk: String
-    ) throws -> MarkdownContract.StreamingRenderUpdate {
+    public func appendContractStreamChunk(_ chunk: String) throws -> MarkdownContract.StreamingRenderUpdate {
         if contractStreamingSession == nil {
-            contractStreamingSession = MarkdownContract.StreamingMarkdownSession()
+            guard let contractStreamingEngine else {
+                throw MarkdownContract.ModelError(
+                    code: .requiredFieldMissing,
+                    message: "Streaming engine not configured",
+                    path: "MarkdownContainerView.contractStreamingEngine"
+                )
+            }
+            contractStreamingSession = MarkdownContract.StreamingMarkdownSession(engine: contractStreamingEngine)
         }
 
         guard let session = contractStreamingSession else {
@@ -159,11 +188,17 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
         return update
     }
 
-    /// Finish contract streaming and emit a final streaming update.
     @discardableResult
     public func finishContractStreaming() throws -> MarkdownContract.StreamingRenderUpdate {
         if contractStreamingSession == nil {
-            contractStreamingSession = MarkdownContract.StreamingMarkdownSession()
+            guard let contractStreamingEngine else {
+                throw MarkdownContract.ModelError(
+                    code: .requiredFieldMissing,
+                    message: "Streaming engine not configured",
+                    path: "MarkdownContainerView.contractStreamingEngine"
+                )
+            }
+            contractStreamingSession = MarkdownContract.StreamingMarkdownSession(engine: contractStreamingEngine)
         }
 
         guard let session = contractStreamingSession else {
@@ -183,70 +218,29 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
         return update
     }
 
-    /// 强制跳过所有剩余动画，立即展示全部内容
     public func skipAnimation() {
         animationEngine.finishAll(in: self)
     }
 
     public var contentHeight: CGFloat {
-        calculateContentHeight()
-    }
-
-    // MARK: - FragmentContaining
-
-    public func update(_ newFragments: [RenderFragment]) {
-        update(newFragments, contractAnimationPlan: nil)
-    }
-
-    private func update(
-        _ newFragments: [RenderFragment],
-        contractAnimationPlan: MarkdownContract.CompiledAnimationPlan?
-    ) {
-        let oldFragments = fragments
-        let changes = differ.diff(old: oldFragments, new: newFragments)
-        fragments = newFragments
-
-        guard !changes.isEmpty else {
-            notifyHeightChange()
-            return
-        }
-
-        transactionVersion += 1
-        var policy = conflictPolicy
-        policy.defaultEffectKey = animationEffectKey
-
-        let transaction = AnimationTransaction(
-            version: transactionVersion,
-            sourceFragmentsHint: oldFragments,
-            targetFragments: newFragments,
-            submissionMode: policy.submissionMode,
-            planBuilder: { [differ, contractAnimationPlanMapper, policy, contractAnimationPlan] source, target in
-                let rebuiltChanges = differ.diff(old: source, new: target)
-                if let contractAnimationPlan {
-                    let mappedPlan = contractAnimationPlanMapper.makePlan(
-                        contractPlan: contractAnimationPlan,
-                        oldFragments: source,
-                        newFragments: target,
-                        changes: rebuiltChanges,
-                        defaultEffectKey: policy.defaultEffectKey
-                    )
-                    return Self.schedule(mappedPlan, mode: policy.schedulingMode)
-                }
-                return .empty
-            }
+        let fitting = stackView.systemLayoutSizeFitting(
+            CGSize(width: bounds.width, height: UIView.layoutFittingCompressedSize.height),
+            withHorizontalFittingPriority: .required,
+            verticalFittingPriority: .fittingSizeLevel
         )
-        animationEngine.submit(transaction, to: self)
-        notifyHeightChange()
+        return ceil(max(0, fitting.height))
     }
-
-    // MARK: - Layout
 
     public override func layoutSubviews() {
         super.layoutSubviews()
+
         let widthChanged = abs(bounds.width - lastWidth) > 1
         if widthChanged {
             lastWidth = bounds.width
+            stackView.frame = bounds
             rerender()
+        } else {
+            stackView.frame = bounds
         }
     }
 
@@ -254,7 +248,27 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
         CGSize(width: UIView.noIntrinsicMetric, height: contentHeight)
     }
 
+    // MARK: - SceneAnimationHost
+
+    public func applySceneSnapshot(_ scene: RenderScene) {
+        currentScene = scene
+        _ = sceneApplier.apply(
+            scene: scene,
+            maxWidth: max(bounds.width, 1),
+            managedViews: &managedViews
+        )
+        notifyHeightChange()
+    }
+
     // MARK: - Internal
+
+    private func setupStackView() {
+        stackView.axis = .vertical
+        stackView.spacing = 0
+        stackView.alignment = .fill
+        stackView.distribution = .fill
+        addSubview(stackView)
+    }
 
     private func bindAnimationEngine() {
         animationEngine.onAnimationComplete = { [weak self] in
@@ -277,18 +291,20 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
     }
 
     private func registerConfigurableEffects(charactersPerSecond: Int) {
-        let appearanceMode = typingFragmentAppearanceMode
+        let appearanceMode = typingEntityAppearanceMode
+
         animationEngine.registerEffect(.typing) {
             TypingEffect(
                 charactersPerSecond: charactersPerSecond,
-                fragmentAppearanceMode: appearanceMode
+                entityAppearanceMode: appearanceMode
             )
         }
+
         animationEngine.registerEffect(.streamingMask) {
             CompositeEffect(effects: [
                 TypingEffect(
                     charactersPerSecond: charactersPerSecond,
-                    fragmentAppearanceMode: appearanceMode
+                    entityAppearanceMode: appearanceMode
                 ),
                 SegmentFadeInEffect(),
                 GradientMaskRevealEffect()
@@ -300,33 +316,60 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
         guard bounds.width > 0 else { return }
 
         guard let contractModel = currentContractModel else {
-            update([], contractAnimationPlan: nil)
+            applySceneSnapshot(RenderScene.empty(documentId: currentScene.documentId))
             return
         }
 
-        let newFragments = contractRenderAdapter.render(
+        let newScene = contractRenderAdapter.render(
             model: contractModel,
             theme: theme,
             maxWidth: bounds.width
         )
+
+        let sceneDiff = sceneDiffer.diff(old: currentScene, new: newScene)
         let contractAnimationPlan = pendingContractAnimationPlan
         pendingContractAnimationPlan = nil
-        update(newFragments, contractAnimationPlan: contractAnimationPlan)
-    }
 
-    private func calculateContentHeight() -> CGFloat {
-        var totalHeight: CGFloat = 0
-        for (i, fragment) in fragments.enumerated() {
-            if let view = managedViews[fragment.fragmentId],
-               let estimatable = view as? HeightEstimatable {
-                let len = (fragment as? ProgressivelyRevealable)?.totalContentLength ?? 1
-                totalHeight += estimatable.estimatedHeight(atDisplayedLength: len, maxWidth: bounds.width)
-            }
-            if i < fragments.count - 1 {
-                totalHeight += fragment.spacingAfter
-            }
+        guard !sceneDiff.isEmpty else {
+            applySceneSnapshot(newScene)
+            return
         }
-        return totalHeight
+
+        transactionVersion += 1
+        var policy = conflictPolicy
+        policy.defaultEffectKey = animationEffectKey
+
+        let transaction = AnimationTransaction(
+            version: transactionVersion,
+            sourceSceneHint: currentScene,
+            targetScene: newScene,
+            submissionMode: policy.submissionMode,
+            planBuilder: { [contractAnimationPlanMapper, policy, contractAnimationPlan] oldScene, targetScene in
+                let rebuilt = self.sceneDiffer.diff(old: oldScene, new: targetScene)
+                let mapped: AnimationPlan
+                if let contractAnimationPlan {
+                    mapped = contractAnimationPlanMapper.makePlan(
+                        contractPlan: contractAnimationPlan,
+                        oldScene: oldScene,
+                        newScene: targetScene,
+                        diff: rebuilt,
+                        defaultEffectKey: policy.defaultEffectKey
+                    )
+                } else {
+                    mapped = AnimationPlan(steps: [AnimationStep(
+                        id: "scene.apply",
+                        effectKey: policy.defaultEffectKey,
+                        entityIDs: targetScene.entityIDs,
+                        fromScene: oldScene,
+                        toScene: targetScene
+                    )])
+                }
+
+                return Self.schedule(mapped, mode: policy.schedulingMode)
+            }
+        )
+
+        animationEngine.submit(transaction, to: self)
     }
 
     private func notifyHeightChange() {
@@ -342,6 +385,7 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
         switch mode {
         case .groupedByPhase:
             return plan
+
         case .serialByChange:
             var previous: AnimationStep.StepID?
             let steps = plan.steps.map { step -> AnimationStep in
@@ -350,43 +394,27 @@ public final class MarkdownContainerView: UIView, FragmentContaining {
                     id: step.id,
                     dependencies: dependencies,
                     effectKey: step.effectKey,
-                    changes: step.changes,
-                    oldFragments: step.oldFragments,
-                    newFragments: step.newFragments
+                    entityIDs: step.entityIDs,
+                    fromScene: step.fromScene,
+                    toScene: step.toScene
                 )
                 previous = step.id
                 return rewritten
             }
             return AnimationPlan(steps: steps)
+
         case .parallelByChange:
             let steps = plan.steps.map { step in
                 AnimationStep(
                     id: step.id,
                     dependencies: [],
                     effectKey: step.effectKey,
-                    changes: step.changes,
-                    oldFragments: step.oldFragments,
-                    newFragments: step.newFragments
+                    entityIDs: step.entityIDs,
+                    fromScene: step.fromScene,
+                    toScene: step.toScene
                 )
             }
             return AnimationPlan(steps: steps)
-        }
-    }
-}
-
-extension MarkdownContainerView: OverlayHostCapable {
-    public var overlayHostView: UIView { self }
-}
-
-extension MarkdownContainerView: HeightAnimatableCapable {
-    public func applyAnimatedHeight(_ height: CGFloat) {
-        let targetHeight = max(0, height)
-        if translatesAutoresizingMaskIntoConstraints {
-            var newFrame = frame
-            newFrame.size.height = targetHeight
-            frame = newFrame
-        } else {
-            invalidateIntrinsicContentSize()
         }
     }
 }

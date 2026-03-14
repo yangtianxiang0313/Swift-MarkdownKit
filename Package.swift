@@ -1,5 +1,4 @@
 // swift-tools-version:5.9
-// The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
 
@@ -10,13 +9,27 @@ let package = Package(
     ],
     products: [
         .library(
+            name: "XHSMarkdownCore",
+            targets: ["XHSMarkdownCore"]
+        ),
+        .library(
+            name: "XHSMarkdownAdapterMarkdownn",
+            targets: ["XHSMarkdownAdapterMarkdownn"]
+        ),
+        .library(
+            name: "XHSMarkdownUIKit",
+            targets: ["XHSMarkdownUIKit"]
+        ),
+        .library(
             name: "XHSMarkdownKit",
             targets: ["XHSMarkdownKit"]
         ),
+        .library(
+            name: "XHSMarkdownKitMarkdownn",
+            targets: ["XHSMarkdownKitMarkdownn"]
+        ),
     ],
-    dependencies: [
-        // 本地 vendored 依赖（XYMarkdown / XYCmark）
-    ],
+    dependencies: [],
     targets: [
         .target(
             name: "XYCmark",
@@ -43,15 +56,62 @@ let package = Package(
             path: "Sources/XYMarkdown/Sources/Markdown"
         ),
         .target(
+            name: "XHSMarkdownCore",
+            path: "Sources/XHSMarkdownKit",
+            sources: [
+                "Contract",
+                "Markdown/Parser/MarkdownContractParser.swift"
+            ]
+        ),
+        .target(
+            name: "XHSMarkdownAdapterMarkdownn",
+            dependencies: [
+                "XHSMarkdownCore",
+                "XYMarkdown"
+            ],
+            path: "Sources/XHSMarkdownKit",
+            sources: [
+                "Markdown/Parser/XYMarkdown"
+            ]
+        ),
+        .target(
+            name: "XHSMarkdownUIKit",
+            dependencies: [
+                "XHSMarkdownCore"
+            ],
+            path: "Sources/XHSMarkdownKit",
+            sources: [
+                "Core",
+                "Extensions",
+                "Markdown/Adapter",
+                "Markdown/Delegate",
+                "Markdown/Theme",
+                "Public"
+            ]
+        ),
+        .target(
             name: "XHSMarkdownKit",
             dependencies: [
-                "XYMarkdown",
+                "XHSMarkdownCore",
+                "XHSMarkdownUIKit"
             ],
-            path: "Sources/XHSMarkdownKit"
+            path: "Sources/XHSMarkdownKitFacade"
+        ),
+        .target(
+            name: "XHSMarkdownKitMarkdownn",
+            dependencies: [
+                "XHSMarkdownCore",
+                "XHSMarkdownAdapterMarkdownn",
+                "XHSMarkdownUIKit"
+            ],
+            path: "Sources/XHSMarkdownKitMarkdownnFacade"
         ),
         .testTarget(
             name: "XHSMarkdownKitTests",
-            dependencies: ["XHSMarkdownKit"],
+            dependencies: [
+                "XHSMarkdownKit",
+                "XHSMarkdownAdapterMarkdownn"
+            ],
             path: "Tests/XHSMarkdownKitTests",
             resources: [
                 .copy("../Fixtures")

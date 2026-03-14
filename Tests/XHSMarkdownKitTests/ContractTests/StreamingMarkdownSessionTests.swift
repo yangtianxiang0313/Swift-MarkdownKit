@@ -1,10 +1,12 @@
 import XCTest
 @testable import XHSMarkdownKit
+import XHSMarkdownAdapterMarkdownn
 
 final class StreamingMarkdownSessionTests: XCTestCase {
 
     func testAppendChunkProducesIncrementalUpdates() throws {
         let session = MarkdownContract.StreamingMarkdownSession(
+            engine: MarkdownnAdapter.makeEngine(),
             parseOptions: .init(documentId: "stream-doc")
         )
 
@@ -21,6 +23,7 @@ final class StreamingMarkdownSessionTests: XCTestCase {
 
     func testFinishMarksFinalUpdate() throws {
         let session = MarkdownContract.StreamingMarkdownSession(
+            engine: MarkdownnAdapter.makeEngine(),
             parseOptions: .init(documentId: "stream-doc")
         )
 
@@ -33,6 +36,7 @@ final class StreamingMarkdownSessionTests: XCTestCase {
 
     func testResetClearsState() throws {
         let session = MarkdownContract.StreamingMarkdownSession(
+            engine: MarkdownnAdapter.makeEngine(),
             parseOptions: .init(documentId: "stream-doc")
         )
 

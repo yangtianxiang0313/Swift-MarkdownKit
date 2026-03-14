@@ -55,9 +55,9 @@ public extension MarkdownTheme {
         public var colors: [UIColor?]
 
         public static let `default` = HeadingStyle(
-            fontSizes: [16, 16, 16, 16, 16, 16],
-            fontWeights: [.semibold, .semibold, .semibold, .semibold, .semibold, .semibold],
-            lineHeights: [26, 26, 26, 26, 26, 26],
+            fontSizes: [28, 24, 20, 18, 16, 15],
+            fontWeights: [.bold, .bold, .semibold, .semibold, .semibold, .medium],
+            lineHeights: [36, 32, 28, 26, 24, 22],
             color: .label, colors: [nil, nil, nil, nil, nil, nil]
         )
 
@@ -97,7 +97,10 @@ public extension MarkdownTheme {
 
         public static let `default` = CodeStyle(
             font: .monospacedSystemFont(ofSize: 14, weight: .regular),
-            inlineColor: .systemGray, inlineBackgroundColor: nil, letterSpacing: 0, block: .default
+            inlineColor: .secondaryLabel,
+            inlineBackgroundColor: UIColor.systemGray5.withAlphaComponent(0.85),
+            letterSpacing: 0,
+            block: .default
         )
 
         public init(font: UIFont = Self.default.font, inlineColor: UIColor = Self.default.inlineColor,
@@ -110,21 +113,29 @@ public extension MarkdownTheme {
 
     struct CodeBlockStyle {
         public var backgroundColor: UIColor
+        public var textColor: UIColor
         public var cornerRadius: CGFloat
         public var padding: UIEdgeInsets
         public var borderWidth: CGFloat
         public var borderColor: UIColor
 
         public static let `default` = CodeBlockStyle(
-            backgroundColor: .secondarySystemBackground, cornerRadius: 10,
+            backgroundColor: .secondarySystemBackground,
+            textColor: .label,
+            cornerRadius: 10,
             padding: UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 12),
             borderWidth: 0.5, borderColor: .separator
         )
 
-        public init(backgroundColor: UIColor = Self.default.backgroundColor, cornerRadius: CGFloat = Self.default.cornerRadius,
+        public init(backgroundColor: UIColor = Self.default.backgroundColor,
+                     textColor: UIColor = Self.default.textColor,
+                     cornerRadius: CGFloat = Self.default.cornerRadius,
                      padding: UIEdgeInsets = Self.default.padding, borderWidth: CGFloat = Self.default.borderWidth,
                      borderColor: UIColor = Self.default.borderColor) {
-            self.backgroundColor = backgroundColor; self.cornerRadius = cornerRadius; self.padding = padding
+            self.backgroundColor = backgroundColor
+            self.textColor = textColor
+            self.cornerRadius = cornerRadius
+            self.padding = padding
             self.borderWidth = borderWidth; self.borderColor = borderColor
         }
     }

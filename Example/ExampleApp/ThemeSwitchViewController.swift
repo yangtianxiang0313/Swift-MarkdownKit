@@ -27,7 +27,7 @@ class ThemeSwitchViewController: UIViewController, MarkdownContainerViewDelegate
     }()
 
     private lazy var containerView: MarkdownContainerView = {
-        let view = MarkdownContainerView(theme: .default)
+        let view = ExampleMarkdownRuntime.makeConfiguredContainer(theme: .default)
         view.delegate = self
         return view
     }()

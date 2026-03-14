@@ -1,10 +1,11 @@
 import XCTest
 @testable import XHSMarkdownKit
+import XHSMarkdownAdapterMarkdownn
 
 final class CanonicalRendererTests: XCTestCase {
 
     func testEngineRendersHeadingAndParagraph() throws {
-        let engine = MarkdownContractEngine()
+        let engine = MarkdownnAdapter.makeEngine()
 
         let model = try engine.render(
             "# Title\n\nBody",
@@ -28,7 +29,7 @@ final class CanonicalRendererTests: XCTestCase {
         }
 
         let renderer = MarkdownContract.DefaultCanonicalRenderer(registry: registry)
-        let engine = MarkdownContractEngine(renderer: renderer)
+        let engine = MarkdownContractEngine(parser: XYMarkdownContractParser(), renderer: renderer)
 
         let model = try engine.render("# Title")
         let customHeading = model.blocks.first
@@ -38,7 +39,7 @@ final class CanonicalRendererTests: XCTestCase {
     }
 
     func testInlineHTMLCustomElementRendersAsCustomInlineSpan() throws {
-        let engine = MarkdownContractEngine()
+        let engine = MarkdownnAdapter.makeEngine()
         let model = try engine.render("Hello <badge text=\"new\" /> world")
 
         guard let paragraph = model.blocks.first(where: { $0.kind == .paragraph }) else {
@@ -57,7 +58,7 @@ final class CanonicalRendererTests: XCTestCase {
     }
 
     func testRendererCollectsImageAssets() throws {
-        let engine = MarkdownContractEngine()
+        let engine = MarkdownnAdapter.makeEngine()
         let model = try engine.render("![alt](https://example.com/image.png)")
 
         XCTAssertTrue(model.blocks.contains(where: { $0.kind == .image }))
@@ -159,7 +160,7 @@ final class CanonicalRendererTests: XCTestCase {
 
     func testNamedCustomElementRendererOverridesDefaultCustomElementRendering() throws {
         let registry = MarkdownContract.CanonicalRendererRegistry.makeDefault()
-        registry.registerCustomElementBlockRenderer(named: "Card") { node, context, reg in
+        registry.registerCustomElementBlockRenderer(named: "Card") { node, _, _ in
             [MarkdownContract.RenderBlock(
                 id: node.id,
                 kind: .custom,
@@ -168,7 +169,10 @@ final class CanonicalRendererTests: XCTestCase {
             )]
         }
 
-        let engine = MarkdownContractEngine(renderer: MarkdownContract.DefaultCanonicalRenderer(registry: registry))
+        let engine = MarkdownContractEngine(
+            parser: XYMarkdownContractParser(),
+            renderer: MarkdownContract.DefaultCanonicalRenderer(registry: registry)
+        )
         let model = try engine.render("@Card {\\nHello\\n}")
 
         XCTAssertTrue(model.blocks.contains(where: { $0.metadata["renderer"] == .string("named-card") }))

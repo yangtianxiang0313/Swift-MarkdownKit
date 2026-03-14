@@ -1,4 +1,5 @@
 import UIKit
+import XHSMarkdownKit
 
 @main
 class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -56,5 +57,32 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         window?.makeKeyAndVisible()
         
         return true
+    }
+}
+
+enum ExampleMarkdownRuntime {
+    static func makeConfiguredContainer(theme: MarkdownTheme = .default) -> MarkdownContainerView {
+        let container = MarkdownContainerView(theme: theme)
+        _ = installMarkdownn(into: container)
+        return container
+    }
+
+    @discardableResult
+    static func installMarkdownn(into container: MarkdownContainerView) -> Bool {
+        #if canImport(XYMarkdown)
+        let registry = MarkdownContract.AdapterRegistry(
+            defaultParserID: MarkdownnAdapter.parserID,
+            defaultRendererID: MarkdownnAdapter.rendererID
+        )
+        MarkdownnAdapter.install(into: registry)
+        container.contractKit = MarkdownContract.UniversalMarkdownKit(registry: registry)
+        container.contractStreamingEngine = MarkdownnAdapter.makeEngine()
+        return true
+        #else
+        // Root pod (UIKit default) has no parser plugin; keep predictable "parser missing" behavior.
+        container.contractKit = MarkdownContract.UniversalMarkdownKit()
+        container.contractStreamingEngine = nil
+        return false
+        #endif
     }
 }

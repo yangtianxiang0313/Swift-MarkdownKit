@@ -12,19 +12,19 @@ public extension MarkdownContainerView {
         case .instant:
             animationEffectKey = .instant
             animationSubmissionMode = .interruptCurrent
-            typingFragmentAppearanceMode = .simultaneous
+            typingEntityAppearanceMode = .simultaneous
 
         case .typing(let cps):
             animationEffectKey = .typing
             animationSubmissionMode = .queueLatest
             typingCharactersPerSecond = max(1, cps)
-            typingFragmentAppearanceMode = .sequential
+            typingEntityAppearanceMode = .sequential
 
         case .streamingMask(let cps):
             animationEffectKey = .streamingMask
             animationSubmissionMode = .queueLatest
             typingCharactersPerSecond = max(1, cps)
-            typingFragmentAppearanceMode = .sequential
+            typingEntityAppearanceMode = .sequential
         }
     }
 }

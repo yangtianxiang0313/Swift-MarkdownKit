@@ -1,14 +1,14 @@
 import Foundation
 
 public struct MarkdownContractEngine {
-    public let parser: MarkdownContractParser
+    public let parser: MarkdownContractParser?
     public let rewritePipeline: MarkdownContract.CanonicalRewritePipeline
-    public let renderer: any MarkdownContract.CanonicalRenderer
+    public let renderer: (any MarkdownContract.CanonicalRenderer)?
 
     public init(
-        parser: MarkdownContractParser = XYMarkdownContractParser(),
+        parser: MarkdownContractParser? = nil,
         rewritePipeline: MarkdownContract.CanonicalRewritePipeline = .init(),
-        renderer: any MarkdownContract.CanonicalRenderer = MarkdownContract.DefaultCanonicalRenderer()
+        renderer: (any MarkdownContract.CanonicalRenderer)? = nil
     ) {
         self.parser = parser
         self.rewritePipeline = rewritePipeline
@@ -18,8 +18,15 @@ public struct MarkdownContractEngine {
     public func parse(
         _ markdown: String,
         options: MarkdownContractParserOptions = MarkdownContractParserOptions()
-    ) -> MarkdownContract.CanonicalDocument {
-        parser.parse(markdown, options: options)
+    ) throws -> MarkdownContract.CanonicalDocument {
+        guard let parser else {
+            throw MarkdownContract.ModelError(
+                code: .requiredFieldMissing,
+                message: "Parser not configured",
+                path: "MarkdownContractEngine.parser"
+            )
+        }
+        return parser.parse(markdown, options: options)
     }
 
     public func transform(_ document: MarkdownContract.CanonicalDocument) throws -> MarkdownContract.CanonicalDocument {
@@ -30,6 +37,13 @@ public struct MarkdownContractEngine {
         _ document: MarkdownContract.CanonicalDocument,
         options: MarkdownContract.CanonicalRenderOptions = MarkdownContract.CanonicalRenderOptions()
     ) throws -> MarkdownContract.RenderModel {
+        guard let renderer else {
+            throw MarkdownContract.ModelError(
+                code: .requiredFieldMissing,
+                message: "Renderer not configured",
+                path: "MarkdownContractEngine.renderer"
+            )
+        }
         let rewritten = try transform(document)
         return try renderer.render(document: rewritten, options: options)
     }
@@ -39,7 +53,7 @@ public struct MarkdownContractEngine {
         parseOptions: MarkdownContractParserOptions = MarkdownContractParserOptions(),
         renderOptions: MarkdownContract.CanonicalRenderOptions = MarkdownContract.CanonicalRenderOptions()
     ) throws -> MarkdownContract.RenderModel {
-        let document = parse(markdown, options: parseOptions)
+        let document = try parse(markdown, options: parseOptions)
         return try render(document, options: renderOptions)
     }
 }

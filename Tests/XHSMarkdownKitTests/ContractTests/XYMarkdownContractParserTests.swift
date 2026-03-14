@@ -1,5 +1,6 @@
 import XCTest
 @testable import XHSMarkdownKit
+import XHSMarkdownAdapterMarkdownn
 
 final class XYMarkdownContractParserTests: XCTestCase {
 
@@ -45,6 +46,62 @@ final class XYMarkdownContractParserTests: XCTestCase {
         let nodes = flatten(document.root)
 
         XCTAssertFalse(nodes.contains(where: { $0.source.sourceKind == .directive }))
+    }
+
+    func testTableNodeContainsStructuredHeadersRowsAndAlignments() {
+        let parser = XYMarkdownContractParser()
+        let markdown = """
+        | name | age |
+        | :--- | ---:|
+        | tom  | 10  |
+        | bob  | 12  |
+        """
+
+        let document = parser.parse(markdown, options: .init(documentId: "doc-table"))
+        let nodes = flatten(document.root)
+
+        guard let table = nodes.first(where: { $0.kind == .table }) else {
+            XCTFail("table node not found")
+            return
+        }
+
+        XCTAssertEqual(
+            table.attrs["headers"],
+            .array([.string("name"), .string("age")])
+        )
+        XCTAssertEqual(
+            table.attrs["rows"],
+            .array([
+                .array([.string("tom"), .string("10")]),
+                .array([.string("bob"), .string("12")])
+            ])
+        )
+        XCTAssertEqual(
+            table.attrs["alignments"],
+            .array([.string("left"), .string("right")])
+        )
+    }
+
+    func testTableNodeRetainsNilAlignmentSlots() {
+        let parser = XYMarkdownContractParser()
+        let markdown = """
+        | a | b | c |
+        | :-- | --- | --: |
+        | 1 | 2 | 3 |
+        """
+
+        let document = parser.parse(markdown, options: .init(documentId: "doc-table-alignment"))
+        let nodes = flatten(document.root)
+
+        guard let table = nodes.first(where: { $0.kind == .table }) else {
+            XCTFail("table node not found")
+            return
+        }
+
+        XCTAssertEqual(
+            table.attrs["alignments"],
+            .array([.string("left"), .null, .string("right")])
+        )
     }
 
     private func flatten(_ root: MarkdownContract.CanonicalNode) -> [MarkdownContract.CanonicalNode] {

@@ -31,7 +31,7 @@ class CustomRendererDemoViewController: UIViewController {
     }()
 
     private lazy var containerView: MarkdownContainerView = {
-        MarkdownContainerView(theme: .default)
+        ExampleMarkdownRuntime.makeConfiguredContainer(theme: .default)
     }()
 
     // MARK: - Data
@@ -148,24 +148,29 @@ class CustomRendererDemoViewController: UIViewController {
 
     private func renderCustomCodeBlockDemo() {
         let adapter = MarkdownContract.RenderModelUIKitAdapter()
-        adapter.registerBlockRenderer(for: .codeBlock) { block, _, _ in
+        adapter.registerBlockRenderer(for: .codeBlock) { block, _, adapter in
             let code = block.contractAttrString(for: "code") ?? ""
             let language = block.contractAttrString(for: "language") ?? "text"
-            let content = CustomCodeFragmentContent(code: code, language: language)
 
-            return [ContractViewFragment(
-                fragmentId: block.id,
-                nodeType: .codeBlock,
-                reuseIdentifier: ReuseIdentifier(rawValue: "contract.customCodeBlock"),
-                content: content,
-                totalContentLength: code.count,
+            return [adapter.makeCustomViewNode(
+                id: block.id,
+                kind: "codeBlock",
+                reuseIdentifier: "contract.customCodeBlock",
+                signature: "\(language)|\(code)",
+                revealUnitCount: max(1, code.count),
+                spacingAfter: 16,
                 makeView: { CustomCodeBlockView() },
-                configure: { view in
+                configure: { view, maxWidth in
                     guard let codeView = view as? CustomCodeBlockView else { return }
-                    codeView.configure(code: code, language: language)
+                    codeView.configure(code: code, language: language, maxWidth: maxWidth)
+                },
+                reveal: { view, displayedUnits in
+                    guard let codeView = view as? CustomCodeBlockView else { return }
+                    codeView.reveal(upTo: displayedUnits)
                 }
             )]
         }
+
         containerView.contractRenderAdapter = adapter
         do {
             try containerView.setContractMarkdown(demoMarkdown)
@@ -178,18 +183,18 @@ class CustomRendererDemoViewController: UIViewController {
         let adapter = MarkdownContract.RenderModelUIKitAdapter()
         adapter.registerBlockRenderer(forCustomElement: "Card") { block, _, _ in
             let title = block.contractAttrString(for: "title") ?? "Card"
-            let text = "🧩 Contract Card\n\(title)"
-            return [Self.makeCalloutFragment(
-                fragmentId: block.id,
+            let text = "Contract Card\n\(title)"
+            return [Self.makeCalloutNode(
+                nodeID: block.id,
                 text: text,
                 color: .systemBlue
             )]
         }
         adapter.registerBlockRenderer(forCustomElement: "spotlight") { block, _, _ in
             let type = block.contractAttrString(for: "type") ?? "info"
-            let text = "💡 HTML Spotlight (\(type.uppercased()))"
-            return [Self.makeCalloutFragment(
-                fragmentId: block.id,
+            let text = "HTML Spotlight (\(type.uppercased()))"
+            return [Self.makeCalloutNode(
+                nodeID: block.id,
                 text: text,
                 color: .systemOrange
             )]
@@ -213,11 +218,11 @@ class CustomRendererDemoViewController: UIViewController {
         }
     }
 
-    private static func makeCalloutFragment(
-        fragmentId: String,
+    private static func makeCalloutNode(
+        nodeID: String,
         text: String,
         color: UIColor
-    ) -> RenderFragment {
+    ) -> RenderScene.Node {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = 4
         let attributed = NSAttributedString(
@@ -229,33 +234,16 @@ class CustomRendererDemoViewController: UIViewController {
             ]
         )
 
-        return ContractTextFragment(
-            fragmentId: fragmentId,
-            nodeType: .paragraph,
-            reuseIdentifier: .contractTextView,
-            attributedString: attributed,
-            makeView: { ContractTextView() },
-            configure: { view, _ in
-                guard let textView = view as? ContractTextView else { return }
-                textView.configure(attributedString: attributed, indent: 0)
-            }
+        return RenderScene.Node(
+            id: nodeID,
+            kind: "paragraph",
+            component: TextSceneComponent(attributedText: attributed),
+            spacingAfter: 12
         )
     }
 }
 
-// MARK: - Contract Custom Content
-
-private struct CustomCodeFragmentContent: FragmentContent {
-    let code: String
-    let language: String
-
-    func isEqual(to other: any FragmentContent) -> Bool {
-        guard let rhs = other as? CustomCodeFragmentContent else { return false }
-        return code == rhs.code && language == rhs.language
-    }
-}
-
-class CustomCodeBlockView: UIView, HeightEstimatable, StreamableContent {
+final class CustomCodeBlockView: UIView {
 
     private let languageLabel: UILabel = {
         let label = UILabel()
@@ -272,6 +260,14 @@ class CustomCodeBlockView: UIView, HeightEstimatable, StreamableContent {
         return label
     }()
 
+    private let contentStack: UIStackView = {
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.spacing = 8
+        stack.alignment = .fill
+        return stack
+    }()
+
     private var fullCode: String = ""
 
     override init(frame: CGRect) {
@@ -280,80 +276,33 @@ class CustomCodeBlockView: UIView, HeightEstimatable, StreamableContent {
         layer.cornerRadius = 8
         layer.borderWidth = 1
         layer.borderColor = UIColor.systemBlue.withAlphaComponent(0.3).cgColor
-        addSubview(languageLabel)
-        addSubview(codeLabel)
+
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(contentStack)
+
+        contentStack.addArrangedSubview(languageLabel)
+        contentStack.addArrangedSubview(codeLabel)
+
+        NSLayoutConstraint.activate([
+            contentStack.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            contentStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            contentStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            contentStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12)
+        ])
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
-    func configure(code: String, language: String) {
+    func configure(code: String, language: String, maxWidth: CGFloat) {
         fullCode = code
         languageLabel.text = language.uppercased()
+        codeLabel.preferredMaxLayoutWidth = max(0, maxWidth - 24)
         codeLabel.text = code
-    }
-
-    func estimatedHeight(atDisplayedLength: Int, maxWidth: CGFloat) -> CGFloat {
-        let codeWidth = maxWidth - 24
-        let clamped = max(0, min(atDisplayedLength, fullCode.count))
-        let displayed = String(fullCode.prefix(clamped))
-        let size = displayed.boundingRect(
-            with: CGSize(width: codeWidth, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin],
-            attributes: [.font: codeLabel.font as Any],
-            context: nil
-        )
-        return ceil(size.height) + 50
+        invalidateIntrinsicContentSize()
     }
 
     func reveal(upTo length: Int) {
         let clamped = max(0, min(length, fullCode.count))
         codeLabel.text = String(fullCode.prefix(clamped))
-        setNeedsLayout()
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        languageLabel.frame = CGRect(x: 12, y: 8, width: bounds.width - 24, height: 18)
-        codeLabel.frame = CGRect(x: 12, y: 34, width: bounds.width - 24, height: bounds.height - 46)
-    }
-}
-
-private extension MarkdownContract.RenderBlock {
-    var contractAttrs: [String: MarkdownContract.Value] {
-        guard let attrs = metadata["attrs"], case let .object(map) = attrs else {
-            return [:]
-        }
-        return map
-    }
-
-    func contractAttrString(for key: String) -> String? {
-        if let value = contractAttrs[key], case let .string(text) = value {
-            return text
-        }
-        if let nested = contractAttrs["attributes"], case let .object(map) = nested,
-           let value = map[key], case let .string(text) = value {
-            return text
-        }
-        return nil
-    }
-}
-
-private extension MarkdownContract.InlineSpan {
-    var contractAttrs: [String: MarkdownContract.Value] {
-        guard let attrs = metadata["attrs"], case let .object(map) = attrs else {
-            return [:]
-        }
-        return map
-    }
-
-    func contractAttrString(for key: String) -> String? {
-        if let value = contractAttrs[key], case let .string(text) = value {
-            return text
-        }
-        if let nested = contractAttrs["attributes"], case let .object(map) = nested,
-           let value = map[key], case let .string(text) = value {
-            return text
-        }
-        return nil
     }
 }

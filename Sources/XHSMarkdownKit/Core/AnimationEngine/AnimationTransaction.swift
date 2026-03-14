@@ -7,26 +7,26 @@ public enum AnimationSubmitMode {
 
 public struct AnimationTransaction {
     public let version: Int
-    public let sourceFragmentsHint: [RenderFragment]
-    public let targetFragments: [RenderFragment]
+    public let sourceSceneHint: RenderScene
+    public let targetScene: RenderScene
     public let submissionMode: AnimationSubmitMode
-    private let planBuilder: ([RenderFragment], [RenderFragment]) -> AnimationPlan
+    private let planBuilder: (RenderScene, RenderScene) -> AnimationPlan
 
     public init(
         version: Int,
-        sourceFragmentsHint: [RenderFragment],
-        targetFragments: [RenderFragment],
+        sourceSceneHint: RenderScene,
+        targetScene: RenderScene,
         submissionMode: AnimationSubmitMode = .interruptCurrent,
-        planBuilder: @escaping ([RenderFragment], [RenderFragment]) -> AnimationPlan
+        planBuilder: @escaping (RenderScene, RenderScene) -> AnimationPlan
     ) {
         self.version = version
-        self.sourceFragmentsHint = sourceFragmentsHint
-        self.targetFragments = targetFragments
+        self.sourceSceneHint = sourceSceneHint
+        self.targetScene = targetScene
         self.submissionMode = submissionMode
         self.planBuilder = planBuilder
     }
 
-    public func makePlan(from sourceFragments: [RenderFragment]) -> AnimationPlan {
-        planBuilder(sourceFragments, targetFragments)
+    public func makePlan(from sourceScene: RenderScene) -> AnimationPlan {
+        planBuilder(sourceScene, targetScene)
     }
 }

@@ -77,9 +77,16 @@ extension MarkdownContract {
         }
 
         private func renderCurrent(isFinal: Bool) throws -> StreamingRenderUpdate {
-            let document = engine.parse(buffer, options: parseOptions)
+            let document = try engine.parse(buffer, options: parseOptions)
             let rewritten = try engine.transform(document)
-            let model = try engine.renderer.render(document: rewritten, options: renderOptions)
+            guard let renderer = engine.renderer else {
+                throw ModelError(
+                    code: .requiredFieldMissing,
+                    message: "Renderer not configured",
+                    path: "StreamingMarkdownSession.engine.renderer"
+                )
+            }
+            let model = try renderer.render(document: rewritten, options: renderOptions)
 
             let oldModel = lastModel ?? RenderModel(
                 documentId: model.documentId,

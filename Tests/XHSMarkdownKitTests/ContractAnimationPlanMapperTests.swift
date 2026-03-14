@@ -6,19 +6,21 @@ final class ContractAnimationPlanMapperTests: XCTestCase {
     func testMapperRespectsTimelineConstraintsAndPhaseGrouping() {
         let mapper = DefaultContractAnimationPlanMapper()
 
-        let a = MapperTestFragment(id: "a", payload: "A")
-        let bOld = MapperTestFragment(id: "b", payload: "old")
-        let bNew = MapperTestFragment(id: "b", payload: "new")
-        let c = MapperTestFragment(id: "c", payload: "C")
+        let oldScene = makeScene(documentID: "doc", entries: [
+            (id: "a", text: "A"),
+            (id: "b", text: "old")
+        ])
+        let newScene = makeScene(documentID: "doc", entries: [
+            (id: "b", text: "new"),
+            (id: "c", text: "C")
+        ])
 
-        let oldFragments: [RenderFragment] = [a, bOld]
-        let newFragments: [RenderFragment] = [bNew, c]
-        let changes: [FragmentChange] = [
-            .remove(fragmentId: "a", at: 0),
-            .move(fragmentId: "b", from: 1, to: 0),
-            .insert(fragment: c, at: 1),
-            .update(old: bOld, new: bNew, childChanges: nil)
-        ]
+        let diff = SceneDiff(changes: [
+            SceneChange(kind: .remove, entityId: "a", fromIndex: 0),
+            SceneChange(kind: .move, entityId: "b", fromIndex: 1, toIndex: 0),
+            SceneChange(kind: .insert, entityId: "c", toIndex: 1),
+            SceneChange(kind: .update, entityId: "b")
+        ])
 
         let plan = mapper.makePlan(
             contractPlan: .init(
@@ -48,74 +50,57 @@ final class ContractAnimationPlanMapperTests: XCTestCase {
                     ]
                 )
             ),
-            oldFragments: oldFragments,
-            newFragments: newFragments,
-            changes: changes,
+            oldScene: oldScene,
+            newScene: newScene,
+            diff: diff,
             defaultEffectKey: .instant
         )
 
         XCTAssertEqual(plan.steps.count, 2)
-        XCTAssertTrue(plan.steps[0].changes.contains(where: isStructureChange))
-        XCTAssertFalse(plan.steps[0].changes.contains(where: isUpdateChange))
-        XCTAssertTrue(plan.steps[1].changes.contains(where: isUpdateChange))
+        XCTAssertEqual(plan.steps[0].id, "contract.structure.0")
+        XCTAssertEqual(Set(plan.steps[0].entityIDs), Set(["a", "b", "c"]))
+        XCTAssertEqual(plan.steps[0].effectKey, .instant)
+
+        XCTAssertEqual(plan.steps[1].id, "contract.content.1")
+        XCTAssertEqual(plan.steps[1].entityIDs, ["b"])
         XCTAssertEqual(plan.steps[1].effectKey, .typing)
+        XCTAssertEqual(plan.steps[1].dependencies, [plan.steps[0].id])
     }
 
     func testMapperFallsBackWhenTimelineHasNoPhases() {
         let mapper = DefaultContractAnimationPlanMapper()
 
-        let newFragment = MapperTestFragment(id: "x", payload: "X")
-        let changes: [FragmentChange] = [
-            .insert(fragment: newFragment, at: 0)
-        ]
+        let oldScene = RenderScene.empty(documentId: "doc")
+        let newScene = makeScene(documentID: "doc", entries: [(id: "x", text: "X")])
+        let diff = SceneDiff(changes: [
+            SceneChange(kind: .insert, entityId: "x", toIndex: 0)
+        ])
 
         let plan = mapper.makePlan(
             contractPlan: .init(
                 intents: [],
                 timeline: .init(tracks: [], phases: [], constraints: [])
             ),
-            oldFragments: [],
-            newFragments: [newFragment],
-            changes: changes,
+            oldScene: oldScene,
+            newScene: newScene,
+            diff: diff,
             defaultEffectKey: .segmentFade
         )
 
         XCTAssertEqual(plan.steps.count, 1)
         XCTAssertEqual(plan.steps[0].id, "contract.remainder")
         XCTAssertEqual(plan.steps[0].effectKey, .segmentFade)
+        XCTAssertEqual(plan.steps[0].entityIDs, ["x"])
     }
 
-    private func isStructureChange(_ change: FragmentChange) -> Bool {
-        switch change {
-        case .insert, .remove, .move:
-            return true
-        case .update:
-            return false
+    private func makeScene(documentID: String, entries: [(id: String, text: String)]) -> RenderScene {
+        let nodes = entries.map { entry in
+            RenderScene.Node(
+                id: entry.id,
+                kind: "paragraph",
+                component: TextSceneComponent(attributedText: NSAttributedString(string: entry.text))
+            )
         }
-    }
-
-    private func isUpdateChange(_ change: FragmentChange) -> Bool {
-        if case .update = change { return true }
-        return false
-    }
-}
-
-private final class MapperTestFragment: RenderFragment {
-    let fragmentId: String
-    let nodeType: FragmentNodeType = .paragraph
-    var spacingAfter: CGFloat = 0
-
-    private let payload: String
-
-    init(id: String, payload: String) {
-        self.fragmentId = id
-        self.payload = payload
-    }
-
-    func isContentEqual(to other: any RenderFragment) -> Bool {
-        guard let rhs = other as? MapperTestFragment else { return false }
-        guard fragmentId == rhs.fragmentId else { return false }
-        guard spacingAfter == rhs.spacingAfter else { return false }
-        return payload == rhs.payload
+        return RenderScene(documentId: documentID, nodes: nodes)
     }
 }

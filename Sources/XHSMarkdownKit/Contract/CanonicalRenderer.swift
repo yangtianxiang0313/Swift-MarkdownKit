@@ -4,18 +4,15 @@ extension MarkdownContract {
     public struct CanonicalRenderOptions: Sendable, Equatable {
         public var themeTokens: ThemeTokens
         public var nodeStyleSheet: NodeStyleSheet
-        public var styleTokensByNodeKind: [String: [StyleToken]]
         public var metadata: [String: Value]
 
         public init(
             themeTokens: ThemeTokens = ThemeTokens(),
             nodeStyleSheet: NodeStyleSheet = NodeStyleSheet(),
-            styleTokensByNodeKind: [String: [StyleToken]] = [:],
             metadata: [String: Value] = [:]
         ) {
             self.themeTokens = themeTokens
             self.nodeStyleSheet = nodeStyleSheet
-            self.styleTokensByNodeKind = styleTokensByNodeKind
             self.metadata = metadata
         }
     }
@@ -474,10 +471,6 @@ private extension MarkdownContract.CanonicalRendererRegistry {
                     themeTokens: options.themeTokens.values
                 )
             )
-        }
-
-        if let legacy = options.styleTokensByNodeKind[nodeKey] {
-            resolved = mergeStyleTokens(resolved, with: legacy)
         }
 
         return resolved

@@ -1,11 +1,14 @@
 import Foundation
+#if canImport(XHSMarkdownCore)
+import XHSMarkdownCore
+#endif
 
 public protocol ContractAnimationPlanMapping {
     func makePlan(
         contractPlan: MarkdownContract.CompiledAnimationPlan,
-        oldFragments: [RenderFragment],
-        newFragments: [RenderFragment],
-        changes: [FragmentChange],
+        oldScene: RenderScene,
+        newScene: RenderScene,
+        diff: SceneDiff,
         defaultEffectKey: AnimationEffectKey
     ) -> AnimationPlan
 }
@@ -15,19 +18,18 @@ public struct DefaultContractAnimationPlanMapper: ContractAnimationPlanMapping {
 
     public func makePlan(
         contractPlan: MarkdownContract.CompiledAnimationPlan,
-        oldFragments: [RenderFragment],
-        newFragments: [RenderFragment],
-        changes: [FragmentChange],
+        oldScene: RenderScene,
+        newScene: RenderScene,
+        diff: SceneDiff,
         defaultEffectKey: AnimationEffectKey
     ) -> AnimationPlan {
-        guard !changes.isEmpty else { return .empty }
+        guard !diff.isEmpty else { return .empty }
 
         let phases = orderedPhases(from: contractPlan.timeline)
         let tracksByID = Dictionary(uniqueKeysWithValues: contractPlan.timeline.tracks.map { ($0.id, $0) })
 
-        var remaining = changes
+        var remaining = diff.changes
         var steps: [AnimationStep] = []
-        var cursor = oldFragments
         var previousStepID: AnimationStep.StepID?
 
         for (index, phase) in phases.enumerated() {
@@ -37,59 +39,52 @@ public struct DefaultContractAnimationPlanMapper: ContractAnimationPlanMapping {
             let phaseChanges = takeChanges(from: &remaining, matching: supportedKinds)
             guard !phaseChanges.isEmpty else { continue }
 
-            let next = apply(phaseChanges, to: cursor)
             let stepID = "contract.\(sanitized(phase.id)).\(index)"
+            let entityIDs = phaseChanges.map(\.entityId)
 
             steps.append(AnimationStep(
                 id: stepID,
                 dependencies: previousStepID.map { [$0] } ?? [],
                 effectKey: effectKey(for: phase, fallback: defaultEffectKey),
-                changes: phaseChanges,
-                oldFragments: cursor,
-                newFragments: next
+                entityIDs: entityIDs,
+                fromScene: oldScene,
+                toScene: newScene
             ))
 
-            cursor = next
             previousStepID = stepID
         }
 
         if !remaining.isEmpty {
-            let next = apply(remaining, to: cursor)
-            let remainderStepID = "contract.remainder"
             steps.append(AnimationStep(
-                id: remainderStepID,
+                id: "contract.remainder",
                 dependencies: previousStepID.map { [$0] } ?? [],
                 effectKey: defaultEffectKey,
-                changes: remaining,
-                oldFragments: cursor,
-                newFragments: next
+                entityIDs: remaining.map(\.entityId),
+                fromScene: oldScene,
+                toScene: newScene
             ))
-            cursor = next
-            previousStepID = remainderStepID
+            previousStepID = "contract.remainder"
         }
 
         if steps.isEmpty {
-            let next = apply(changes, to: oldFragments)
-            let fallbackStep = AnimationStep(
+            steps = [AnimationStep(
                 id: "contract.fallback",
                 effectKey: defaultEffectKey,
-                changes: changes,
-                oldFragments: oldFragments,
-                newFragments: next
-            )
-            steps = [fallbackStep]
-            cursor = next
-            previousStepID = fallbackStep.id
+                entityIDs: diff.changes.map(\.entityId),
+                fromScene: oldScene,
+                toScene: newScene
+            )]
+            previousStepID = "contract.fallback"
         }
 
-        if cursor.map(\.fragmentId) != newFragments.map(\.fragmentId) {
+        if steps.last?.toScene != newScene {
             steps.append(AnimationStep(
                 id: "contract.finalize",
                 dependencies: previousStepID.map { [$0] } ?? [],
                 effectKey: .instant,
-                changes: [],
-                oldFragments: cursor,
-                newFragments: newFragments
+                entityIDs: newScene.entityIDs,
+                fromScene: oldScene,
+                toScene: newScene
             ))
         }
 
@@ -98,21 +93,14 @@ public struct DefaultContractAnimationPlanMapper: ContractAnimationPlanMapping {
 }
 
 private extension DefaultContractAnimationPlanMapper {
-    enum ChangeKind: String, CaseIterable {
-        case insert
-        case remove
-        case update
-        case move
-    }
-
     func changeKinds(
         for phase: MarkdownContract.TimelinePhase,
         tracksByID: [String: MarkdownContract.TimelineTrack]
-    ) -> Set<ChangeKind> {
-        var result = Set<ChangeKind>(phase.trackIds.compactMap { trackID in
+    ) -> Set<SceneChangeKind> {
+        var result = Set<SceneChangeKind>(phase.trackIds.compactMap { trackID in
             guard let track = tracksByID[trackID] else { return nil }
             guard case let .string(raw)? = track.metadata["changeType"] else { return nil }
-            return ChangeKind(rawValue: raw)
+            return SceneChangeKind(rawValue: raw)
         })
 
         if !result.isEmpty {
@@ -121,19 +109,19 @@ private extension DefaultContractAnimationPlanMapper {
 
         let name = phase.name.lowercased()
         if name.contains("structure") {
-            result.formUnion([ChangeKind.insert, ChangeKind.remove, ChangeKind.move])
+            result.formUnion([.insert, .remove, .move])
         }
         if name.contains("content") || name.contains("update") {
-            result.insert(ChangeKind.update)
+            result.insert(.update)
         }
         if name.contains("insert") {
-            result.insert(ChangeKind.insert)
+            result.insert(.insert)
         }
         if name.contains("remove") {
-            result.insert(ChangeKind.remove)
+            result.insert(.remove)
         }
         if name.contains("move") {
-            result.insert(ChangeKind.move)
+            result.insert(.move)
         }
         return result
     }
@@ -182,16 +170,14 @@ private extension DefaultContractAnimationPlanMapper {
         return orderedIDs.compactMap { phaseByID[$0] }
     }
 
-    func takeChanges(from changes: inout [FragmentChange], matching kinds: Set<ChangeKind>) -> [FragmentChange] {
+    func takeChanges(from changes: inout [SceneChange], matching kinds: Set<SceneChangeKind>) -> [SceneChange] {
         guard !kinds.isEmpty else { return [] }
 
-        var matched: [FragmentChange] = []
-        var remained: [FragmentChange] = []
-        matched.reserveCapacity(changes.count)
-        remained.reserveCapacity(changes.count)
+        var matched: [SceneChange] = []
+        var remained: [SceneChange] = []
 
         for change in changes {
-            if kinds.contains(kind(of: change)) {
+            if kinds.contains(change.kind) {
                 matched.append(change)
             } else {
                 remained.append(change)
@@ -200,19 +186,6 @@ private extension DefaultContractAnimationPlanMapper {
 
         changes = remained
         return matched
-    }
-
-    func kind(of change: FragmentChange) -> ChangeKind {
-        switch change {
-        case .insert:
-            return .insert
-        case .remove:
-            return .remove
-        case .update:
-            return .update
-        case .move:
-            return .move
-        }
     }
 
     func effectKey(for phase: MarkdownContract.TimelinePhase, fallback: AnimationEffectKey) -> AnimationEffectKey {
@@ -228,39 +201,5 @@ private extension DefaultContractAnimationPlanMapper {
             return "_"
         }
         return String(reduced)
-    }
-
-    func apply(_ changes: [FragmentChange], to fragments: [RenderFragment]) -> [RenderFragment] {
-        changes.reduce(fragments) { current, change in
-            apply(change, to: current)
-        }
-    }
-
-    func apply(_ change: FragmentChange, to fragments: [RenderFragment]) -> [RenderFragment] {
-        var result = fragments
-
-        switch change {
-        case .insert(let fragment, let index):
-            let safeIndex = max(0, min(index, result.count))
-            result.insert(fragment, at: safeIndex)
-
-        case .remove(let fragmentID, _):
-            if let index = result.firstIndex(where: { $0.fragmentId == fragmentID }) {
-                result.remove(at: index)
-            }
-
-        case .update(_, let newFragment, _):
-            if let index = result.firstIndex(where: { $0.fragmentId == newFragment.fragmentId }) {
-                result[index] = newFragment
-            }
-
-        case .move(let fragmentID, _, let to):
-            guard let from = result.firstIndex(where: { $0.fragmentId == fragmentID }) else { return result }
-            let fragment = result.remove(at: from)
-            let safeTo = max(0, min(to, result.count))
-            result.insert(fragment, at: safeTo)
-        }
-
-        return result
     }
 }

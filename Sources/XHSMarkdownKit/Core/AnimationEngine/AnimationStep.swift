@@ -6,23 +6,23 @@ public struct AnimationStep {
     public let id: StepID
     public let dependencies: Set<StepID>
     public let effectKey: AnimationEffectKey
-    public let changes: [FragmentChange]
-    public let oldFragments: [RenderFragment]
-    public let newFragments: [RenderFragment]
+    public let entityIDs: [String]
+    public let fromScene: RenderScene
+    public let toScene: RenderScene
 
     public init(
         id: StepID,
         dependencies: Set<StepID> = [],
         effectKey: AnimationEffectKey,
-        changes: [FragmentChange],
-        oldFragments: [RenderFragment],
-        newFragments: [RenderFragment]
+        entityIDs: [String],
+        fromScene: RenderScene,
+        toScene: RenderScene
     ) {
         self.id = id
         self.dependencies = dependencies
         self.effectKey = effectKey
-        self.changes = changes
-        self.oldFragments = oldFragments
-        self.newFragments = newFragments
+        self.entityIDs = entityIDs
+        self.fromScene = fromScene
+        self.toScene = toScene
     }
 }

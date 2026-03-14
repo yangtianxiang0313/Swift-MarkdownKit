@@ -12,14 +12,11 @@ extension MarkdownContract {
         public let defaultRendererID: RendererID
 
         public init(
-            defaultParserID: ParserID = "markdownn.default.parser",
-            defaultRendererID: RendererID = "markdownn.default.renderer"
+            defaultParserID: ParserID = "default.parser",
+            defaultRendererID: RendererID = "default.renderer"
         ) {
             self.defaultParserID = defaultParserID
             self.defaultRendererID = defaultRendererID
-
-            registerParser(XYMarkdownContractParser(), id: defaultParserID)
-            registerRenderer(DefaultCanonicalRenderer(), id: defaultRendererID)
         }
 
         public func registerParser(_ parser: MarkdownContractParser, id: ParserID) {

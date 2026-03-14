@@ -36,8 +36,9 @@ class MarkdownPreviewViewController: UIViewController {
     }()
     
     private lazy var containerView: MarkdownContainerView = {
-        let view = MarkdownContainerView()
+        let view = ExampleMarkdownRuntime.makeConfiguredContainer()
         view.delegate = self
+        markdownPluginInstalled = true
         return view
     }()
     
@@ -49,10 +50,11 @@ class MarkdownPreviewViewController: UIViewController {
             action: #selector(showSamples)
         )
     }()
-    
+
     // MARK: - Properties
     
     private var currentTheme: MarkdownTheme = .default
+    private var markdownPluginInstalled = false
     
     private let sampleMarkdowns: [(title: String, content: String)] = [
         ("基础语法", testHeight),
@@ -92,6 +94,7 @@ class MarkdownPreviewViewController: UIViewController {
         title = "Markdown 预览"
         view.backgroundColor = .systemBackground
         navigationItem.rightBarButtonItem = sampleButton
+        navigationItem.prompt = "Contract 渲染链路（Example 默认已接入 markdownn 插件）"
         
         // 布局
         view.addSubview(segmentedControl)
@@ -151,7 +154,7 @@ class MarkdownPreviewViewController: UIViewController {
         
         present(alertController, animated: true)
     }
-    
+
     // MARK: - Layout
     
     private func updateLayout(for index: Int) {
@@ -212,7 +215,12 @@ class MarkdownPreviewViewController: UIViewController {
 
         do {
             try containerView.setContractMarkdown(markdown)
-            navigationItem.prompt = "Contract 渲染链路"
+            navigationItem.prompt = markdownPluginInstalled
+                ? "Contract 渲染链路（markdownn 插件已安装）"
+                : "Contract 渲染链路"
+        } catch let modelError as MarkdownContract.ModelError
+            where modelError.code == MarkdownContract.ModelError.Code.requiredFieldMissing.rawValue && modelError.path == "parserID" {
+            navigationItem.prompt = "未安装 parser 插件，点击“安装插件”后重试"
         } catch {
             navigationItem.prompt = "Contract 渲染失败：\(error.localizedDescription)"
         }
@@ -317,6 +325,7 @@ class MarkdownPreviewViewController: UIViewController {
     \"\"\"
     
     let container = MarkdownContainerView()
+    ExampleMarkdownRuntime.installMarkdownn(into: container)
     try? container.setContractMarkdown(markdown)
     ```
     
@@ -500,6 +509,7 @@ class MarkdownPreviewViewController: UIViewController {
     
        ```swift
        let container = MarkdownContainerView()
+       ExampleMarkdownRuntime.installMarkdownn(into: container)
        try? container.setContractMarkdown(text)
        ```
     
@@ -557,6 +567,7 @@ class MarkdownPreviewViewController: UIViewController {
     ```swift
     // 这是一个较长的代码块，用于测试横向滚动
     let container = MarkdownContainerView(theme: .default)
+    ExampleMarkdownRuntime.installMarkdownn(into: container)
     container.setAnimationPreset(.typing(charactersPerSecond: 30))
     container.delegate = self
     

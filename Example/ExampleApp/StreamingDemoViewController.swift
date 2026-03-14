@@ -32,7 +32,7 @@ class StreamingDemoViewController: UIViewController {
     private var containerView: MarkdownContainerView { _containerView }
     
     private func makeContainerView() -> MarkdownContainerView {
-        let view = MarkdownContainerView()
+        let view = ExampleMarkdownRuntime.makeConfiguredContainer()
         applyAnimationConfig(to: view)
         view.delegate = self
         return view

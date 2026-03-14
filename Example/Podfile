@@ -12,8 +12,8 @@ use_frameworks!
 project 'ExampleApp.xcodeproj'
 
 target 'ExampleApp' do
-  # 使用本地路径引用 XHSMarkdownKit
-  pod 'XHSMarkdownKit', :path => '../'
+  # 演示工程默认接入 Full（UIKit + markdownn adapter）
+  pod 'XHSMarkdownKit/Full', :path => '../'
   
   # Lookin 调试工具
   pod 'LookinServer', :configurations => ['Debug']
