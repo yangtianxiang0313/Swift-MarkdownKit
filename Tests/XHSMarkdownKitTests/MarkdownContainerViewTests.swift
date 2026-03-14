@@ -60,7 +60,7 @@ final class MarkdownContainerViewTests: XCTestCase {
         let view = makeConfiguredContainerView()
         view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
 
-        view.contractRenderAdapter.registerBlockRenderer(forCustomElement: "Card") { block, _, adapter in
+        view.contractRenderAdapter.registerBlockRenderer(forExtension: ExtensionNodeTestSupport.calloutKind.rawValue) { block, _, adapter in
             [adapter.makeTextNode(
                 id: block.id,
                 kind: "paragraph",
@@ -68,12 +68,14 @@ final class MarkdownContainerViewTests: XCTestCase {
             )]
         }
 
+        let rewrite = MarkdownContract.CanonicalRewritePipeline(
+            nodeSpecRegistry: ExtensionNodeTestSupport.makeNodeSpecRegistry()
+        )
         try view.setContractMarkdown(
             """
-            @Card(title: "hero") {
-            Hello
-            }
-            """
+            @Callout
+            """,
+            rewritePipeline: rewrite
         )
 
         XCTAssertTrue(mergedText(from: view.currentSceneSnapshot).contains("CARD_OVERRIDE"))
@@ -83,7 +85,7 @@ final class MarkdownContainerViewTests: XCTestCase {
         let view = makeConfiguredContainerView()
         view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
 
-        view.contractRenderAdapter.registerBlockRenderer(forCustomElement: "badge") { block, _, adapter in
+        view.contractRenderAdapter.registerBlockRenderer(forExtension: ExtensionNodeTestSupport.tabsKind.rawValue) { block, _, adapter in
             [adapter.makeTextNode(
                 id: block.id,
                 kind: "paragraph",
@@ -91,12 +93,16 @@ final class MarkdownContainerViewTests: XCTestCase {
             )]
         }
 
+        let rewrite = MarkdownContract.CanonicalRewritePipeline(
+            nodeSpecRegistry: ExtensionNodeTestSupport.makeNodeSpecRegistry()
+        )
         try view.setContractMarkdown(
             """
-            <badge text="new">
+            @Tabs {
             body
-            </badge>
-            """
+            }
+            """,
+            rewritePipeline: rewrite
         )
 
         XCTAssertTrue(mergedText(from: view.currentSceneSnapshot).contains("BADGE_OVERRIDE"))
@@ -106,11 +112,17 @@ final class MarkdownContainerViewTests: XCTestCase {
         let view = makeConfiguredContainerView()
         view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
 
-        view.contractRenderAdapter.registerInlineRenderer(forCustomElement: "badge") { _, _, _, _ in
+        view.contractRenderAdapter.registerInlineRenderer(forExtension: ExtensionNodeTestSupport.mentionKind.rawValue) { _, _, _, _ in
             NSAttributedString(string: "[INLINE_BADGE]")
         }
 
-        try view.setContractMarkdown("before <badge text=\"new\" /> after")
+        let rewrite = MarkdownContract.CanonicalRewritePipeline(
+            nodeSpecRegistry: ExtensionNodeTestSupport.makeNodeSpecRegistry()
+        )
+        try view.setContractMarkdown(
+            "before <mention userId=\"new\" /> after",
+            rewritePipeline: rewrite
+        )
 
         let text = mergedText(from: view.currentSceneSnapshot)
         XCTAssertTrue(text.contains("before"))
@@ -147,16 +159,30 @@ final class MarkdownContainerViewTests: XCTestCase {
     }
 
     private func makeConfiguredContainerView() -> MarkdownContainerView {
+        let specs = ExtensionNodeTestSupport.makeNodeSpecRegistry()
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: specs)
+        let renderer = MarkdownContract.DefaultCanonicalRenderer(
+            registry: ExtensionNodeTestSupport.makeRendererRegistry(),
+            nodeSpecRegistry: specs
+        )
+
         let registry = MarkdownContract.AdapterRegistry(
             defaultParserID: MarkdownnAdapter.parserID,
             defaultRendererID: MarkdownnAdapter.rendererID
         )
-        MarkdownnAdapter.install(into: registry)
+        registry.registerParser(parser, id: MarkdownnAdapter.parserID)
+        registry.registerRenderer(renderer, id: MarkdownnAdapter.rendererID)
+
+        let streamingEngine = MarkdownContractEngine(
+            parser: parser,
+            rewritePipeline: .init(nodeSpecRegistry: specs),
+            renderer: renderer
+        )
 
         return MarkdownContainerView(
             theme: .default,
             contractKit: MarkdownContract.UniversalMarkdownKit(registry: registry),
-            contractStreamingEngine: MarkdownnAdapter.makeEngine()
+            contractStreamingEngine: streamingEngine
         )
     }
 }

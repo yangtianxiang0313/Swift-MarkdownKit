@@ -262,7 +262,10 @@ class ThemeSwitchViewController: UIViewController, MarkdownContainerViewDelegate
     private func renderWithCurrentTheme() {
         containerView.theme = currentTheme
         do {
-            try containerView.setContractMarkdown(sampleMarkdown)
+            try containerView.setContractMarkdown(
+                sampleMarkdown,
+                rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+            )
         } catch {
             assertionFailure("Contract render failed: \(error)")
         }

@@ -5,18 +5,27 @@ import XHSMarkdownCore
 import XYMarkdown
 
 public struct XYMarkdownContractParser: MarkdownContractParser {
+    public let nodeSpecRegistry: MarkdownContract.NodeSpecRegistry
+    private let treeValidator: MarkdownContract.TreeValidator
 
-    public init() {}
+    public init(nodeSpecRegistry: MarkdownContract.NodeSpecRegistry = .core()) {
+        self.nodeSpecRegistry = nodeSpecRegistry
+        self.treeValidator = MarkdownContract.TreeValidator(registry: nodeSpecRegistry)
+    }
 
-    public func parse(_ text: String, options: MarkdownContractParserOptions = MarkdownContractParserOptions()) -> MarkdownContract.CanonicalDocument {
+    public func parse(_ text: String, options: MarkdownContractParserOptions = MarkdownContractParserOptions()) throws -> MarkdownContract.CanonicalDocument {
         let document = Document(parsing: text, source: options.sourceURL, options: options.toXYParseOptions())
-        let root = Converter().convert(markup: document, path: [])
+        let root = Converter(nodeSpecRegistry: nodeSpecRegistry).convert(markup: document, path: [])
 
-        return MarkdownContract.CanonicalDocument(
+        let canonical = MarkdownContract.CanonicalDocument(
             schemaVersion: MarkdownContract.schemaVersion,
             documentId: options.documentId,
             root: root
         )
+
+        try canonical.validate()
+        try treeValidator.validate(document: canonical)
+        return canonical
     }
 }
 
@@ -45,10 +54,12 @@ private extension MarkdownContractParserOptions {
 }
 
 private struct Converter {
+    let nodeSpecRegistry: MarkdownContract.NodeSpecRegistry
 
     func convert(markup: Markup, path: [Int]) -> MarkdownContract.CanonicalNode {
-        let kind = nodeKind(for: markup)
         let sourceKind = sourceKind(for: markup)
+        let attrs = attrs(for: markup)
+        let kind = nodeKind(for: markup, sourceKind: sourceKind, attrs: attrs)
 
         let children = markup.children.enumerated().map { index, child in
             convert(markup: child, path: path + [index])
@@ -57,7 +68,7 @@ private struct Converter {
         return MarkdownContract.CanonicalNode(
             id: nodeId(from: path),
             kind: kind,
-            attrs: attrs(for: markup),
+            attrs: attrs,
             children: children,
             source: MarkdownContract.SourceInfo(
                 sourceKind: sourceKind,
@@ -95,7 +106,11 @@ private struct Converter {
         )
     }
 
-    private func nodeKind(for markup: Markup) -> MarkdownContract.NodeKind {
+    private func nodeKind(
+        for markup: Markup,
+        sourceKind: MarkdownContract.SourceKind,
+        attrs: [String: MarkdownContract.Value]
+    ) -> MarkdownContract.NodeKind {
         switch markup {
         case is Document:
             return .document
@@ -113,6 +128,14 @@ private struct Converter {
             return .codeBlock
         case is Table:
             return .table
+        case is Table.Head:
+            return .tableHead
+        case is Table.Body:
+            return .tableBody
+        case is Table.Row:
+            return .tableRow
+        case is Table.Cell:
+            return .tableCell
         case is ThematicBreak:
             return .thematicBreak
         case is Image:
@@ -127,11 +150,46 @@ private struct Converter {
             return .strong
         case is InlineCode:
             return .inlineCode
+        case is SoftBreak:
+            return .softBreak
+        case is LineBreak:
+            return .hardBreak
         case is HTMLBlock, is InlineHTML, is BlockDirective, is CustomBlock, is CustomInline:
-            return .customElement
+            return resolveExtensionKind(markup: markup, sourceKind: sourceKind, attrs: attrs)
         default:
-            return .custom(String(describing: type(of: markup)))
+            return resolveExtensionKind(markup: markup, sourceKind: sourceKind, attrs: attrs)
         }
+    }
+
+    private func resolveExtensionKind(
+        markup: Markup,
+        sourceKind: MarkdownContract.SourceKind,
+        attrs: [String: MarkdownContract.Value]
+    ) -> MarkdownContract.NodeKind {
+        if case let .string(name)? = attrs["name"],
+           let resolved = nodeSpecRegistry.resolveKind(sourceKind: sourceKind, name: name) {
+            return resolved
+        }
+
+        let fallbackName: String
+        if case let .string(name)? = attrs["name"] {
+            fallbackName = sanitizeKindName(name)
+        } else {
+            fallbackName = sanitizeKindName(String(describing: type(of: markup)))
+        }
+
+        return .ext(.init(namespace: "unregistered", name: fallbackName))
+    }
+
+    private func sanitizeKindName(_ value: String) -> String {
+        let lower = value.lowercased()
+        let scalar = lower.map { char -> Character in
+            if char.isLetter || char.isNumber || char == "_" || char == "-" {
+                return char
+            }
+            return "_"
+        }
+        return String(scalar)
     }
 
     private func rawSource(for markup: Markup) -> String? {
@@ -179,10 +237,6 @@ private struct Converter {
             return result
 
         case let table as Table:
-            let headers = Array(table.head.cells.map { MarkdownContract.Value.string($0.plainText) })
-            let rows = Array(table.body.rows.map { row in
-                MarkdownContract.Value.array(Array(row.cells.map { MarkdownContract.Value.string($0.plainText) }))
-            })
             let alignments: [MarkdownContract.Value] = table.columnAlignments.map { alignment in
                 switch alignment {
                 case .left: return .string("left")
@@ -192,11 +246,15 @@ private struct Converter {
                 @unknown default: return .null
                 }
             }
+            let headers = table.head.cells.map { MarkdownContract.Value.string($0.plainText) }
+            let rows = table.body.rows.map { row in
+                MarkdownContract.Value.array(row.cells.map { .string($0.plainText) })
+            }
             return [
-                "headers": .array(headers),
-                "rows": .array(rows),
+                "columnAlignments": .array(alignments),
                 "alignments": .array(alignments),
-                "columnAlignments": .array(alignments)
+                "headers": .array(Array(headers)),
+                "rows": .array(Array(rows))
             ]
 
         case let image as Image:
@@ -328,38 +386,23 @@ private enum HTMLTagExtractor {
     }
 
     private static func extractAttributes(from openingTag: String) -> [String: String] {
-        let pattern = #"([A-Za-z_:][A-Za-z0-9:._-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>/]+))"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+        guard let regex = try? NSRegularExpression(pattern: #"([A-Za-z_:][A-Za-z0-9:._-]*)\s*=\s*\"([^\"]*)\""#, options: []) else {
             return [:]
         }
 
-        let nsString = openingTag as NSString
-        let matches = regex.matches(in: openingTag, range: NSRange(location: 0, length: nsString.length))
+        let range = NSRange(location: 0, length: openingTag.utf16.count)
+        let matches = regex.matches(in: openingTag, options: [], range: range)
 
-        var attrs: [String: String] = [:]
-        attrs.reserveCapacity(matches.count)
-
+        var attributes: [String: String] = [:]
         for match in matches {
-            guard match.numberOfRanges >= 5 else { continue }
-            let keyRange = match.range(at: 1)
-            guard keyRange.location != NSNotFound else { continue }
+            guard match.numberOfRanges == 3,
+                  let keyRange = Range(match.range(at: 1), in: openingTag),
+                  let valueRange = Range(match.range(at: 2), in: openingTag)
+            else { continue }
 
-            let key = nsString.substring(with: keyRange)
-
-            let value: String
-            if match.range(at: 2).location != NSNotFound {
-                value = nsString.substring(with: match.range(at: 2))
-            } else if match.range(at: 3).location != NSNotFound {
-                value = nsString.substring(with: match.range(at: 3))
-            } else if match.range(at: 4).location != NSNotFound {
-                value = nsString.substring(with: match.range(at: 4))
-            } else {
-                value = ""
-            }
-
-            attrs[key] = value
+            attributes[String(openingTag[keyRange])] = String(openingTag[valueRange])
         }
 
-        return attrs
+        return attributes
     }
 }

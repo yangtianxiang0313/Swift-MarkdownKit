@@ -43,13 +43,22 @@ extension MarkdownContract {
 
     public struct CanonicalRewritePipeline {
         public let rules: [RewriteRule]
+        public let nodeSpecRegistry: NodeSpecRegistry
+        private let treeValidator: TreeValidator
 
-        public init(rules: [RewriteRule] = []) {
+        public init(
+            rules: [RewriteRule] = [],
+            nodeSpecRegistry: NodeSpecRegistry = .core()
+        ) {
             self.rules = rules
+            self.nodeSpecRegistry = nodeSpecRegistry
+            self.treeValidator = TreeValidator(registry: nodeSpecRegistry)
         }
 
         public func rewrite(_ document: CanonicalDocument) throws -> CanonicalDocument {
             try document.validate()
+            try treeValidator.validate(document: document)
+
             let sorted = rules.sorted {
                 if $0.priority == $1.priority {
                     return $0.id < $1.id
@@ -62,6 +71,7 @@ extension MarkdownContract {
             var rewritten = document
             rewritten.root = rewrittenRoot
             try rewritten.validate()
+            try treeValidator.validate(document: rewritten)
             return rewritten
         }
 

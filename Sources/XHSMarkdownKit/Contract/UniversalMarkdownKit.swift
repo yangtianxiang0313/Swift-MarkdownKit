@@ -66,7 +66,7 @@ extension MarkdownContract {
                 )
             }
 
-            return parser.parse(markdown, options: options)
+            return try parser.parse(markdown, options: options)
         }
 
         public func render(

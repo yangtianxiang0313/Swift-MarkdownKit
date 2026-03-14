@@ -4,51 +4,91 @@ import XHSMarkdownAdapterMarkdownn
 
 final class XYMarkdownContractParserTests: XCTestCase {
 
-    func testParsesDirectiveAsCustomElementNode() {
-        let parser = XYMarkdownContractParser()
+    func testParsesRegisteredDirectiveAsExtensionBlockLeafNode() throws {
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: ExtensionNodeTestSupport.makeNodeSpecRegistry())
+        let markdown = "@Callout"
+
+        let document = try parser.parse(markdown, options: .init(documentId: "doc-callout", parseBlockDirectives: true))
+        let nodes = flatten(document.root)
+
+        let callout = nodes.first {
+            $0.kind == ExtensionNodeTestSupport.calloutKind && $0.source.sourceKind == .directive
+        }
+        XCTAssertNotNil(callout)
+        XCTAssertEqual(callout?.attrs["name"], .string("Callout"))
+    }
+
+    func testParsesRegisteredDirectiveAsExtensionBlockContainerNode() throws {
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: ExtensionNodeTestSupport.makeNodeSpecRegistry())
         let markdown = """
-        @Card(title: \"hero\") {
-        Hello
+        @Tabs {
+        One
         }
         """
 
-        let document = parser.parse(markdown, options: .init(documentId: "doc-1", parseBlockDirectives: true))
+        let document = try parser.parse(markdown, options: .init(documentId: "doc-tabs", parseBlockDirectives: true))
         let nodes = flatten(document.root)
+        let tabs = nodes.first { $0.kind == ExtensionNodeTestSupport.tabsKind }
 
-        let directiveNodes = nodes.filter {
-            $0.kind == .customElement && $0.source.sourceKind == .directive
-        }
-
-        XCTAssertFalse(directiveNodes.isEmpty)
-        XCTAssertEqual(directiveNodes.first?.attrs["name"], .string("Card"))
+        XCTAssertNotNil(tabs)
+        XCTAssertFalse(tabs?.children.isEmpty ?? true)
     }
 
-    func testParsesHTMLTagAsCustomElementNode() {
-        let parser = XYMarkdownContractParser()
-        let markdown = "before <badge text=\"new\" /> after"
+    func testParsesRegisteredHTMLAsExtensionInlineLeafNode() throws {
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: ExtensionNodeTestSupport.makeNodeSpecRegistry())
+        let markdown = "before <mention userId=\"alice\" /> after"
 
-        let document = parser.parse(markdown, options: .init(documentId: "doc-2"))
+        let document = try parser.parse(markdown, options: .init(documentId: "doc-mention"))
         let nodes = flatten(document.root)
 
-        let htmlNodes = nodes.filter {
-            $0.kind == .customElement && $0.source.sourceKind == .htmlTag
+        let mention = nodes.first {
+            $0.kind == ExtensionNodeTestSupport.mentionKind && $0.source.sourceKind == .htmlTag
         }
 
-        XCTAssertFalse(htmlNodes.isEmpty)
-        XCTAssertEqual(htmlNodes.first?.attrs["name"], .string("badge"))
+        XCTAssertNotNil(mention)
+        if case let .object(attributes)? = mention?.attrs["attributes"] {
+            XCTAssertEqual(attributes["userId"], .string("alice"))
+        } else {
+            XCTFail("Expected mention attributes")
+        }
     }
 
-    func testDisablingDirectiveParsingKeepsSourceKindMarkdown() {
-        let parser = XYMarkdownContractParser()
-        let markdown = "@TOC"
+    func testParsesRegisteredHTMLAsExtensionInlineContainerNode() throws {
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: ExtensionNodeTestSupport.makeNodeSpecRegistry())
+        let markdown = "before <spoiler /> after"
 
-        let document = parser.parse(markdown, options: .init(documentId: "doc-3", parseBlockDirectives: false))
+        let document = try parser.parse(markdown, options: .init(documentId: "doc-spoiler"))
+        let nodes = flatten(document.root)
+
+        let spoiler = nodes.first {
+            $0.kind == ExtensionNodeTestSupport.spoilerKind && $0.source.sourceKind == .htmlTag
+        }
+        XCTAssertNotNil(spoiler)
+    }
+
+    func testUnregisteredExtensionNodeFailsStrictly() {
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: .core())
+
+        XCTAssertThrowsError(try parser.parse("<mention userId=\"bob\" />", options: .init(documentId: "doc-unregistered"))) { error in
+            guard let modelError = error as? MarkdownContract.ModelError else {
+                return XCTFail("Expected ModelError")
+            }
+            XCTAssertEqual(modelError.code, MarkdownContract.ModelError.Code.unknownNodeKind.rawValue)
+            XCTAssertTrue(modelError.path?.contains("kind") ?? false)
+        }
+    }
+
+    func testDisablingDirectiveParsingKeepsSourceKindMarkdown() throws {
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: ExtensionNodeTestSupport.makeNodeSpecRegistry())
+        let markdown = "@Tabs"
+
+        let document = try parser.parse(markdown, options: .init(documentId: "doc-3", parseBlockDirectives: false))
         let nodes = flatten(document.root)
 
         XCTAssertFalse(nodes.contains(where: { $0.source.sourceKind == .directive }))
     }
 
-    func testTableNodeContainsStructuredHeadersRowsAndAlignments() {
+    func testTableNodeContainsStructuredHeadersRowsAndAlignments() throws {
         let parser = XYMarkdownContractParser()
         let markdown = """
         | name | age |
@@ -57,7 +97,7 @@ final class XYMarkdownContractParserTests: XCTestCase {
         | bob  | 12  |
         """
 
-        let document = parser.parse(markdown, options: .init(documentId: "doc-table"))
+        let document = try parser.parse(markdown, options: .init(documentId: "doc-table"))
         let nodes = flatten(document.root)
 
         guard let table = nodes.first(where: { $0.kind == .table }) else {
@@ -82,7 +122,7 @@ final class XYMarkdownContractParserTests: XCTestCase {
         )
     }
 
-    func testTableNodeRetainsNilAlignmentSlots() {
+    func testTableNodeRetainsNilAlignmentSlots() throws {
         let parser = XYMarkdownContractParser()
         let markdown = """
         | a | b | c |
@@ -90,7 +130,7 @@ final class XYMarkdownContractParserTests: XCTestCase {
         | 1 | 2 | 3 |
         """
 
-        let document = parser.parse(markdown, options: .init(documentId: "doc-table-alignment"))
+        let document = try parser.parse(markdown, options: .init(documentId: "doc-table-alignment"))
         let nodes = flatten(document.root)
 
         guard let table = nodes.first(where: { $0.kind == .table }) else {

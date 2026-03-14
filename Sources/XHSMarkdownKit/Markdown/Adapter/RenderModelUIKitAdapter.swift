@@ -4,6 +4,10 @@ import XHSMarkdownCore
 #endif
 
 extension MarkdownContract {
+    public protocol UIKitNodeRenderPlugin {
+        func register(into adapter: RenderModelUIKitAdapter)
+    }
+
     public final class RenderModelUIKitAdapter {
         public struct Context {
             public var theme: MarkdownTheme
@@ -77,7 +81,9 @@ extension MarkdownContract {
         private var blockRenderers: [String: BlockRenderer] = [:]
         private var inlineRenderers: [String: InlineRenderer] = [:]
 
-        public init() {}
+        public init(plugins: [UIKitNodeRenderPlugin] = []) {
+            plugins.forEach { $0.register(into: self) }
+        }
 
         public func registerBlockRenderer(for kind: BlockKind, renderer: @escaping BlockRenderer) {
             blockRenderers[key(for: kind)] = renderer
@@ -87,8 +93,8 @@ extension MarkdownContract {
             blockRenderers[key] = renderer
         }
 
-        public func registerBlockRenderer(forCustomElement name: String, renderer: @escaping BlockRenderer) {
-            blockRenderers["custom:\(name)"] = renderer
+        public func registerBlockRenderer(forExtension name: String, renderer: @escaping BlockRenderer) {
+            blockRenderers["ext:\(name)"] = renderer
         }
 
         public func removeBlockRenderer(for kind: BlockKind) {
@@ -99,8 +105,8 @@ extension MarkdownContract {
             blockRenderers.removeValue(forKey: key)
         }
 
-        public func removeBlockRenderer(forCustomElement name: String) {
-            blockRenderers.removeValue(forKey: "custom:\(name)")
+        public func removeBlockRenderer(forExtension name: String) {
+            blockRenderers.removeValue(forKey: "ext:\(name)")
         }
 
         public func registerInlineRenderer(for kind: InlineKind, renderer: @escaping InlineRenderer) {
@@ -111,8 +117,8 @@ extension MarkdownContract {
             inlineRenderers[key] = renderer
         }
 
-        public func registerInlineRenderer(forCustomElement name: String, renderer: @escaping InlineRenderer) {
-            inlineRenderers["custom:\(name)"] = renderer
+        public func registerInlineRenderer(forExtension name: String, renderer: @escaping InlineRenderer) {
+            inlineRenderers["ext:\(name)"] = renderer
         }
 
         public func removeInlineRenderer(for kind: InlineKind) {
@@ -123,8 +129,8 @@ extension MarkdownContract {
             inlineRenderers.removeValue(forKey: key)
         }
 
-        public func removeInlineRenderer(forCustomElement name: String) {
-            inlineRenderers.removeValue(forKey: "custom:\(name)")
+        public func removeInlineRenderer(forExtension name: String) {
+            inlineRenderers.removeValue(forKey: "ext:\(name)")
         }
 
         public func render(
@@ -206,11 +212,11 @@ extension MarkdownContract {
 
 private extension MarkdownContract.RenderModelUIKitAdapter {
     func defaultRender(block: MarkdownContract.RenderBlock, context: Context) -> [RenderScene.Node] {
-        switch block.kind {
-        case .document:
+        switch block.kind.coreKind {
+        case .document?:
             return renderBlocks(block.children, context: context)
 
-        case .paragraph:
+        case .paragraph?:
             let attributed = renderInlines(block.inlines, in: block, context: context)
             guard attributed.length > 0 else { return [] }
             let styled = applyingTextLayout(
@@ -229,7 +235,7 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
                 context: context
             )]
 
-        case .heading:
+        case .heading?:
             let level = block.contractAttrInt(for: "level") ?? 1
             let attributed = renderHeadingInlines(block.inlines, level: level, context: context)
             guard attributed.length > 0 else { return [] }
@@ -242,7 +248,7 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
                 context: context
             )]
 
-        case .list:
+        case .list?:
             let ordered = block.contractAttrBool(for: "ordered") ?? false
             let startIndex = block.contractAttrInt(for: "startIndex") ?? 1
             let baseContext = context
@@ -263,7 +269,7 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
             }
             return nodes
 
-        case .listItem:
+        case .listItem?:
             let marker: String
             if context.isOrderedList {
                 marker = "\((context.listItemIndex ?? 0) + 1). "
@@ -323,7 +329,7 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
 
             return nodes
 
-        case .blockQuote:
+        case .blockQuote?:
             let childContext = context.enteringBlockQuote()
             let children = renderBlocks(block.children, context: childContext)
             if children.isEmpty { return [] }
@@ -343,7 +349,7 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
                 metadata: block.metadata
             )]
 
-        case .codeBlock:
+        case .codeBlock?:
             let code = block.contractAttrString(for: "code") ?? block.inlines.map(\.text).joined()
             let language = block.contractAttrString(for: "language")
             return [RenderScene.Node(
@@ -364,7 +370,7 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
                 metadata: block.metadata
             )]
 
-        case .table:
+        case .table?:
             if let tableComponent = makeTableSceneComponent(block: block, context: context) {
                 return [RenderScene.Node(
                     id: block.id,
@@ -388,7 +394,7 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
             }
             return renderBlocks(block.children, context: context)
 
-        case .thematicBreak:
+        case .thematicBreak?:
             return [RenderScene.Node(
                 id: block.id,
                 kind: "thematicBreak",
@@ -401,7 +407,7 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
                 metadata: block.metadata
             )]
 
-        case .image:
+        case .image?:
             let altText = block.contractAttrString(for: "altText") ?? "[image]"
             let source = block.contractAttrString(for: "source")
             return [RenderScene.Node(
@@ -420,12 +426,26 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
                 metadata: block.metadata
             )]
 
-        case .custom, .customRaw:
+        case .custom?:
             let attributed = renderInlines(block.inlines, in: block, context: context)
             if attributed.length > 0 {
                 return [makeContextualTextNode(
                     id: block.id,
                     kind: "custom",
+                    text: attributed,
+                    spacingAfter: block.layoutHints.spacingAfter.map { CGFloat($0) } ?? context.theme.spacing.paragraph,
+                    metadata: block.metadata,
+                    context: context
+                )]
+            }
+            return renderBlocks(block.children, context: context)
+
+        default:
+            let attributed = renderInlines(block.inlines, in: block, context: context)
+            if attributed.length > 0 {
+                return [makeContextualTextNode(
+                    id: block.id,
+                    kind: block.kind.rawValue,
                     text: attributed,
                     spacingAfter: block.layoutHints.spacingAfter.map { CGFloat($0) } ?? context.theme.spacing.paragraph,
                     metadata: block.metadata,
@@ -507,12 +527,12 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
         }
 
         let text: String
-        switch span.kind {
-        case .softBreak:
+        switch span.kind.coreKind {
+        case .softBreak?:
             text = "\n"
-        case .hardBreak:
+        case .hardBreak?:
             text = "\n"
-        case .image:
+        case .image?:
             text = span.contractAttrString(for: "altText") ?? "[image]"
         default:
             text = span.text
@@ -524,7 +544,7 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
             apply(mark: mark, to: &attributes, span: span, block: block, context: context)
         }
 
-        if span.kind == .code {
+        if span.kind == .inlineCode {
             attributes[.font] = context.theme.code.font
             attributes[.foregroundColor] = context.theme.code.inlineColor
             if let background = context.theme.code.inlineBackgroundColor {
@@ -576,14 +596,14 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
             return CGFloat(explicit)
         }
 
-        switch kind {
-        case .heading:
+        switch kind.coreKind {
+        case .heading?:
             return theme.spacing.headingAfter
-        case .listItem:
+        case .listItem?:
             return theme.spacing.listItem
-        case .blockQuote:
+        case .blockQuote?:
             return theme.spacing.blockQuoteOther
-        case .thematicBreak:
+        case .thematicBreak?:
             return 0
         default:
             return theme.spacing.paragraph
@@ -714,8 +734,8 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
 
     func candidateKeys(for block: MarkdownContract.RenderBlock) -> [String] {
         var candidates: [String] = []
-        if let customName = block.contractAttrString(for: "name") {
-            candidates.append("custom:\(customName)")
+        if case let .ext(extensionKind) = block.kind {
+            candidates.append("ext:\(extensionKind.rawValue)")
         }
         candidates.append(key(for: block.kind))
         return candidates
@@ -723,41 +743,15 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
 
     func candidateKeys(for span: MarkdownContract.InlineSpan) -> [String] {
         var candidates: [String] = []
-        if let customName = span.contractAttrString(for: "name") {
-            candidates.append("custom:\(customName)")
+        if case let .ext(extensionKind) = span.kind {
+            candidates.append("ext:\(extensionKind.rawValue)")
         }
         candidates.append(key(for: span.kind))
         return candidates
     }
 
-    func key(for kind: MarkdownContract.BlockKind) -> String {
-        switch kind {
-        case .document: return "document"
-        case .paragraph: return "paragraph"
-        case .heading: return "heading"
-        case .list: return "list"
-        case .listItem: return "listItem"
-        case .blockQuote: return "blockQuote"
-        case .codeBlock: return "codeBlock"
-        case .table: return "table"
-        case .thematicBreak: return "thematicBreak"
-        case .image: return "image"
-        case .custom: return "custom"
-        case .customRaw(let raw): return raw
-        }
-    }
-
-    func key(for kind: MarkdownContract.InlineKind) -> String {
-        switch kind {
-        case .text: return "text"
-        case .code: return "code"
-        case .link: return "link"
-        case .image: return "image"
-        case .softBreak: return "softBreak"
-        case .hardBreak: return "hardBreak"
-        case .custom: return "custom"
-        case .customRaw(let raw): return raw
-        }
+    func key(for kind: MarkdownContract.NodeKind) -> String {
+        kind.rawValue
     }
 }
 

@@ -140,7 +140,10 @@ class CustomRendererDemoViewController: UIViewController {
     private func renderDefaultDemo() {
         containerView.contractRenderAdapter = MarkdownContract.RenderModelUIKitAdapter()
         do {
-            try containerView.setContractMarkdown(demoMarkdown)
+            try containerView.setContractMarkdown(
+                demoMarkdown,
+                rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+            )
         } catch {
             descriptionLabel.text = "Contract 渲染失败：\(error.localizedDescription)"
         }
@@ -173,7 +176,10 @@ class CustomRendererDemoViewController: UIViewController {
 
         containerView.contractRenderAdapter = adapter
         do {
-            try containerView.setContractMarkdown(demoMarkdown)
+            try containerView.setContractMarkdown(
+                demoMarkdown,
+                rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+            )
         } catch {
             descriptionLabel.text = "Contract 渲染失败：\(error.localizedDescription)"
         }
@@ -181,7 +187,7 @@ class CustomRendererDemoViewController: UIViewController {
 
     private func renderContractCustomElementDemo() {
         let adapter = MarkdownContract.RenderModelUIKitAdapter()
-        adapter.registerBlockRenderer(forCustomElement: "Card") { block, _, _ in
+        adapter.registerBlockRenderer(forExtension: ExampleMarkdownRuntime.cardKind.rawValue) { block, _, _ in
             let title = block.contractAttrString(for: "title") ?? "Card"
             let text = "Contract Card\n\(title)"
             return [Self.makeCalloutNode(
@@ -190,7 +196,7 @@ class CustomRendererDemoViewController: UIViewController {
                 color: .systemBlue
             )]
         }
-        adapter.registerBlockRenderer(forCustomElement: "spotlight") { block, _, _ in
+        adapter.registerBlockRenderer(forExtension: ExampleMarkdownRuntime.spotlightKind.rawValue) { block, _, _ in
             let type = block.contractAttrString(for: "type") ?? "info"
             let text = "HTML Spotlight (\(type.uppercased()))"
             return [Self.makeCalloutNode(
@@ -199,7 +205,7 @@ class CustomRendererDemoViewController: UIViewController {
                 color: .systemOrange
             )]
         }
-        adapter.registerInlineRenderer(forCustomElement: "badge") { span, _, _, _ in
+        adapter.registerInlineRenderer(forExtension: ExampleMarkdownRuntime.badgeKind.rawValue) { span, _, _, _ in
             let text = span.contractAttrString(for: "text") ?? "badge"
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: UIFont.monospacedSystemFont(ofSize: 12, weight: .semibold),
@@ -212,7 +218,10 @@ class CustomRendererDemoViewController: UIViewController {
         containerView.contractRenderAdapter = adapter
 
         do {
-            try containerView.setContractMarkdown(contractCustomMarkdown)
+            try containerView.setContractMarkdown(
+                contractCustomMarkdown,
+                rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+            )
         } catch {
             descriptionLabel.text = "Contract 渲染失败：\(error.localizedDescription)"
         }

@@ -6,11 +6,12 @@
 - Core layer has zero UIKit/XYMarkdown dependency.
 - Parser/renderer adapters are explicit; no hidden default parser in core.
 - iOS runtime renders `RenderModel -> RenderScene` and animates at scene step level.
+- Node kinds are enum-first for core and spec-driven for extensions.
 
 ## Module Topology
 
 - `XHSMarkdownCore`
-  - Canonical AST, RenderModel, animation DTO, rewrite pipeline, diff, errors.
+  - Canonical AST, RenderModel, animation DTO, rewrite pipeline, diff, errors, node specs.
   - Parser protocol (`MarkdownContractParser`) and engine (`MarkdownContractEngine`).
   - No `UIKit`, no `XYMarkdown` import.
 - `XHSMarkdownAdapterMarkdownn`
@@ -37,30 +38,53 @@
 ## End-to-End Pipeline
 
 1. Markdown text -> parser adapter -> `CanonicalDocument`.
-2. Rewrite pipeline transforms canonical nodes.
-3. Canonical renderer outputs `RenderModel`.
-4. UIKit adapter converts `RenderModel` to `RenderScene` (stable node IDs).
-5. Scene differ computes `SceneDiff` (`insert/remove/update/move`).
-6. Contract timeline compiles/mapping -> `AnimationPlan` (scene steps).
-7. Animation engine applies step effects and commits snapshots to container.
+2. `TreeValidator` validates parse output against `NodeSpecRegistry` (strict fail).
+3. Rewrite pipeline transforms canonical nodes.
+4. `TreeValidator` validates rewritten tree again (strict fail).
+5. Canonical renderer outputs `RenderModel`.
+6. UIKit adapter converts `RenderModel` to `RenderScene` (stable node IDs).
+7. Scene differ computes `SceneDiff` (`insert/remove/update/move`).
+8. Contract timeline compiles/mapping -> `AnimationPlan` (scene steps).
+9. Animation engine applies step effects and commits snapshots to container.
+
+## Node Kind Model
+
+- `NodeKind = .core(CoreNodeKind) | .ext(ExtensionNodeKind)`.
+- `CoreNodeKind` keeps compile-time exhaustive switch checks in core.
+- `ExtensionNodeKind` keeps extension kind identity (`ext.<namespace>.<name>`).
+- `NodeKind(rawValue:)` decodes unknown values to `.ext(...)`, then structural validation decides whether it is allowed.
+
+## NodeSpec and Tree Policy
+
+- `NodeSpec` declares:
+  - `kind`
+  - `role` (`root`, `blockLeaf`, `blockContainer`, `inlineLeaf`, `inlineContainer`)
+  - `childPolicy` (`allowedChildRoles + minChildren + maxChildren`)
+  - `parseAliases` (`sourceKind + name` -> `NodeKind`)
+- `NodeSpecRegistry` is the only source of truth for node structure contracts.
+- `TreeValidator` runs in parser/rewrite/renderer paths and throws:
+  - `unknown_node_kind` for unregistered kinds
+  - `schema_invalid` for child-role/cardinality violations
+- Validation error includes concrete path (`root.children[0]...`) for precise failure localization.
 
 ## Contract Rules
 
 - All top-level DTOs carry `schemaVersion` (current: `1`).
 - Unknown JSON fields are preserved.
-- Unknown enum values degrade to custom/unknown path.
+- Unknown node kinds do not silently degrade; they must be registered in `NodeSpecRegistry`.
 - Model layer forbids platform-specific types (`UIColor`, `UIFont`, etc.).
 - Colors in contract use `ColorValue` (token/hex/rgba/appearance), not UIKit types.
 
-## Custom Node Strategy
+## Extension Node Strategy
 
-- Directive and HTML tag both map to `customElement`.
-- `source.sourceKind` distinguishes origin:
-  - `directive`
-  - `htmlTag`
-- Custom rendering:
-  - Block: `registerBlockRenderer(forCustomElement:)`
-  - Inline: `registerInlineRenderer(forCustomElement:)`
+- Parser resolves extension node kind by `parseAliases` in `NodeSpecRegistry`.
+- Example mapping:
+  - Directive `Callout` -> `ext.demo.callout` (block leaf)
+  - Directive `Tabs` -> `ext.demo.tabs` (block container)
+  - HTML tag `mention` -> `ext.demo.mention` (inline leaf)
+  - HTML tag `spoiler` -> `ext.demo.spoiler` (inline container)
+- Canonical renderer must register renderer per extension `NodeKind`; missing registration is a hard error.
+- UIKit layer can override extension rendering by extension key (`registerBlockRenderer(forExtension:)`, `registerInlineRenderer(forExtension:)`).
 
 ## Animation Strategy
 

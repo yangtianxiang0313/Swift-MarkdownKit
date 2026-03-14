@@ -7,18 +7,32 @@ public enum MarkdownnAdapter {
     public static let parserID: MarkdownContract.ParserID = "markdownn.default.parser"
     public static let rendererID: MarkdownContract.RendererID = "markdownn.default.renderer"
 
-    public static func install(into registry: MarkdownContract.AdapterRegistry) {
-        registry.registerParser(XYMarkdownContractParser(), id: parserID)
-        registry.registerRenderer(MarkdownContract.DefaultCanonicalRenderer(), id: rendererID)
+    public static func install(
+        into registry: MarkdownContract.AdapterRegistry,
+        nodeSpecRegistry: MarkdownContract.NodeSpecRegistry = .core(),
+        canonicalRendererRegistry: MarkdownContract.CanonicalRendererRegistry = .makeDefault()
+    ) {
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: nodeSpecRegistry)
+        let renderer = MarkdownContract.DefaultCanonicalRenderer(
+            registry: canonicalRendererRegistry,
+            nodeSpecRegistry: nodeSpecRegistry
+        )
+        registry.registerParser(parser, id: parserID)
+        registry.registerRenderer(renderer, id: rendererID)
     }
 
     public static func makeEngine(
-        rewritePipeline: MarkdownContract.CanonicalRewritePipeline = .init()
+        rewritePipeline: MarkdownContract.CanonicalRewritePipeline = .init(),
+        nodeSpecRegistry: MarkdownContract.NodeSpecRegistry = .core(),
+        canonicalRendererRegistry: MarkdownContract.CanonicalRendererRegistry = .makeDefault()
     ) -> MarkdownContractEngine {
         MarkdownContractEngine(
-            parser: XYMarkdownContractParser(),
+            parser: XYMarkdownContractParser(nodeSpecRegistry: nodeSpecRegistry),
             rewritePipeline: rewritePipeline,
-            renderer: MarkdownContract.DefaultCanonicalRenderer()
+            renderer: MarkdownContract.DefaultCanonicalRenderer(
+                registry: canonicalRendererRegistry,
+                nodeSpecRegistry: nodeSpecRegistry
+            )
         )
     }
 }

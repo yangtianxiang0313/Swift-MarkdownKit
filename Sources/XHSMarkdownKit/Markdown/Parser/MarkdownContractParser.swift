@@ -30,5 +30,5 @@ public struct MarkdownContractParserOptions: Sendable, Equatable {
 }
 
 public protocol MarkdownContractParser {
-    func parse(_ text: String, options: MarkdownContractParserOptions) -> MarkdownContract.CanonicalDocument
+    func parse(_ text: String, options: MarkdownContractParserOptions) throws -> MarkdownContract.CanonicalDocument
 }

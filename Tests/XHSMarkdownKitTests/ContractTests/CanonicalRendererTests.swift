@@ -20,7 +20,7 @@ final class CanonicalRendererTests: XCTestCase {
 
     func testCustomBlockRendererOverridesStandardNode() throws {
         let registry = MarkdownContract.CanonicalRendererRegistry.makeDefault()
-        registry.registerBlockRenderer(for: "heading") { node, _, _ in
+        registry.registerBlockRenderer(for: .heading) { node, _, _ in
             [MarkdownContract.RenderBlock(
                 id: node.id,
                 kind: .custom,
@@ -36,33 +36,6 @@ final class CanonicalRendererTests: XCTestCase {
 
         XCTAssertEqual(customHeading?.kind, .custom)
         XCTAssertEqual(customHeading?.metadata["overridden"], .bool(true))
-    }
-
-    func testInlineHTMLCustomElementRendersAsCustomInlineSpan() throws {
-        let engine = MarkdownnAdapter.makeEngine()
-        let model = try engine.render("Hello <badge text=\"new\" /> world")
-
-        guard let paragraph = model.blocks.first(where: { $0.kind == .paragraph }) else {
-            XCTFail("Expected paragraph block")
-            return
-        }
-
-        let customSpan = paragraph.inlines.first(where: { $0.kind == .custom })
-        XCTAssertNotNil(customSpan)
-
-        if case let .object(attrs)? = customSpan?.metadata["attrs"] {
-            XCTAssertEqual(attrs["customType"], .string("htmlTag"))
-        } else {
-            XCTFail("Expected attrs metadata on custom span")
-        }
-    }
-
-    func testRendererCollectsImageAssets() throws {
-        let engine = MarkdownnAdapter.makeEngine()
-        let model = try engine.render("![alt](https://example.com/image.png)")
-
-        XCTAssertTrue(model.blocks.contains(where: { $0.kind == .image }))
-        XCTAssertTrue(model.assets.contains(where: { $0.type == "image" && $0.source == "https://example.com/image.png" }))
     }
 
     func testNodeStyleSheetAndThemeTokensAppliedToBlock() throws {
@@ -111,70 +84,49 @@ final class CanonicalRendererTests: XCTestCase {
         XCTAssertTrue(paragraph.styleTokens.contains { $0.name == "spacing.after" })
     }
 
-    func testCustomElementInheritsParentStyleAndAppliesNamedRule() throws {
-        let root = MarkdownContract.CanonicalNode(
-            id: "root",
-            kind: .document,
-            children: [
-                MarkdownContract.CanonicalNode(
-                    id: "card-1",
-                    kind: .customElement,
-                    attrs: [
-                        "name": .string("Card"),
-                        "customType": .string("directive")
-                    ],
-                    source: .init(sourceKind: .directive)
-                )
-            ],
-            source: .init(sourceKind: .markdown)
-        )
-        let document = MarkdownContract.CanonicalDocument(documentId: "inherit-doc", root: root)
+    func testExtensionRenderersHandlePrototypeMatrix() throws {
+        let engine = ExtensionNodeTestSupport.makeEngine()
 
-        let options = MarkdownContract.CanonicalRenderOptions(
-            nodeStyleSheet: .init(
-                byNodeKind: [
-                    "document": .init(
-                        inheritFromParent: false,
-                        styleTokens: [.init(name: "text.color", value: .string("base"))]
-                    ),
-                    "customElement": .init(inheritFromParent: true)
-                ],
-                byCustomElementName: [
-                    "Card": .init(
-                        inheritFromParent: true,
-                        styleTokens: [.init(name: "card.radius", value: .number(8))]
-                    )
-                ]
-            )
+        let model = try engine.render(
+            """
+            @Callout
+
+            @Tabs {
+            - alpha
+            - beta
+            }
+
+            before <mention userId="alice" /> and <spoiler />
+            """,
+            parseOptions: .init(documentId: "doc-ext", parseBlockDirectives: true)
         )
 
-        let model = try MarkdownContract.DefaultCanonicalRenderer().render(document: document, options: options)
-        guard let card = model.blocks.first(where: { $0.id == "card-1" }) else {
-            XCTFail("Expected custom card block")
-            return
-        }
+        XCTAssertTrue(model.blocks.contains(where: { $0.metadata["extType"] == .string("callout") }))
+        XCTAssertTrue(model.blocks.contains(where: { $0.metadata["extType"] == .string("tabs") }))
 
-        XCTAssertTrue(card.styleTokens.contains { $0.name == "text.color" })
-        XCTAssertTrue(card.styleTokens.contains { $0.name == "card.radius" })
+        let mergedInlines = model.blocks.flatMap(\.inlines)
+        XCTAssertTrue(mergedInlines.contains(where: { $0.text.contains("@alice") }))
+        XCTAssertTrue(mergedInlines.contains(where: { $0.marks.contains(where: { $0.name == "spoiler" }) }))
     }
 
-    func testNamedCustomElementRendererOverridesDefaultCustomElementRendering() throws {
-        let registry = MarkdownContract.CanonicalRendererRegistry.makeDefault()
-        registry.registerCustomElementBlockRenderer(named: "Card") { node, _, _ in
-            [MarkdownContract.RenderBlock(
-                id: node.id,
-                kind: .custom,
-                styleTokens: [],
-                metadata: ["renderer": .string("named-card")]
-            )]
-        }
-
-        let engine = MarkdownContractEngine(
-            parser: XYMarkdownContractParser(),
-            renderer: MarkdownContract.DefaultCanonicalRenderer(registry: registry)
+    func testUnregisteredExtensionRendererFails() throws {
+        let specs = ExtensionNodeTestSupport.makeNodeSpecRegistry()
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: specs)
+        let renderer = MarkdownContract.DefaultCanonicalRenderer(
+            registry: .makeDefault(),
+            nodeSpecRegistry: specs
         )
-        let model = try engine.render("@Card {\\nHello\\n}")
+        let engine = MarkdownContractEngine(
+            parser: parser,
+            rewritePipeline: .init(nodeSpecRegistry: specs),
+            renderer: renderer
+        )
 
-        XCTAssertTrue(model.blocks.contains(where: { $0.metadata["renderer"] == .string("named-card") }))
+        XCTAssertThrowsError(try engine.render("before <mention userId=\"u1\" />")) { error in
+            guard let modelError = error as? MarkdownContract.ModelError else {
+                return XCTFail("Expected ModelError")
+            }
+            XCTAssertEqual(modelError.code, MarkdownContract.ModelError.Code.unknownNodeKind.rawValue)
+        }
     }
 }

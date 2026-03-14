@@ -26,7 +26,7 @@ public struct MarkdownContractEngine {
                 path: "MarkdownContractEngine.parser"
             )
         }
-        return parser.parse(markdown, options: options)
+        return try parser.parse(markdown, options: options)
     }
 
     public func transform(_ document: MarkdownContract.CanonicalDocument) throws -> MarkdownContract.CanonicalDocument {

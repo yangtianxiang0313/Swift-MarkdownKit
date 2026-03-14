@@ -46,11 +46,11 @@ final class RenderModelUIKitAdapterTests: XCTestCase {
     }
 
     func testAdapterAllowsOverridingInlineCustomElementRenderer() throws {
-        let engine = MarkdownnAdapter.makeEngine()
-        let model = try engine.render("before <badge text=\"new\" /> after")
+        let engine = ExtensionNodeTestSupport.makeEngine()
+        let model = try engine.render("before <mention userId=\"badge\" /> after")
 
         let adapter = MarkdownContract.RenderModelUIKitAdapter()
-        adapter.registerInlineRenderer(forCustomElement: "badge") { _, _, _, _ in
+        adapter.registerInlineRenderer(forExtension: ExtensionNodeTestSupport.mentionKind.rawValue) { _, _, _, _ in
             NSAttributedString(string: "[BADGE]")
         }
 
@@ -64,7 +64,7 @@ final class RenderModelUIKitAdapterTests: XCTestCase {
         XCTAssertTrue(text.contains("before"))
         XCTAssertTrue(text.contains("[BADGE]"))
         XCTAssertTrue(text.contains("after"))
-        XCTAssertFalse(text.contains("<badge"))
+        XCTAssertFalse(text.contains("mention"))
     }
 
     func testAdapterUsesSceneComponentsByDefault() throws {

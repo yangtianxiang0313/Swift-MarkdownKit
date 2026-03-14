@@ -98,6 +98,47 @@ final class ArchitectureGuardTests: XCTestCase {
             )
         }
     }
+
+    func testCorePipelineFilesDoNotUseCentralizedKindSwitch() throws {
+        let projectRoot = try projectRootURL()
+        let files = [
+            projectRoot.appendingPathComponent("Sources/XHSMarkdownKit/Contract/CanonicalRenderer.swift"),
+            projectRoot.appendingPathComponent("Sources/XHSMarkdownKit/Markdown/Parser/XYMarkdown/XYMarkdownContractParser.swift"),
+            projectRoot.appendingPathComponent("Sources/XHSMarkdownKit/Markdown/Adapter/RenderModelUIKitAdapter.swift")
+        ]
+
+        let pattern = #"switch\s+[^\n]*\.kind\s*\{"#
+        let regex = try NSRegularExpression(pattern: pattern)
+
+        for file in files {
+            let content = try String(contentsOf: file, encoding: .utf8)
+            let range = NSRange(content.startIndex..<content.endIndex, in: content)
+            XCTAssertNil(
+                regex.firstMatch(in: content, options: [], range: range),
+                "Centralized kind switch found in \(file.path)"
+            )
+        }
+    }
+
+    func testRepositoryHasNoDeprecatedCustomElementRendererAPIs() throws {
+        let projectRoot = try projectRootURL()
+        let scanRoots = [
+            projectRoot.appendingPathComponent("Sources"),
+            projectRoot.appendingPathComponent("Example/ExampleApp"),
+            projectRoot.appendingPathComponent("Tests"),
+            projectRoot.appendingPathComponent("CONTRACT_RENDERING_GUIDE.md"),
+            projectRoot.appendingPathComponent("ARCHITECTURE.md")
+        ]
+        let files = try filesForScan(in: scanRoots)
+
+        for file in files {
+            if file.lastPathComponent == "ArchitectureGuardTests.swift" {
+                continue
+            }
+            let content = try String(contentsOf: file, encoding: .utf8)
+            XCTAssertFalse(content.contains("forCustomElement"), "Deprecated API token found in \(file.path)")
+        }
+    }
 }
 
 private extension ArchitectureGuardTests {

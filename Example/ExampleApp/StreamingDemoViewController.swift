@@ -1085,7 +1085,10 @@ class StreamingDemoViewController: UIViewController {
         
         let fullText = testCases[selectedCaseIndex].content
         do {
-            try containerView.setContractMarkdown(fullText)
+            try containerView.setContractMarkdown(
+                fullText,
+                rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+            )
         } catch {
             statusLabel.text = "Contract 快进失败：\(error.localizedDescription)"
         }
@@ -1128,9 +1131,12 @@ class StreamingDemoViewController: UIViewController {
         jitterTicksRemaining = 0
         tickCounter = 0
         backlogChars = 0
-        
+
         setupStreamingBuffer()
-        try? containerView.setContractMarkdown("")
+        try? containerView.setContractMarkdown(
+            "",
+            rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+        )
         
         startButton.isEnabled = true
         pauseButton.isEnabled = false
@@ -1749,7 +1755,10 @@ class StreamingDemoViewController: UIViewController {
             // 动画关闭时直接整段刷新，避免 Demo 侧 tick 粒度制造“假打字机”观感
             let full = String(streamingBuffer[0..<renderedIndex])
             do {
-                try containerView.setContractMarkdown(full)
+                try containerView.setContractMarkdown(
+                    full,
+                    rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                )
             } catch {
                 statusLabel.text = "Contract 全量刷新失败：\(error.localizedDescription)"
             }

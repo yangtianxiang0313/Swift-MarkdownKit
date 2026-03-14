@@ -128,22 +128,3 @@ extension MarkdownContract {
         }
     }
 }
-
-private extension MarkdownContract.BlockKind {
-    var rawValue: String {
-        switch self {
-        case .document: return "document"
-        case .paragraph: return "paragraph"
-        case .heading: return "heading"
-        case .list: return "list"
-        case .listItem: return "listItem"
-        case .blockQuote: return "blockQuote"
-        case .codeBlock: return "codeBlock"
-        case .table: return "table"
-        case .thematicBreak: return "thematicBreak"
-        case .image: return "image"
-        case .custom: return "custom"
-        case .customRaw(let raw): return raw
-        }
-    }
-}

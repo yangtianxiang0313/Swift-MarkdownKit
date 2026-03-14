@@ -31,45 +31,101 @@ let model = try kit.render("# Title\n\nBody")
 
 Core no longer auto-registers any parser.
 
-## 2. iOS Rendering with Container
+## 2. Register Extension Node Specs (Enum-First + Spec-Driven)
+
+```swift
+import XHSMarkdownCore
+
+let specs = MarkdownContract.NodeSpecRegistry.core()
+
+let calloutKind: MarkdownContract.NodeKind = .ext(.init(namespace: "demo", name: "callout"))
+let tabsKind: MarkdownContract.NodeKind = .ext(.init(namespace: "demo", name: "tabs"))
+let mentionKind: MarkdownContract.NodeKind = .ext(.init(namespace: "demo", name: "mention"))
+let spoilerKind: MarkdownContract.NodeKind = .ext(.init(namespace: "demo", name: "spoiler"))
+
+specs.register(.init(
+    kind: calloutKind,
+    role: .blockLeaf,
+    childPolicy: .none,
+    parseAliases: [.init(sourceKind: .directive, name: "Callout")]
+))
+
+specs.register(.init(
+    kind: tabsKind,
+    role: .blockContainer,
+    childPolicy: .blockOnly(minChildren: 1),
+    parseAliases: [.init(sourceKind: .directive, name: "Tabs")]
+))
+
+specs.register(.init(
+    kind: mentionKind,
+    role: .inlineLeaf,
+    childPolicy: .none,
+    parseAliases: [.init(sourceKind: .htmlTag, name: "mention")]
+))
+
+specs.register(.init(
+    kind: spoilerKind,
+    role: .inlineContainer,
+    childPolicy: .inlineOnly(),
+    parseAliases: [.init(sourceKind: .htmlTag, name: "spoiler")]
+))
+```
+
+`TreeValidator` runs after parse and after rewrite. Unregistered or structurally invalid extension nodes fail fast.
+
+## 3. iOS Rendering with Container
 
 ```swift
 import XHSMarkdownUIKit
 import XHSMarkdownAdapterMarkdownn
+import XHSMarkdownCore
 
 let registry = MarkdownContract.AdapterRegistry(
     defaultParserID: MarkdownnAdapter.parserID,
     defaultRendererID: MarkdownnAdapter.rendererID
 )
-MarkdownnAdapter.install(into: registry)
+let specs = MarkdownContract.NodeSpecRegistry.core()
+// Register extension specs as shown in section 2 before wiring parser/renderer.
+MarkdownnAdapter.install(into: registry, nodeSpecRegistry: specs)
 
 let view = MarkdownContainerView(
     theme: .default,
     contractKit: MarkdownContract.UniversalMarkdownKit(registry: registry),
-    contractStreamingEngine: MarkdownnAdapter.makeEngine()
+    contractStreamingEngine: MarkdownnAdapter.makeEngine(nodeSpecRegistry: specs)
 )
 view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
 try view.setContractMarkdown("# Hello")
 ```
 
-## 3. Custom Block/Inline UI Override
+## 4. Extension Rendering
+
+```swift
+let canonicalRegistry = MarkdownContract.CanonicalRendererRegistry.makeDefault()
+let calloutKind: MarkdownContract.NodeKind = .ext(.init(namespace: "demo", name: "callout"))
+
+canonicalRegistry.registerBlockRenderer(for: calloutKind) { node, _, _ in
+    [MarkdownContract.RenderBlock(
+        id: node.id,
+        kind: calloutKind,
+        inlines: [.init(id: "\(node.id).title", kind: .text, text: "[CALLOUT]")]
+    )]
+}
+```
+
+If extension renderer is missing, rendering fails with `unknown_node_kind`.
+
+UIKit override example:
 
 ```swift
 let adapter = MarkdownContract.RenderModelUIKitAdapter()
-
-adapter.registerBlockRenderer(forCustomElement: "Card") { block, _, adapter in
-    [adapter.makeTextNode(
-        id: block.id,
-        kind: "paragraph",
-        text: NSAttributedString(string: "CARD")
-    )]
+adapter.registerBlockRenderer(forExtension: "ext.demo.callout") { block, _, adapter in
+    [adapter.makeTextNode(id: block.id, kind: "callout", text: NSAttributedString(string: "CALLOUT"))]
 }
 
-adapter.registerInlineRenderer(forCustomElement: "badge") { span, _, _, _ in
-    NSAttributedString(string: "[\(span.text)]")
+adapter.registerInlineRenderer(forExtension: "ext.demo.mention") { span, _, _, _ in
+    NSAttributedString(string: "@\(span.text)")
 }
-
-view.contractRenderAdapter = adapter
 ```
 
 For complex custom UI:
@@ -87,7 +143,7 @@ adapter.makeCustomViewNode(
 )
 ```
 
-## 4. Streaming
+## 5. Streaming
 
 ```swift
 let u1 = try view.appendContractStreamChunk("Hello")
@@ -97,7 +153,7 @@ let final = try view.finishContractStreaming()
 
 Each update carries `model`, `diff`, and compiled contract timeline.
 
-## 5. Error Handling
+## 6. Error Handling
 
 Common `ModelError.code`:
 
@@ -107,7 +163,14 @@ Common `ModelError.code`:
 - `unknown_node_kind`
 - `invalid_style_value`
 
-## 6. Test Commands
+`unknown_node_kind` is expected for:
+- unregistered extension node kinds
+- missing extension renderers
+
+`schema_invalid` is expected for:
+- role/cardinality violations (for example block container node with inline child)
+
+## 7. Test Commands
 
 ```bash
 xcodebuild -scheme XHSMarkdownKit-Package -destination 'platform=iOS Simulator,name=iPhone 16' test

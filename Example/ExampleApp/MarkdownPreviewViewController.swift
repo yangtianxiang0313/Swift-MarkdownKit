@@ -214,7 +214,10 @@ class MarkdownPreviewViewController: UIViewController {
         updateContainerFrame()
 
         do {
-            try containerView.setContractMarkdown(markdown)
+            try containerView.setContractMarkdown(
+                markdown,
+                rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+            )
             navigationItem.prompt = markdownPluginInstalled
                 ? "Contract 渲染链路（markdownn 插件已安装）"
                 : "Contract 渲染链路"

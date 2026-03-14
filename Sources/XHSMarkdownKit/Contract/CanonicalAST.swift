@@ -1,14 +1,35 @@
 import Foundation
 
 extension MarkdownContract {
-    public enum SourceKind: Sendable, Equatable {
+    public enum SourceKind: Sendable, Equatable, Hashable {
         case markdown
         case directive
         case htmlTag
         case custom(String)
+
+        public var key: String {
+            switch self {
+            case .markdown: return "markdown"
+            case .directive: return "directive"
+            case .htmlTag: return "htmlTag"
+            case .custom(let raw): return raw
+            }
+        }
     }
 
-    public enum NodeKind: Sendable, Equatable {
+    public struct ExtensionNodeKind: Sendable, Equatable, Hashable, Codable {
+        public let rawValue: String
+
+        public init(rawValue: String) {
+            self.rawValue = rawValue
+        }
+
+        public init(namespace: String, name: String) {
+            self.rawValue = "ext.\(namespace).\(name)"
+        }
+    }
+
+    public enum CoreNodeKind: String, Sendable, Equatable, Hashable, Codable, CaseIterable {
         case document
         case paragraph
         case heading
@@ -17,6 +38,10 @@ extension MarkdownContract {
         case blockQuote
         case codeBlock
         case table
+        case tableHead
+        case tableBody
+        case tableRow
+        case tableCell
         case thematicBreak
         case image
         case text
@@ -24,8 +49,62 @@ extension MarkdownContract {
         case emphasis
         case strong
         case inlineCode
-        case customElement
-        case custom(String)
+        case softBreak
+        case hardBreak
+        case custom
+    }
+
+    public enum NodeKind: Sendable, Equatable, Hashable {
+        case core(CoreNodeKind)
+        case ext(ExtensionNodeKind)
+
+        public var rawValue: String {
+            switch self {
+            case .core(let kind): return kind.rawValue
+            case .ext(let kind): return kind.rawValue
+            }
+        }
+
+        public var coreKind: CoreNodeKind? {
+            guard case let .core(kind) = self else { return nil }
+            return kind
+        }
+
+        public var isExtension: Bool {
+            if case .ext = self { return true }
+            return false
+        }
+
+        public init(rawValue: String) {
+            if let core = CoreNodeKind(rawValue: rawValue) {
+                self = .core(core)
+            } else {
+                self = .ext(.init(rawValue: rawValue))
+            }
+        }
+
+        public static var document: NodeKind { .core(.document) }
+        public static var paragraph: NodeKind { .core(.paragraph) }
+        public static var heading: NodeKind { .core(.heading) }
+        public static var list: NodeKind { .core(.list) }
+        public static var listItem: NodeKind { .core(.listItem) }
+        public static var blockQuote: NodeKind { .core(.blockQuote) }
+        public static var codeBlock: NodeKind { .core(.codeBlock) }
+        public static var table: NodeKind { .core(.table) }
+        public static var tableHead: NodeKind { .core(.tableHead) }
+        public static var tableBody: NodeKind { .core(.tableBody) }
+        public static var tableRow: NodeKind { .core(.tableRow) }
+        public static var tableCell: NodeKind { .core(.tableCell) }
+        public static var thematicBreak: NodeKind { .core(.thematicBreak) }
+        public static var image: NodeKind { .core(.image) }
+        public static var text: NodeKind { .core(.text) }
+        public static var link: NodeKind { .core(.link) }
+        public static var emphasis: NodeKind { .core(.emphasis) }
+        public static var strong: NodeKind { .core(.strong) }
+        public static var inlineCode: NodeKind { .core(.inlineCode) }
+        public static var softBreak: NodeKind { .core(.softBreak) }
+        public static var hardBreak: NodeKind { .core(.hardBreak) }
+        public static var custom: NodeKind { .core(.custom) }
     }
 
     public struct SourcePosition: Sendable, Equatable, Codable {
@@ -139,13 +218,7 @@ extension MarkdownContract.SourceKind: Codable {
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
-
-        switch self {
-        case .markdown: try container.encode("markdown")
-        case .directive: try container.encode("directive")
-        case .htmlTag: try container.encode("htmlTag")
-        case .custom(let raw): try container.encode(raw)
-        }
+        try container.encode(key)
     }
 }
 
@@ -154,52 +227,12 @@ extension MarkdownContract.SourceKind: Codable {
 extension MarkdownContract.NodeKind: Codable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
-        let raw = try container.decode(String.self)
-
-        switch raw {
-        case "document": self = .document
-        case "paragraph": self = .paragraph
-        case "heading": self = .heading
-        case "list": self = .list
-        case "listItem": self = .listItem
-        case "blockQuote": self = .blockQuote
-        case "codeBlock": self = .codeBlock
-        case "table": self = .table
-        case "thematicBreak": self = .thematicBreak
-        case "image": self = .image
-        case "text": self = .text
-        case "link": self = .link
-        case "emphasis": self = .emphasis
-        case "strong": self = .strong
-        case "inlineCode": self = .inlineCode
-        case "customElement": self = .customElement
-        default:
-            self = .custom(raw)
-        }
+        self = MarkdownContract.NodeKind(rawValue: try container.decode(String.self))
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
-
-        switch self {
-        case .document: try container.encode("document")
-        case .paragraph: try container.encode("paragraph")
-        case .heading: try container.encode("heading")
-        case .list: try container.encode("list")
-        case .listItem: try container.encode("listItem")
-        case .blockQuote: try container.encode("blockQuote")
-        case .codeBlock: try container.encode("codeBlock")
-        case .table: try container.encode("table")
-        case .thematicBreak: try container.encode("thematicBreak")
-        case .image: try container.encode("image")
-        case .text: try container.encode("text")
-        case .link: try container.encode("link")
-        case .emphasis: try container.encode("emphasis")
-        case .strong: try container.encode("strong")
-        case .inlineCode: try container.encode("inlineCode")
-        case .customElement: try container.encode("customElement")
-        case .custom(let raw): try container.encode(raw)
-        }
+        try container.encode(rawValue)
     }
 }
 

@@ -48,39 +48,27 @@ extension MarkdownContract {
         func render(document: CanonicalDocument, options: CanonicalRenderOptions) throws -> RenderModel
     }
 
+    public protocol CanonicalRenderPlugin {
+        func register(into registry: CanonicalRendererRegistry)
+    }
+
     public final class CanonicalRendererRegistry {
         public typealias BlockRenderer = (_ node: CanonicalNode, _ context: CanonicalRenderContext, _ registry: CanonicalRendererRegistry) throws -> [RenderBlock]
         public typealias InlineRenderer = (_ node: CanonicalNode, _ context: CanonicalRenderContext, _ registry: CanonicalRendererRegistry) throws -> [InlineSpan]
 
-        private var blockRenderers: [String: BlockRenderer] = [:]
-        private var inlineRenderers: [String: InlineRenderer] = [:]
-        private var customElementBlockRenderers: [String: BlockRenderer] = [:]
-        private var customElementInlineRenderers: [String: InlineRenderer] = [:]
+        private var blockRenderers: [NodeKind: BlockRenderer] = [:]
+        private var inlineRenderers: [NodeKind: InlineRenderer] = [:]
         private var blockFallbackRenderer: BlockRenderer?
         private var inlineFallbackRenderer: InlineRenderer?
 
         public init() {}
 
-        public func registerBlockRenderer(for nodeKind: String, renderer: @escaping BlockRenderer) {
-            blockRenderers[nodeKind] = renderer
+        public func registerBlockRenderer(for kind: NodeKind, renderer: @escaping BlockRenderer) {
+            blockRenderers[kind] = renderer
         }
 
-        public func registerInlineRenderer(for nodeKind: String, renderer: @escaping InlineRenderer) {
-            inlineRenderers[nodeKind] = renderer
-        }
-
-        public func registerCustomElementBlockRenderer(
-            named name: String,
-            renderer: @escaping BlockRenderer
-        ) {
-            customElementBlockRenderers[name] = renderer
-        }
-
-        public func registerCustomElementInlineRenderer(
-            named name: String,
-            renderer: @escaping InlineRenderer
-        ) {
-            customElementInlineRenderers[name] = renderer
+        public func registerInlineRenderer(for kind: NodeKind, renderer: @escaping InlineRenderer) {
+            inlineRenderers[kind] = renderer
         }
 
         public func setBlockFallbackRenderer(_ renderer: @escaping BlockRenderer) {
@@ -91,15 +79,21 @@ extension MarkdownContract {
             inlineFallbackRenderer = renderer
         }
 
+        public func install(_ plugin: CanonicalRenderPlugin) {
+            plugin.register(into: self)
+        }
+
         public func renderBlocks(node: CanonicalNode, context: CanonicalRenderContext) throws -> [RenderBlock] {
-            if node.kind == .customElement,
-               let customElementName = customElementName(for: node),
-               let customRenderer = customElementBlockRenderers[customElementName] {
-                return try customRenderer(node, context, self)
+            if let renderer = blockRenderers[node.kind] {
+                return try renderer(node, context, self)
             }
 
-            if let renderer = blockRenderers[node.kind.key] {
-                return try renderer(node, context, self)
+            if node.kind.isExtension {
+                throw MarkdownContract.ModelError(
+                    code: .unknownNodeKind,
+                    message: "Renderer not registered for extension block node kind: \(node.kind.rawValue)",
+                    path: "kind"
+                )
             }
 
             if let fallback = blockFallbackRenderer {
@@ -110,14 +104,16 @@ extension MarkdownContract {
         }
 
         public func renderInlines(node: CanonicalNode, context: CanonicalRenderContext) throws -> [InlineSpan] {
-            if node.kind == .customElement,
-               let customElementName = customElementName(for: node),
-               let customRenderer = customElementInlineRenderers[customElementName] {
-                return try customRenderer(node, context, self)
+            if let renderer = inlineRenderers[node.kind] {
+                return try renderer(node, context, self)
             }
 
-            if let renderer = inlineRenderers[node.kind.key] {
-                return try renderer(node, context, self)
+            if node.kind.isExtension {
+                throw MarkdownContract.ModelError(
+                    code: .unknownNodeKind,
+                    message: "Renderer not registered for extension inline node kind: \(node.kind.rawValue)",
+                    path: "kind"
+                )
             }
 
             if let fallback = inlineFallbackRenderer {
@@ -153,163 +149,37 @@ extension MarkdownContract {
             }
         }
 
-        public static func makeDefault() -> CanonicalRendererRegistry {
+        public static func makeDefault(plugins: [CanonicalRenderPlugin] = [StandardCanonicalRenderPlugin()]) -> CanonicalRendererRegistry {
             let registry = CanonicalRendererRegistry()
-
-            registry.registerBlockRenderer(for: "document") { node, context, reg in
-                try reg.renderBlockChildren(of: node, context: context)
-            }
-
-            registry.registerBlockRenderer(for: "paragraph") { node, context, reg in
-                if reg.isStandaloneImageParagraph(node) {
-                    return try reg.renderBlockChildren(of: node, context: context)
-                }
-                return [reg.makeBlock(
-                    node: node,
-                    kind: .paragraph,
-                    context: context,
-                    inlines: try reg.renderInlineChildren(of: node, context: context)
-                )]
-            }
-
-            registry.registerBlockRenderer(for: "heading") { node, context, reg in
-                [reg.makeBlock(node: node, kind: .heading, context: context, inlines: try reg.renderInlineChildren(of: node, context: context))]
-            }
-
-            registry.registerBlockRenderer(for: "list") { node, context, reg in
-                [reg.makeBlock(node: node, kind: .list, context: context, children: try reg.renderBlockChildren(of: node, context: context))]
-            }
-
-            registry.registerBlockRenderer(for: "listItem") { node, context, reg in
-                [reg.makeBlock(node: node, kind: .listItem, context: context, children: try reg.renderBlockChildren(of: node, context: context))]
-            }
-
-            registry.registerBlockRenderer(for: "blockQuote") { node, context, reg in
-                [reg.makeBlock(node: node, kind: .blockQuote, context: context, children: try reg.renderBlockChildren(of: node, context: context))]
-            }
-
-            registry.registerBlockRenderer(for: "codeBlock") { node, context, reg in
-                [reg.makeBlock(node: node, kind: .codeBlock, context: context)]
-            }
-
-            registry.registerBlockRenderer(for: "table") { node, context, reg in
-                [reg.makeBlock(node: node, kind: .table, context: context, children: try reg.renderBlockChildren(of: node, context: context))]
-            }
-
-            registry.registerBlockRenderer(for: "thematicBreak") { node, context, reg in
-                [reg.makeBlock(node: node, kind: .thematicBreak, context: context)]
-            }
-
-            registry.registerBlockRenderer(for: "image") { node, context, reg in
-                [reg.makeBlock(node: node, kind: .image, context: context)]
-            }
-
-            registry.registerBlockRenderer(for: "customElement") { node, context, reg in
-                if reg.isLikelyInlineCustomElement(node) {
-                    return [reg.makeBlock(node: node, kind: .paragraph, context: context, inlines: try reg.renderInlines(node: node, context: context))]
-                }
-                return [reg.makeBlock(node: node, kind: .custom, context: context, children: try reg.renderBlockChildren(of: node, context: context))]
-            }
-
-            registry.registerInlineRenderer(for: "text") { node, _, reg in
-                let text: String
-                if case let .string(value)? = node.attrs["text"] {
-                    text = value
-                } else if let raw = node.source.raw {
-                    text = raw
-                } else {
-                    text = ""
-                }
-
-                return [InlineSpan(
-                    id: node.id,
-                    kind: .text,
-                    text: text,
-                    marks: [],
-                    metadata: reg.baseMetadata(for: node)
-                )]
-            }
-
-            registry.registerInlineRenderer(for: "inlineCode") { node, _, reg in
-                let text: String
-                if case let .string(value)? = node.attrs["code"] {
-                    text = value
-                } else {
-                    text = node.source.raw ?? ""
-                }
-
-                return [InlineSpan(
-                    id: node.id,
-                    kind: .code,
-                    text: text,
-                    marks: [MarkToken(name: "inlineCode")],
-                    metadata: reg.baseMetadata(for: node)
-                )]
-            }
-
-            registry.registerInlineRenderer(for: "link") { node, context, reg in
-                let markValue: Value
-                if node.attrs.isEmpty {
-                    markValue = .null
-                } else {
-                    markValue = .object(node.attrs)
-                }
-
-                let children = try reg.renderInlineChildren(of: node, context: context)
-                return reg.appendMark(name: "link", value: markValue, to: children)
-            }
-
-            registry.registerInlineRenderer(for: "emphasis") { node, context, reg in
-                let children = try reg.renderInlineChildren(of: node, context: context)
-                return reg.appendMark(name: "emphasis", value: nil, to: children)
-            }
-
-            registry.registerInlineRenderer(for: "strong") { node, context, reg in
-                let children = try reg.renderInlineChildren(of: node, context: context)
-                return reg.appendMark(name: "strong", value: nil, to: children)
-            }
-
-            registry.registerInlineRenderer(for: "image") { node, _, reg in
-                [InlineSpan(
-                    id: node.id,
-                    kind: .image,
-                    text: "",
-                    marks: [],
-                    metadata: reg.baseMetadata(for: node)
-                )]
-            }
-
-            registry.registerInlineRenderer(for: "customElement") { node, _, reg in
-                [InlineSpan(
-                    id: node.id,
-                    kind: .custom,
-                    text: reg.inlineText(for: node),
-                    marks: [],
-                    metadata: reg.baseMetadata(for: node)
-                )]
-            }
-
+            plugins.forEach { $0.register(into: registry) }
             registry.setBlockFallbackRenderer { node, context, reg in
                 try reg.defaultBlockFallback(node: node, context: context)
             }
-
             registry.setInlineFallbackRenderer { node, context, reg in
                 reg.defaultInlineFallback(node: node, context: context)
             }
-
             return registry
         }
     }
 
     public struct DefaultCanonicalRenderer: CanonicalRenderer {
         public let registry: CanonicalRendererRegistry
+        public let nodeSpecRegistry: NodeSpecRegistry
+        private let treeValidator: TreeValidator
 
-        public init(registry: CanonicalRendererRegistry = .makeDefault()) {
+        public init(
+            registry: CanonicalRendererRegistry = .makeDefault(),
+            nodeSpecRegistry: NodeSpecRegistry = .core()
+        ) {
             self.registry = registry
+            self.nodeSpecRegistry = nodeSpecRegistry
+            self.treeValidator = TreeValidator(registry: nodeSpecRegistry)
         }
 
         public func render(document: CanonicalDocument, options: CanonicalRenderOptions = CanonicalRenderOptions()) throws -> RenderModel {
             try document.validate()
+            try treeValidator.validate(document: document)
+
             let context = CanonicalRenderContext(path: [], options: options)
             let blocks = try registry.renderBlocks(node: document.root, context: context)
             let assets = Self.collectAssets(from: blocks)
@@ -347,6 +217,148 @@ extension MarkdownContract {
             }
 
             return result
+        }
+    }
+
+    public struct StandardCanonicalRenderPlugin: CanonicalRenderPlugin {
+        public init() {}
+
+        public func register(into registry: CanonicalRendererRegistry) {
+            registry.registerBlockRenderer(for: .document) { node, context, reg in
+                try reg.renderBlockChildren(of: node, context: context)
+            }
+
+            registry.registerBlockRenderer(for: .paragraph) { node, context, reg in
+                if reg.isStandaloneImageParagraph(node) {
+                    return try reg.renderBlockChildren(of: node, context: context)
+                }
+                return [reg.makeBlock(
+                    node: node,
+                    kind: .paragraph,
+                    context: context,
+                    inlines: try reg.renderInlineChildren(of: node, context: context)
+                )]
+            }
+
+            registry.registerBlockRenderer(for: .heading) { node, context, reg in
+                [reg.makeBlock(node: node, kind: .heading, context: context, inlines: try reg.renderInlineChildren(of: node, context: context))]
+            }
+
+            registry.registerBlockRenderer(for: .list) { node, context, reg in
+                [reg.makeBlock(node: node, kind: .list, context: context, children: try reg.renderBlockChildren(of: node, context: context))]
+            }
+
+            registry.registerBlockRenderer(for: .listItem) { node, context, reg in
+                [reg.makeBlock(node: node, kind: .listItem, context: context, children: try reg.renderBlockChildren(of: node, context: context))]
+            }
+
+            registry.registerBlockRenderer(for: .blockQuote) { node, context, reg in
+                [reg.makeBlock(node: node, kind: .blockQuote, context: context, children: try reg.renderBlockChildren(of: node, context: context))]
+            }
+
+            registry.registerBlockRenderer(for: .codeBlock) { node, context, reg in
+                [reg.makeBlock(node: node, kind: .codeBlock, context: context)]
+            }
+
+            registry.registerBlockRenderer(for: .table) { node, context, reg in
+                [reg.makeBlock(node: node, kind: .table, context: context, children: try reg.renderBlockChildren(of: node, context: context))]
+            }
+
+            registry.registerBlockRenderer(for: .thematicBreak) { node, context, reg in
+                [reg.makeBlock(node: node, kind: .thematicBreak, context: context)]
+            }
+
+            registry.registerBlockRenderer(for: .image) { node, context, reg in
+                [reg.makeBlock(node: node, kind: .image, context: context)]
+            }
+
+            registry.registerInlineRenderer(for: .text) { node, _, reg in
+                let text: String
+                if case let .string(value)? = node.attrs["text"] {
+                    text = value
+                } else if let raw = node.source.raw {
+                    text = raw
+                } else {
+                    text = ""
+                }
+
+                return [InlineSpan(
+                    id: node.id,
+                    kind: .text,
+                    text: text,
+                    marks: [],
+                    metadata: reg.baseMetadata(for: node)
+                )]
+            }
+
+            registry.registerInlineRenderer(for: .inlineCode) { node, _, reg in
+                let text: String
+                if case let .string(value)? = node.attrs["code"] {
+                    text = value
+                } else {
+                    text = node.source.raw ?? ""
+                }
+
+                return [InlineSpan(
+                    id: node.id,
+                    kind: .inlineCode,
+                    text: text,
+                    marks: [MarkToken(name: "inlineCode")],
+                    metadata: reg.baseMetadata(for: node)
+                )]
+            }
+
+            registry.registerInlineRenderer(for: .softBreak) { node, _, reg in
+                [InlineSpan(
+                    id: node.id,
+                    kind: .softBreak,
+                    text: "\n",
+                    marks: [],
+                    metadata: reg.baseMetadata(for: node)
+                )]
+            }
+
+            registry.registerInlineRenderer(for: .hardBreak) { node, _, reg in
+                [InlineSpan(
+                    id: node.id,
+                    kind: .hardBreak,
+                    text: "\n",
+                    marks: [],
+                    metadata: reg.baseMetadata(for: node)
+                )]
+            }
+
+            registry.registerInlineRenderer(for: .link) { node, context, reg in
+                let markValue: Value
+                if node.attrs.isEmpty {
+                    markValue = .null
+                } else {
+                    markValue = .object(node.attrs)
+                }
+
+                let children = try reg.renderInlineChildren(of: node, context: context)
+                return reg.appendMark(name: "link", value: markValue, to: children)
+            }
+
+            registry.registerInlineRenderer(for: .emphasis) { node, context, reg in
+                let children = try reg.renderInlineChildren(of: node, context: context)
+                return reg.appendMark(name: "emphasis", value: nil, to: children)
+            }
+
+            registry.registerInlineRenderer(for: .strong) { node, context, reg in
+                let children = try reg.renderInlineChildren(of: node, context: context)
+                return reg.appendMark(name: "strong", value: nil, to: children)
+            }
+
+            registry.registerInlineRenderer(for: .image) { node, _, reg in
+                [InlineSpan(
+                    id: node.id,
+                    kind: .image,
+                    text: "",
+                    marks: [],
+                    metadata: reg.baseMetadata(for: node)
+                )]
+            }
         }
     }
 }
@@ -419,19 +431,18 @@ private extension MarkdownContract.CanonicalRendererRegistry {
         }
     }
 
-    func customElementName(for node: MarkdownContract.CanonicalNode) -> String? {
-        guard node.kind == .customElement else { return nil }
-        guard case let .string(name)? = node.attrs["name"] else { return nil }
-        return name
-    }
-
     func resolveStyleTokens(
         for node: MarkdownContract.CanonicalNode,
         parentStyleTokens: [MarkdownContract.StyleToken],
         options: MarkdownContract.CanonicalRenderOptions
     ) -> [MarkdownContract.StyleToken] {
-        let nodeKey = node.kind.key
-        let customName = customElementName(for: node)
+        let nodeKey = node.kind.rawValue
+        let customName: String?
+        if case let .string(name)? = node.attrs["name"] {
+            customName = name
+        } else {
+            customName = nil
+        }
 
         let kindRule = options.nodeStyleSheet.byNodeKind[nodeKey]
         let customRule = customName.flatMap { options.nodeStyleSheet.byCustomElementName[$0] }
@@ -554,55 +565,9 @@ private extension MarkdownContract.CanonicalRendererRegistry {
         return ""
     }
 
-    func isLikelyInlineCustomElement(_ node: MarkdownContract.CanonicalNode) -> Bool {
-        if case let .string(value)? = node.attrs["customType"], value == "htmlTag" {
-            if case let .string(raw)? = node.attrs["raw"] {
-                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                return !trimmed.contains("\n")
-            }
-            return true
-        }
-        return false
-    }
-
     func isStandaloneImageParagraph(_ node: MarkdownContract.CanonicalNode) -> Bool {
         guard node.kind == .paragraph else { return false }
         guard !node.children.isEmpty else { return false }
         return node.children.allSatisfy { $0.kind == .image }
-    }
-}
-
-private extension MarkdownContract.NodeKind {
-    var key: String {
-        switch self {
-        case .document: return "document"
-        case .paragraph: return "paragraph"
-        case .heading: return "heading"
-        case .list: return "list"
-        case .listItem: return "listItem"
-        case .blockQuote: return "blockQuote"
-        case .codeBlock: return "codeBlock"
-        case .table: return "table"
-        case .thematicBreak: return "thematicBreak"
-        case .image: return "image"
-        case .text: return "text"
-        case .link: return "link"
-        case .emphasis: return "emphasis"
-        case .strong: return "strong"
-        case .inlineCode: return "inlineCode"
-        case .customElement: return "customElement"
-        case .custom(let raw): return raw
-        }
-    }
-}
-
-private extension MarkdownContract.SourceKind {
-    var key: String {
-        switch self {
-        case .markdown: return "markdown"
-        case .directive: return "directive"
-        case .htmlTag: return "htmlTag"
-        case .custom(let raw): return raw
-        }
     }
 }

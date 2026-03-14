@@ -1,31 +1,8 @@
 import Foundation
 
 extension MarkdownContract {
-    public enum BlockKind: Sendable, Equatable {
-        case document
-        case paragraph
-        case heading
-        case list
-        case listItem
-        case blockQuote
-        case codeBlock
-        case table
-        case thematicBreak
-        case image
-        case custom
-        case customRaw(String)
-    }
-
-    public enum InlineKind: Sendable, Equatable {
-        case text
-        case code
-        case link
-        case image
-        case softBreak
-        case hardBreak
-        case custom
-        case customRaw(String)
-    }
+    public typealias BlockKind = NodeKind
+    public typealias InlineKind = NodeKind
 
     public struct StyleToken: Sendable, Equatable, Codable {
         public var name: String
@@ -178,82 +155,6 @@ extension MarkdownContract {
             for (index, block) in blocks.enumerated() {
                 try block.validate(path: "blocks[\(index)]")
             }
-        }
-    }
-}
-
-// MARK: - Kind Codable
-
-extension MarkdownContract.BlockKind: Codable {
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        let raw = try container.decode(String.self)
-
-        switch raw {
-        case "document": self = .document
-        case "paragraph": self = .paragraph
-        case "heading": self = .heading
-        case "list": self = .list
-        case "listItem": self = .listItem
-        case "blockQuote": self = .blockQuote
-        case "codeBlock": self = .codeBlock
-        case "table": self = .table
-        case "thematicBreak": self = .thematicBreak
-        case "image": self = .image
-        case "custom": self = .custom
-        default: self = .customRaw(raw)
-        }
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-
-        switch self {
-        case .document: try container.encode("document")
-        case .paragraph: try container.encode("paragraph")
-        case .heading: try container.encode("heading")
-        case .list: try container.encode("list")
-        case .listItem: try container.encode("listItem")
-        case .blockQuote: try container.encode("blockQuote")
-        case .codeBlock: try container.encode("codeBlock")
-        case .table: try container.encode("table")
-        case .thematicBreak: try container.encode("thematicBreak")
-        case .image: try container.encode("image")
-        case .custom: try container.encode("custom")
-        case .customRaw(let raw): try container.encode(raw)
-        }
-    }
-}
-
-extension MarkdownContract.InlineKind: Codable {
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        let raw = try container.decode(String.self)
-
-        switch raw {
-        case "text": self = .text
-        case "code": self = .code
-        case "link": self = .link
-        case "image": self = .image
-        case "softBreak": self = .softBreak
-        case "hardBreak": self = .hardBreak
-        case "custom": self = .custom
-        default: self = .customRaw(raw)
-        }
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-
-        switch self {
-        case .text: try container.encode("text")
-        case .code: try container.encode("code")
-        case .link: try container.encode("link")
-        case .image: try container.encode("image")
-        case .softBreak: try container.encode("softBreak")
-        case .hardBreak: try container.encode("hardBreak")
-        case .custom: try container.encode("custom")
-        case .customRaw(let raw): try container.encode(raw)
         }
     }
 }
