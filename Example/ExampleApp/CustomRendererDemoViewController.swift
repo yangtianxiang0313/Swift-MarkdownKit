@@ -39,7 +39,7 @@ class CustomRendererDemoViewController: UIViewController {
     private let descriptions = [
         "使用默认渲染器渲染 Markdown 内容。",
         "使用自定义渲染器覆盖代码块的默认样式。",
-        "使用 Contract 链路解析 directive / HTML 标签，并替换 block/inline 的渲染实现。",
+        "使用 Contract 链路解析扩展节点（block leaf/container + inline leaf/container），并替换 block/inline 的渲染实现。",
     ]
 
     private let demoMarkdown = """
@@ -74,15 +74,17 @@ class CustomRendererDemoViewController: UIViewController {
     private let contractCustomMarkdown = """
     # Contract 自定义节点演示
 
-    @Card(title: "推荐卡片") {
-    这是 directive 节点，渲染时被替换成自定义 UI。
+    @Callout(title: "这是 block leaf")
+
+    @Tabs {
+    - iOS
+    - Android
+    - Web
     }
 
-    正文里支持 inline HTML：发布状态 <badge text="new" /> 与 <badge text="hot" />。
-
-    <spotlight type="warning">
-    这是 html block 节点，也被替换成自定义 UI。
-    </spotlight>
+    正文里支持 inline HTML：
+    <mention userId="new-user" />
+    ~~已删除~~ 文本和 <spoiler text="剧透内容" /> 都能走 Contract 渲染。
     """
 
     // MARK: - Lifecycle
@@ -167,9 +169,9 @@ class CustomRendererDemoViewController: UIViewController {
                     guard let codeView = view as? CustomCodeBlockView else { return }
                     codeView.configure(code: code, language: language, maxWidth: maxWidth)
                 },
-                reveal: { view, displayedUnits in
+                reveal: { view, state in
                     guard let codeView = view as? CustomCodeBlockView else { return }
-                    codeView.reveal(upTo: displayedUnits)
+                    codeView.reveal(upTo: state.displayedUnits)
                 }
             )]
         }
@@ -187,32 +189,40 @@ class CustomRendererDemoViewController: UIViewController {
 
     private func renderContractCustomElementDemo() {
         let adapter = MarkdownContract.RenderModelUIKitAdapter()
-        adapter.registerBlockRenderer(forExtension: ExampleMarkdownRuntime.cardKind.rawValue) { block, _, _ in
-            let title = block.contractAttrString(for: "title") ?? "Card"
-            let text = "Contract Card\n\(title)"
+        adapter.registerBlockRenderer(forExtension: ExampleMarkdownRuntime.calloutKind.rawValue) { block, _, _ in
+            let title = block.contractAttrString(for: "title") ?? "Callout"
+            let text = "Block Leaf: \(title)"
             return [Self.makeCalloutNode(
                 nodeID: block.id,
                 text: text,
                 color: .systemBlue
             )]
         }
-        adapter.registerBlockRenderer(forExtension: ExampleMarkdownRuntime.spotlightKind.rawValue) { block, _, _ in
-            let type = block.contractAttrString(for: "type") ?? "info"
-            let text = "HTML Spotlight (\(type.uppercased()))"
-            return [Self.makeCalloutNode(
-                nodeID: block.id,
-                text: text,
+        adapter.registerBlockRenderer(forExtension: ExampleMarkdownRuntime.tabsKind.rawValue) { block, context, adapter in
+            let header = Self.makeCalloutNode(
+                nodeID: "\(block.id).tabs.header",
+                text: "Block Container: Tabs",
                 color: .systemOrange
-            )]
+            )
+            let children = adapter.renderBlockAsDefault(block, context: context)
+            return [header] + children
         }
-        adapter.registerInlineRenderer(forExtension: ExampleMarkdownRuntime.badgeKind.rawValue) { span, _, _, _ in
-            let text = span.contractAttrString(for: "text") ?? "badge"
+        adapter.registerInlineRenderer(forExtension: ExampleMarkdownRuntime.mentionKind.rawValue) { span, _, _, _ in
+            let text = span.contractAttrString(for: "userId").map { "@\($0)" } ?? span.text
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: UIFont.monospacedSystemFont(ofSize: 12, weight: .semibold),
                 .foregroundColor: UIColor.white,
                 .backgroundColor: UIColor.systemPink
             ]
-            return NSAttributedString(string: " \(text.uppercased()) ", attributes: attrs)
+            return NSAttributedString(string: " \(text) ", attributes: attrs)
+        }
+        adapter.registerInlineRenderer(forExtension: ExampleMarkdownRuntime.spoilerKind.rawValue) { span, _, _, _ in
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 13, weight: .medium),
+                .foregroundColor: UIColor.white,
+                .backgroundColor: UIColor.systemIndigo
+            ]
+            return NSAttributedString(string: " [SPOILER] \(span.text) ", attributes: attrs)
         }
 
         containerView.contractRenderAdapter = adapter

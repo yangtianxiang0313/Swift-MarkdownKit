@@ -57,12 +57,22 @@ private struct Converter {
     let nodeSpecRegistry: MarkdownContract.NodeSpecRegistry
 
     func convert(markup: Markup, path: [Int]) -> MarkdownContract.CanonicalNode {
+        guard let node = convertOptional(markup: markup, path: path) else {
+            preconditionFailure("Unexpected nil canonical node for \(type(of: markup)) at path \(path)")
+        }
+        return node
+    }
+
+    private func convertOptional(markup: Markup, path: [Int]) -> MarkdownContract.CanonicalNode? {
         let sourceKind = sourceKind(for: markup)
         let attrs = attrs(for: markup)
+        if sourceKind == .htmlTag, isClosingHTMLTag(attrs: attrs) {
+            return nil
+        }
         let kind = nodeKind(for: markup, sourceKind: sourceKind, attrs: attrs)
 
-        let children = markup.children.enumerated().map { index, child in
-            convert(markup: child, path: path + [index])
+        let children = markup.children.enumerated().compactMap { index, child in
+            convertOptional(markup: child, path: path + [index])
         }
 
         return MarkdownContract.CanonicalNode(
@@ -76,6 +86,13 @@ private struct Converter {
                 position: sourcePosition(for: markup)
             )
         )
+    }
+
+    private func isClosingHTMLTag(attrs: [String: MarkdownContract.Value]) -> Bool {
+        if case let .bool(value)? = attrs["isClosing"] {
+            return value
+        }
+        return false
     }
 
     private func nodeId(from path: [Int]) -> String {
@@ -148,6 +165,8 @@ private struct Converter {
             return .emphasis
         case is Strong:
             return .strong
+        case is Strikethrough:
+            return .strikethrough
         case is InlineCode:
             return .inlineCode
         case is SoftBreak:
@@ -332,7 +351,8 @@ private struct Converter {
         let parsed = HTMLTagExtractor.parse(raw)
         var result: [String: MarkdownContract.Value] = [
             "customType": .string("htmlTag"),
-            "raw": .string(raw)
+            "raw": .string(raw),
+            "isClosing": .bool(parsed.isClosing)
         ]
 
         if let tagName = parsed.name {
@@ -357,32 +377,36 @@ private enum HTMLTagExtractor {
     struct Result {
         let name: String?
         let attributes: [String: String]
+        let isClosing: Bool
     }
 
     static func parse(_ raw: String) -> Result {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let openRange = trimmed.range(of: #"<\s*([A-Za-z][A-Za-z0-9:_-]*)\b([^>]*)>"#, options: .regularExpression) else {
-            return Result(name: nil, attributes: [:])
+        guard let regex = try? NSRegularExpression(
+            pattern: #"<\s*(/)?\s*([A-Za-z][A-Za-z0-9:_-]*)\b([^>]*)>"#,
+            options: []
+        ) else {
+            return Result(name: nil, attributes: [:], isClosing: false)
+        }
+        let nsRange = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
+        guard let match = regex.firstMatch(in: trimmed, options: [], range: nsRange) else {
+            return Result(name: nil, attributes: [:], isClosing: false)
         }
 
-        let openingTag = String(trimmed[openRange])
-        guard let name = extractTagName(from: openingTag) else {
-            return Result(name: nil, attributes: [:])
+        let isClosing = match.range(at: 1).location != NSNotFound
+        guard let nameRange = Range(match.range(at: 2), in: trimmed) else {
+            return Result(name: nil, attributes: [:], isClosing: isClosing)
         }
+        let name = String(trimmed[nameRange])
 
-        let attributes = extractAttributes(from: openingTag)
-        return Result(name: name, attributes: attributes)
-    }
-
-    private static func extractTagName(from openingTag: String) -> String? {
-        guard let match = openingTag.range(of: #"^<\s*([A-Za-z][A-Za-z0-9:_-]*)"#, options: .regularExpression) else {
-            return nil
+        let openingTag: String
+        if let fullRange = Range(match.range(at: 0), in: trimmed) {
+            openingTag = String(trimmed[fullRange])
+        } else {
+            openingTag = trimmed
         }
-
-        let substring = String(openingTag[match])
-        return substring
-            .replacingOccurrences(of: "<", with: "")
-            .trimmingCharacters(in: .whitespaces)
+        let attributes = isClosing ? [:] : extractAttributes(from: openingTag)
+        return Result(name: name, attributes: attributes, isClosing: isClosing)
     }
 
     private static func extractAttributes(from openingTag: String) -> [String: String] {

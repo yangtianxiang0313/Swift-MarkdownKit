@@ -66,6 +66,41 @@ final class XYMarkdownContractParserTests: XCTestCase {
         XCTAssertNotNil(spoiler)
     }
 
+    func testClosingHTMLTagsAreIgnoredForExtensionResolution() throws {
+        let spotlightKind: MarkdownContract.NodeKind = .ext(.init(namespace: "demo", name: "spotlight"))
+        let specs = MarkdownContract.NodeSpecRegistry.core()
+        specs.register(.init(
+            kind: spotlightKind,
+            role: .blockContainer,
+            childPolicy: .blockOnly(minChildren: 0),
+            parseAliases: [.init(sourceKind: .htmlTag, name: "spotlight")]
+        ))
+
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: specs)
+        let markdown = """
+        <spotlight type="info">
+        inner
+        </spotlight>
+        """
+
+        let document = try parser.parse(markdown, options: .init(documentId: "doc-closing-tag"))
+        let nodes = flatten(document.root)
+
+        XCTAssertTrue(nodes.contains(where: { $0.kind == spotlightKind }))
+        XCTAssertFalse(nodes.contains(where: { node in
+            if case let .bool(isClosing)? = node.attrs["isClosing"] {
+                return isClosing
+            }
+            return false
+        }))
+        XCTAssertFalse(nodes.contains(where: { node in
+            if case let .ext(extensionKind) = node.kind {
+                return extensionKind.rawValue.hasPrefix("ext.unregistered.")
+            }
+            return false
+        }))
+    }
+
     func testUnregisteredExtensionNodeFailsStrictly() {
         let parser = XYMarkdownContractParser(nodeSpecRegistry: .core())
 
@@ -142,6 +177,17 @@ final class XYMarkdownContractParserTests: XCTestCase {
             table.attrs["alignments"],
             .array([.string("left"), .null, .string("right")])
         )
+    }
+
+    func testParsesStrikethroughAsCoreNodeKind() throws {
+        let parser = XYMarkdownContractParser()
+        let markdown = "before ~~gone~~ after"
+
+        let document = try parser.parse(markdown, options: .init(documentId: "doc-strikethrough"))
+        let nodes = flatten(document.root)
+
+        let strike = nodes.first { $0.kind == .strikethrough }
+        XCTAssertNotNil(strike)
     }
 
     private func flatten(_ root: MarkdownContract.CanonicalNode) -> [MarkdownContract.CanonicalNode] {

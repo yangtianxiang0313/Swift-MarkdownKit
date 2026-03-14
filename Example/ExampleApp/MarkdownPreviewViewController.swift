@@ -411,15 +411,16 @@ class MarkdownPreviewViewController: UIViewController {
     static let contractCustomSample = """
     # Contract 自定义节点
 
-    @Card(title: "推荐内容") {
-    这是一个 directive 自定义容器。
+    @Callout(title: "这里是 block leaf 节点")
+
+    @Tabs {
+    - tab A
+    - tab B
     }
 
-    正文中支持 inline HTML：欢迎体验 <badge text="NEW" /> Contract 链路。
+    正文中支持 inline HTML：欢迎体验 <mention userId="preview-user" /> 与 <spoiler text="剧透文本" />。
 
-    <spotlight type="info">
-    这是一个 block HTML 自定义节点。
-    </spotlight>
+    同时支持核心删除线：~~旧内容~~ -> 新内容。
     """
     
     // MARK: - 边界测试用例

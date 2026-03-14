@@ -61,9 +61,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 }
 
 enum ExampleMarkdownRuntime {
-    static let cardKind: MarkdownContract.NodeKind = .ext(.init(namespace: "example", name: "card"))
-    static let spotlightKind: MarkdownContract.NodeKind = .ext(.init(namespace: "example", name: "spotlight"))
-    static let badgeKind: MarkdownContract.NodeKind = .ext(.init(namespace: "example", name: "badge"))
+    static let calloutKind: MarkdownContract.NodeKind = .ext(.init(namespace: "example", name: "callout"))
+    static let tabsKind: MarkdownContract.NodeKind = .ext(.init(namespace: "example", name: "tabs"))
+    static let mentionKind: MarkdownContract.NodeKind = .ext(.init(namespace: "example", name: "mention"))
+    static let spoilerKind: MarkdownContract.NodeKind = .ext(.init(namespace: "example", name: "spoiler"))
 
     static func makeConfiguredContainer(theme: MarkdownTheme = .default) -> MarkdownContainerView {
         let container = MarkdownContainerView(theme: theme)
@@ -110,22 +111,28 @@ enum ExampleMarkdownRuntime {
         let registry = MarkdownContract.NodeSpecRegistry.core()
 
         registry.register(.init(
-            kind: cardKind,
-            role: .blockContainer,
-            childPolicy: .blockOnly(minChildren: 0),
-            parseAliases: [.init(sourceKind: .directive, name: "Card")]
+            kind: calloutKind,
+            role: .blockLeaf,
+            childPolicy: .none,
+            parseAliases: [.init(sourceKind: .directive, name: "Callout")]
         ))
         registry.register(.init(
-            kind: spotlightKind,
+            kind: tabsKind,
             role: .blockContainer,
-            childPolicy: .blockOnly(minChildren: 0),
-            parseAliases: [.init(sourceKind: .htmlTag, name: "spotlight")]
+            childPolicy: .blockOnly(minChildren: 1),
+            parseAliases: [.init(sourceKind: .directive, name: "Tabs")]
         ))
         registry.register(.init(
-            kind: badgeKind,
+            kind: mentionKind,
             role: .inlineLeaf,
             childPolicy: .none,
-            parseAliases: [.init(sourceKind: .htmlTag, name: "badge")]
+            parseAliases: [.init(sourceKind: .htmlTag, name: "mention")]
+        ))
+        registry.register(.init(
+            kind: spoilerKind,
+            role: .inlineContainer,
+            childPolicy: .inlineOnly(minChildren: 0),
+            parseAliases: [.init(sourceKind: .htmlTag, name: "spoiler")]
         ))
 
         return registry
@@ -134,10 +141,29 @@ enum ExampleMarkdownRuntime {
     private static func makeCanonicalRendererRegistry() -> MarkdownContract.CanonicalRendererRegistry {
         let registry = MarkdownContract.CanonicalRendererRegistry.makeDefault()
 
-        registry.registerBlockRenderer(for: cardKind) { node, context, reg in
+        registry.registerBlockRenderer(for: calloutKind) { node, _, _ in
+            let title = node.attrs["title"]?.stringValue ?? "Callout"
+            return [MarkdownContract.RenderBlock(
+                id: node.id,
+                kind: calloutKind,
+                inlines: [
+                    .init(
+                        id: "\(node.id).title",
+                        kind: .text,
+                        text: "[CALLOUT] \(title)"
+                    )
+                ],
+                metadata: [
+                    "attrs": .object(node.attrs),
+                    "extensionKind": .string(node.kind.rawValue)
+                ]
+            )]
+        }
+
+        registry.registerBlockRenderer(for: tabsKind) { node, context, reg in
             [MarkdownContract.RenderBlock(
                 id: node.id,
-                kind: cardKind,
+                kind: tabsKind,
                 children: try reg.renderBlockChildren(of: node, context: context),
                 metadata: [
                     "attrs": .object(node.attrs),
@@ -146,38 +172,68 @@ enum ExampleMarkdownRuntime {
             )]
         }
 
-        registry.registerBlockRenderer(for: spotlightKind) { node, context, reg in
-            [MarkdownContract.RenderBlock(
-                id: node.id,
-                kind: spotlightKind,
-                children: try reg.renderBlockChildren(of: node, context: context),
-                metadata: [
-                    "attrs": .object(node.attrs),
-                    "extensionKind": .string(node.kind.rawValue)
-                ]
-            )]
-        }
-
-        registry.registerInlineRenderer(for: badgeKind) { node, _, _ in
-            let text: String
+        registry.registerInlineRenderer(for: mentionKind) { node, _, _ in
+            let userID: String
             if case let .object(attributes)? = node.attrs["attributes"],
-               case let .string(raw)? = attributes["text"] {
-                text = raw
+               case let .string(value)? = attributes["userId"] {
+                userID = value
             } else {
-                text = "badge"
+                userID = "unknown"
             }
 
             return [MarkdownContract.InlineSpan(
                 id: node.id,
-                kind: badgeKind,
-                text: text,
+                kind: mentionKind,
+                text: "@\(userID)",
                 metadata: [
                     "attrs": .object(node.attrs),
+                    "userId": .string(userID),
+                    "extensionKind": .string(node.kind.rawValue)
+                ]
+            )]
+        }
+
+        registry.registerInlineRenderer(for: spoilerKind) { node, context, reg in
+            let renderedChildren = try reg.renderInlineChildren(of: node, context: context)
+            let wrappedChildren = renderedChildren.map { span in
+                var updated = span
+                updated.marks.append(.init(name: "spoiler"))
+                return updated
+            }
+            if !wrappedChildren.isEmpty {
+                return wrappedChildren
+            }
+
+            let fallbackText: String
+            if case let .object(attributes)? = node.attrs["attributes"],
+               case let .string(value)? = attributes["text"] {
+                fallbackText = value
+            } else {
+                fallbackText = "spoiler"
+            }
+
+            return [MarkdownContract.InlineSpan(
+                id: node.id,
+                kind: spoilerKind,
+                text: fallbackText,
+                marks: [.init(name: "spoiler")],
+                metadata: [
+                    "attrs": .object(node.attrs),
+                    "text": .string(fallbackText),
                     "extensionKind": .string(node.kind.rawValue)
                 ]
             )]
         }
 
         return registry
+    }
+}
+
+private extension MarkdownContract.Value {
+    var stringValue: String? {
+        if case let .string(raw) = self {
+            return raw
+        }
+        return nil
     }
 }
