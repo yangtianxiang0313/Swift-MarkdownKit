@@ -1,8 +1,13 @@
 import UIKit
+#if canImport(XHSMarkdownCore)
+import XHSMarkdownCore
+#endif
 
 public struct CodeBlockSceneComponent: RevealAnimatableComponent {
     public let code: String
     public let language: String?
+    public let copyStatus: String
+    public let debugNodeID: String
     public let font: UIFont
     public let textColor: UIColor
     public let backgroundColor: UIColor
@@ -14,6 +19,8 @@ public struct CodeBlockSceneComponent: RevealAnimatableComponent {
     public init(
         code: String,
         language: String?,
+        copyStatus: String = "idle",
+        debugNodeID: String = "",
         font: UIFont,
         textColor: UIColor,
         backgroundColor: UIColor,
@@ -24,6 +31,8 @@ public struct CodeBlockSceneComponent: RevealAnimatableComponent {
     ) {
         self.code = code
         self.language = language
+        self.copyStatus = copyStatus
+        self.debugNodeID = debugNodeID
         self.font = font
         self.textColor = textColor
         self.backgroundColor = backgroundColor
@@ -54,6 +63,8 @@ public struct CodeBlockSceneComponent: RevealAnimatableComponent {
         guard let rhs = other as? CodeBlockSceneComponent else { return false }
         return code == rhs.code
             && language == rhs.language
+            && copyStatus == rhs.copyStatus
+            && debugNodeID == rhs.debugNodeID
             && font == rhs.font
             && textColor == rhs.textColor
             && backgroundColor == rhs.backgroundColor
@@ -279,9 +290,24 @@ public struct BlockQuoteContainerSceneComponent: SceneComponent {
     }
 }
 
-private final class CodeBlockSceneView: UIView {
+private final class CodeBlockSceneView: UIView, SceneInteractionEmitting {
+    private struct ConfigureSignature: Equatable {
+        let code: String
+        let language: String?
+        let copyStatus: String
+        let maxWidth: CGFloat
+        let font: UIFont
+        let textColor: UIColor
+        let backgroundColor: UIColor
+        let cornerRadius: CGFloat
+        let padding: UIEdgeInsets
+        let borderWidth: CGFloat
+        let borderColor: UIColor
+    }
+
     private let headerView = UIView()
     private let languageLabel = UILabel()
+    private let copyButton = UIButton(type: .system)
     private let scrollView = UIScrollView()
     private let codeTextView = UITextView()
 
@@ -289,12 +315,24 @@ private final class CodeBlockSceneView: UIView {
     private var contentPadding: UIEdgeInsets = .zero
     private var configuredMaxWidth: CGFloat = 0
     private var codeFont: UIFont = .monospacedSystemFont(ofSize: 14, weight: .regular)
-    private var hasLanguageHeader: Bool = false
+    private var hasHeader: Bool = false
+    private var copyStatus: String = "idle"
+    private var visibleCharacters: Int = 0
+    private var codeTextColor: UIColor = .label
+    private var debugNodeID: String = "unknown"
+    private var lastMeasuredHeight: CGFloat = -1
+    private var lastMeasuredWidth: CGFloat = -1
+    private var lastLoggedVisibleCharacters: Int = -1
+    private var lastLoggedFrame: CGRect = .null
+    private var lastLoggedContentSize: CGSize = .zero
+    private var lastConfigureSignature: ConfigureSignature?
+    var sceneInteractionHandler: ((SceneInteractionPayload) -> Bool)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
 
         headerView.addSubview(languageLabel)
+        headerView.addSubview(copyButton)
         addSubview(headerView)
 
         scrollView.showsHorizontalScrollIndicator = true
@@ -310,37 +348,67 @@ private final class CodeBlockSceneView: UIView {
         codeTextView.textContainer.lineFragmentPadding = 0
         codeTextView.textContainer.lineBreakMode = .byClipping
         scrollView.addSubview(codeTextView)
+
+        copyButton.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
+        copyButton.addTarget(self, action: #selector(copyButtonTapped), for: .touchUpInside)
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
     func configure(component: CodeBlockSceneComponent, maxWidth: CGFloat) {
-        fullCode = component.code
-        contentPadding = component.padding
-        configuredMaxWidth = max(1, maxWidth)
-        codeFont = component.font
+        let signature = ConfigureSignature(
+            code: component.code,
+            language: component.language,
+            copyStatus: component.copyStatus,
+            maxWidth: max(1, maxWidth),
+            font: component.font,
+            textColor: component.textColor,
+            backgroundColor: component.backgroundColor,
+            cornerRadius: component.cornerRadius,
+            padding: component.padding,
+            borderWidth: component.borderWidth,
+            borderColor: component.borderColor
+        )
+        debugNodeID = component.debugNodeID.isEmpty ? "unknown" : component.debugNodeID
 
-        backgroundColor = component.backgroundColor
-        layer.cornerRadius = component.cornerRadius
-        layer.borderWidth = component.borderWidth
-        layer.borderColor = component.borderColor.cgColor
+        guard signature != lastConfigureSignature else {
+            return
+        }
+        lastConfigureSignature = signature
+
+        fullCode = signature.code
+        copyStatus = signature.copyStatus
+        contentPadding = signature.padding
+        configuredMaxWidth = signature.maxWidth
+        codeFont = signature.font
+        codeTextColor = signature.textColor
+        visibleCharacters = fullCode.count
+
+        backgroundColor = signature.backgroundColor
+        layer.cornerRadius = signature.cornerRadius
+        layer.borderWidth = signature.borderWidth
+        layer.borderColor = signature.borderColor.cgColor
         layer.masksToBounds = true
 
-        if let language = component.language, !language.isEmpty {
+        if let language = signature.language, !language.isEmpty {
             languageLabel.text = language.uppercased()
             languageLabel.font = .systemFont(ofSize: 12, weight: .semibold)
             languageLabel.textColor = .secondaryLabel
-            headerView.isHidden = false
-            hasLanguageHeader = true
         } else {
             languageLabel.text = nil
-            headerView.isHidden = true
-            hasLanguageHeader = false
         }
+        hasHeader = true
+        headerView.isHidden = !hasHeader
 
-        codeTextView.font = component.font
-        codeTextView.textColor = component.textColor
-        codeTextView.text = component.code
+        copyButton.setTitle(copyButtonTitle(for: copyStatus), for: .normal)
+
+        codeTextView.font = signature.font
+        renderVisibleCode(upTo: visibleCharacters)
+
+        SceneDebugLogger.log(
+            "CodeBlock configure node=\(debugNodeID) width=\(configuredMaxWidth) codeLen=\(fullCode.count) copyStatus=\(copyStatus)",
+            level: .verbose
+        )
 
         invalidateIntrinsicContentSize()
         setNeedsLayout()
@@ -348,10 +416,16 @@ private final class CodeBlockSceneView: UIView {
 
     func reveal(upTo displayedUnits: Int) {
         let clamped = max(0, min(displayedUnits, fullCode.count))
-        let end = fullCode.index(fullCode.startIndex, offsetBy: clamped)
-        codeTextView.text = String(fullCode[..<end])
-        invalidateIntrinsicContentSize()
-        setNeedsLayout()
+        guard clamped != visibleCharacters else { return }
+        visibleCharacters = clamped
+        renderVisibleCode(upTo: clamped)
+        if shouldLogReveal(for: clamped) {
+            SceneDebugLogger.log(
+                "CodeBlock reveal node=\(debugNodeID) visible=\(clamped)/\(fullCode.count)",
+                level: .verbose
+            )
+            lastLoggedVisibleCharacters = clamped
+        }
     }
 
     override var intrinsicContentSize: CGSize {
@@ -369,13 +443,20 @@ private final class CodeBlockSceneView: UIView {
         let verticalPaddingTop: CGFloat = max(0, contentPadding.top)
         let verticalPaddingBottom: CGFloat = max(0, contentPadding.bottom)
         let trailingPadding: CGFloat = max(0, contentPadding.right)
-        let headerHeight: CGFloat = headerView.isHidden ? 0 : 28
+        let headerHeight: CGFloat = hasHeader ? 28 : 0
 
         headerView.frame = CGRect(x: 0, y: 0, width: bounds.width, height: headerHeight)
+        let buttonWidth = copyButtonWidth()
+        copyButton.frame = CGRect(
+            x: max(0, bounds.width - trailingPadding - buttonWidth),
+            y: 0,
+            width: buttonWidth,
+            height: headerHeight
+        )
         languageLabel.frame = CGRect(
             x: horizontalPadding,
             y: 0,
-            width: max(0, bounds.width - horizontalPadding - trailingPadding),
+            width: max(0, copyButton.frame.minX - horizontalPadding - 8),
             height: headerHeight
         )
 
@@ -387,7 +468,7 @@ private final class CodeBlockSceneView: UIView {
         )
 
         let attr = NSAttributedString(
-            string: codeTextView.text ?? "",
+            string: fullCode,
             attributes: [.font: codeTextView.font ?? UIFont.monospacedSystemFont(ofSize: 14, weight: .regular)]
         )
         let codeSize = attr.boundingRect(
@@ -403,11 +484,20 @@ private final class CodeBlockSceneView: UIView {
         let contentHeight = max(scrollView.bounds.height, ceil(codeSize.height))
         codeTextView.frame = CGRect(x: 0, y: 0, width: contentWidth, height: contentHeight)
         scrollView.contentSize = CGSize(width: contentWidth, height: contentHeight)
+
+        if frame.integral != lastLoggedFrame || scrollView.contentSize != lastLoggedContentSize {
+            SceneDebugLogger.log(
+                "CodeBlock layout node=\(debugNodeID) frame=\(frame.integral) scroll=\(scrollView.frame.integral) contentSize=\(scrollView.contentSize)",
+                level: .verbose
+            )
+            lastLoggedFrame = frame.integral
+            lastLoggedContentSize = scrollView.contentSize
+        }
     }
 
     private func measuredSize(for width: CGFloat) -> CGSize {
         let targetWidth = max(1, width)
-        let text = codeTextView.text ?? ""
+        let text = fullCode
         let attr = NSAttributedString(
             string: text,
             attributes: [.font: codeFont]
@@ -418,12 +508,85 @@ private final class CodeBlockSceneView: UIView {
             context: nil
         ).size
 
-        let headerHeight: CGFloat = hasLanguageHeader ? 28 : 0
+        let headerHeight: CGFloat = hasHeader ? 28 : 0
         let height = headerHeight
             + max(ceil(textSize.height), codeFont.lineHeight)
             + max(0, contentPadding.top)
             + max(0, contentPadding.bottom)
-        return CGSize(width: targetWidth, height: ceil(height))
+        let resolved = CGSize(width: targetWidth, height: ceil(height))
+        if abs(lastMeasuredHeight - resolved.height) > 0.5 || abs(lastMeasuredWidth - targetWidth) > 0.5 {
+            SceneDebugLogger.log(
+                "CodeBlock measured node=\(debugNodeID) width=\(targetWidth) measuredHeight=\(resolved.height) visible=\(visibleCharacters)/\(fullCode.count)",
+                level: .verbose
+            )
+            lastMeasuredHeight = resolved.height
+            lastMeasuredWidth = targetWidth
+        }
+        return resolved
+    }
+
+    private func copyButtonTitle(for status: String) -> String {
+        status == "copied" ? "Copied" : "Copy"
+    }
+
+    private func copyButtonWidth() -> CGFloat {
+        let title = copyButton.title(for: .normal) ?? "Copy"
+        let size = (title as NSString).size(withAttributes: [
+            .font: copyButton.titleLabel?.font ?? UIFont.systemFont(ofSize: 12, weight: .semibold)
+        ])
+        return max(52, ceil(size.width) + 16)
+    }
+
+    @objc
+    private func copyButtonTapped() {
+        let payload = SceneInteractionPayload(
+            action: "copyTap",
+            payload: [
+                "slot": .string("copyStatus"),
+                "code": .string(fullCode)
+            ]
+        )
+        let shouldApplyDefault = sceneInteractionHandler?(payload) ?? true
+        if shouldApplyDefault {
+            UIPasteboard.general.string = fullCode
+        }
+    }
+
+    private func renderVisibleCode(upTo visibleCount: Int) {
+        let clamped = max(0, min(visibleCount, fullCode.count))
+        let visiblePrefix = String(fullCode.prefix(clamped))
+        let hiddenSuffix = String(fullCode.dropFirst(clamped))
+
+        let rendered = NSMutableAttributedString(
+            string: visiblePrefix,
+            attributes: [
+                .font: codeFont,
+                .foregroundColor: codeTextColor
+            ]
+        )
+        if !hiddenSuffix.isEmpty {
+            rendered.append(
+                NSAttributedString(
+                    string: hiddenSuffix,
+                    attributes: [
+                        .font: codeFont,
+                        .foregroundColor: UIColor.clear
+                    ]
+                )
+            )
+        }
+        codeTextView.attributedText = rendered
+    }
+
+    private func shouldLogReveal(for visibleCount: Int) -> Bool {
+        guard SceneDebugLogger.isEnabled else { return false }
+        if visibleCount == 0 || visibleCount == fullCode.count {
+            return true
+        }
+        if lastLoggedVisibleCharacters < 0 {
+            return true
+        }
+        return abs(visibleCount - lastLoggedVisibleCharacters) >= 24
     }
 }
 

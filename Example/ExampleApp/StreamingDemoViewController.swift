@@ -1,6 +1,7 @@
 import UIKit
 import XHSMarkdownKit
 
+@MainActor
 final class StreamingDemoViewController: UIViewController {
 
     private enum Role {
@@ -12,6 +13,7 @@ final class StreamingDemoViewController: UIViewController {
         case taskPlan
         case reviewChecklist
         case incidentResponse
+        case fullCoverage
 
         var title: String {
             switch self {
@@ -21,6 +23,8 @@ final class StreamingDemoViewController: UIViewController {
                 return "评审清单"
             case .incidentResponse:
                 return "故障响应"
+            case .fullCoverage:
+                return "全量覆盖"
             }
         }
 
@@ -32,6 +36,8 @@ final class StreamingDemoViewController: UIViewController {
                 return "给我一个本次改造的 Code Review 清单，按风险从高到低排列。"
             case .incidentResponse:
                 return "如果上线后动画出现异常，请给我一份应急处理 Runbook。"
+            case .fullCoverage:
+                return "给我一份完整输出，覆盖自定义节点、特殊格式、表格、代码块和链接交互。"
             }
         }
 
@@ -100,6 +106,40 @@ final class StreamingDemoViewController: UIViewController {
 
                 > 原则：先恢复可用性，再追求动画完整性。
                 """
+            case .fullCoverage:
+                return """
+                已切换到全量覆盖输出，下面是统一验收样例：
+
+                @Hero(title: "Streaming Full Coverage", subtitle: "custom nodes + special formats")
+
+                @Panel(style: "warning") {
+                - mention: <mention userId="stream-user-01" />
+                - badge: <badge text="HOT" />
+                - chip: <chip text="A/B 2026Q1" />
+                - cite: <Cite id="stream-cite-001">citation-001</Cite>
+                }
+
+                <Think id="stream-think-001">
+                ### Thinking Plan
+                - step 1: parse custom tags
+                - step 2: validate tree roles
+                - step 3: project runtime state
+                </Think>
+
+                行内能力：~~strikethrough~~、`inline code`、[runtime-link](https://example.com/runtime?from=streaming)。
+
+                ```swift
+                let runtime = MarkdownRuntime()
+                runtime.attach(to: containerView)
+                try runtime.setInput(.markdown(text: markdown, documentID: "streaming.full.coverage"))
+                ```
+
+                | capability | status | note |
+                | --- | :---: | --- |
+                | customTag | ✅ | mention/cite/think |
+                | specialFormat | ✅ | strike/code/link |
+                | streaming | ✅ | chunked append |
+                """
             }
         }
     }
@@ -121,6 +161,23 @@ final class StreamingDemoViewController: UIViewController {
         }
     }
 
+    private struct ScrollDebugSnapshot: Equatable {
+        let reason: String
+        let followBottom: Bool
+        let streamingActive: Bool
+        let offsetY: Int
+        let contentHeight: Int
+        let boundsHeight: Int
+        let insetTop: Int
+        let insetBottom: Int
+        let minOffsetY: Int
+        let maxOffsetY: Int
+        let targetY: Int?
+        let deltaHeight: Int
+        let deltaOffsetY: Int
+        let applied: Bool?
+    }
+
     private final class ContainerDelegateProxy: NSObject, MarkdownContainerViewDelegate {
         var onHeightChange: ((CGFloat) -> Void)?
 
@@ -129,6 +186,7 @@ final class StreamingDemoViewController: UIViewController {
         }
     }
 
+    @MainActor
     private final class MessageItem {
         let id: String
         let role: Role
@@ -138,6 +196,8 @@ final class StreamingDemoViewController: UIViewController {
 
         let container: MarkdownContainerView
         let delegateProxy: ContainerDelegateProxy
+        let runtime: MarkdownRuntime
+        var streamingSession: MarkdownContract.StreamingMarkdownSession?
 
         init(
             id: String = UUID().uuidString,
@@ -155,6 +215,8 @@ final class StreamingDemoViewController: UIViewController {
             self.markdown = markdown
             self.isStreaming = isStreaming
             self.streamSessionStarted = false
+            self.runtime = ExampleMarkdownRuntime.makeRuntime()
+            self.streamingSession = nil
 
             container = ExampleMarkdownRuntime.makeConfiguredContainer()
             container.animationConcurrencyPolicy = animationConcurrencyPolicy
@@ -166,49 +228,100 @@ final class StreamingDemoViewController: UIViewController {
             delegateProxy = ContainerDelegateProxy()
             delegateProxy.onHeightChange = onHeightChange
             container.delegate = delegateProxy
+            runtime.eventHandler = { event in
+                if event.action == "activate",
+                   let url = event.payload.valueString(forKey: "url"),
+                   (url.hasPrefix("xhs-think://") || url.hasPrefix("xhs-cite://")) {
+                    return .handled
+                }
+                return .continueDefault
+            }
+            runtime.attach(to: container)
         }
 
         func renderStatic() {
             do {
-                try container.setContractMarkdown(
-                    markdown,
-                    rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                try runtime.setInput(
+                    .markdown(
+                        text: markdown,
+                        documentID: id,
+                        rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                    )
                 )
             } catch {
                 // Keep demo resilient; failed render falls back to plain text paragraph.
-                try? container.setContractMarkdown(markdown)
+                try? runtime.setInput(.markdown(text: markdown, documentID: id))
             }
             isStreaming = false
             streamSessionStarted = false
+            streamingSession = nil
         }
 
         func appendChunk(_ chunk: String) {
             markdown += chunk
             do {
                 if !streamSessionStarted {
-                    container.resetContractStreamingSession()
                     streamSessionStarted = true
+                    guard let engine = container.contractStreamingEngine else {
+                        try runtime.setInput(
+                            .markdown(
+                                text: markdown,
+                                documentID: id,
+                                rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                            )
+                        )
+                        return
+                    }
+                    streamingSession = MarkdownContract.StreamingMarkdownSession(
+                        engine: engine,
+                        parseOptions: .init(documentId: id)
+                    )
                 }
-                _ = try container.appendContractStreamChunk(chunk)
+
+                if let session = streamingSession {
+                    let update = try session.appendChunk(chunk)
+                    try runtime.setRenderModel(update.model, isFinal: update.isFinal)
+                } else {
+                    try runtime.setInput(
+                        .markdown(
+                            text: markdown,
+                            documentID: id,
+                            rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                        )
+                    )
+                }
             } catch {
                 // Keep the streaming session alive. Intermediate chunks can be temporarily invalid.
-                // Resetting here would make subsequent chunks render only the tail.
             }
         }
 
         func finishStreaming() {
             if streamSessionStarted {
                 do {
-                    _ = try container.finishContractStreaming()
+                    if let session = streamingSession {
+                        let update = try session.finish()
+                        try runtime.setRenderModel(update.model, isFinal: update.isFinal)
+                    } else {
+                        try runtime.setInput(
+                            .markdown(
+                                text: markdown,
+                                documentID: id,
+                                rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                            )
+                        )
+                    }
                 } catch {
                     // Final fallback to the full accumulated markdown so tail-only rendering cannot persist.
                     do {
-                        try container.setContractMarkdown(
-                            markdown,
-                            rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                        try runtime.setInput(
+                            .markdown(
+                                text: markdown,
+                                documentID: id,
+                                rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                            )
                         )
                     } catch {
-                        try? container.setContractMarkdown(markdown)
+                        try? runtime.setInput(.markdown(text: markdown, documentID: id))
                     }
                 }
             } else {
@@ -216,6 +329,7 @@ final class StreamingDemoViewController: UIViewController {
             }
             isStreaming = false
             streamSessionStarted = false
+            streamingSession = nil
         }
     }
 
@@ -551,8 +665,8 @@ final class StreamingDemoViewController: UIViewController {
 
     private var messages: [MessageItem] = []
     private var streamingTimer: Timer?
-    private var streamCharacters: [Character] = []
-    private var streamCursor = 0
+    private var streamTokens: [String] = []
+    private var streamTokenCursor = 0
     private var activeStreamingMessageID: String?
     private var shouldFollowBottom = true
     private var isApplyingHeightUpdate = false
@@ -566,9 +680,20 @@ final class StreamingDemoViewController: UIViewController {
     private var currentTypingCharactersPerSecond: Int = 32
     private var currentStreamChunkSize: Int = 4
     private var currentStreamInterval: TimeInterval = 0.06
+    private var lastScrollDebugSnapshot: ScrollDebugSnapshot?
+    private var lastScrollDebugTimestamp: TimeInterval = 0
+    private var lastUserScrollLoggedOffsetY: CGFloat = .nan
+
+    private static let scrollDebugEnvKey = "XHS_SCROLL_DEBUG"
+    private static let scrollDebugDefaultsKey = "xhs.stream.scroll.debug"
 
     override func viewDidLoad() {
         super.viewDidLoad()
+#if DEBUG
+        if UserDefaults.standard.object(forKey: Self.scrollDebugDefaultsKey) == nil {
+            UserDefaults.standard.set(true, forKey: Self.scrollDebugDefaultsKey)
+        }
+#endif
         title = "流式 + 动画"
         view.backgroundColor = UIColor.systemGroupedBackground
         setupUI()
@@ -685,8 +810,8 @@ final class StreamingDemoViewController: UIViewController {
 
         scrollToBottom(animated: true)
 
-        streamCharacters = Array(currentContentPreset.markdown)
-        streamCursor = 0
+        streamTokens = MarkdownStreamingChunker.tokenize(currentContentPreset.markdown)
+        streamTokenCursor = 0
 
         applyAnimationConfiguration(to: streaming.container)
         streaming.container.resetContractStreamingSession()
@@ -695,7 +820,9 @@ final class StreamingDemoViewController: UIViewController {
 
     private func scheduleStreamingTimer() {
         streamingTimer = Timer.scheduledTimer(withTimeInterval: currentStreamInterval, repeats: true) { [weak self] _ in
-            self?.emitNextChunk()
+            Task { @MainActor [weak self] in
+                self?.emitNextChunk()
+            }
         }
     }
 
@@ -712,20 +839,23 @@ final class StreamingDemoViewController: UIViewController {
             return
         }
 
-        guard streamCursor < streamCharacters.count else {
+        guard streamTokenCursor < streamTokens.count else {
             message.finishStreaming()
             stopStreaming()
             return
         }
 
-        let chunkSize = min(currentStreamChunkSize, streamCharacters.count - streamCursor)
-        let next = streamCursor + chunkSize
-        let chunk = String(streamCharacters[streamCursor..<next])
-        streamCursor = next
+        let next = MarkdownStreamingChunker.nextChunk(
+            from: streamTokens,
+            cursor: streamTokenCursor,
+            preferredCharacterCount: currentStreamChunkSize
+        )
+        let chunk = next.chunk
+        streamTokenCursor = next.nextCursor
 
         message.appendChunk(chunk)
 
-        if streamCursor >= streamCharacters.count {
+        if streamTokenCursor >= streamTokens.count {
             message.finishStreaming()
             stopStreaming()
         }
@@ -735,6 +865,8 @@ final class StreamingDemoViewController: UIViewController {
         streamingTimer?.invalidate()
         streamingTimer = nil
         activeStreamingMessageID = nil
+        streamTokens = []
+        streamTokenCursor = 0
         handleContentHeightChange(messageID: nil, newHeight: nil)
     }
 
@@ -745,6 +877,10 @@ final class StreamingDemoViewController: UIViewController {
                 return
             }
             latestHeightsByMessageID[messageID] = newHeight
+            logScrollState(
+                reason: "height.msg",
+                note: "mid=\(messageID.prefix(6)) h=\(toDebugInt(previous))->\(toDebugInt(newHeight))"
+            )
         }
 
         requestHeightRelayout()
@@ -760,6 +896,7 @@ final class StreamingDemoViewController: UIViewController {
 
         if isApplyingHeightUpdate {
             hasPendingHeightRelayout = true
+            logScrollState(reason: "relayout.defer")
             return
         }
 
@@ -777,6 +914,9 @@ final class StreamingDemoViewController: UIViewController {
         let previousContentHeight = tableView.contentSize.height
         let previousOffsetY = tableView.contentOffset.y
         let minOffsetY = minimumOffsetY()
+        var targetY: CGFloat?
+        var appliedOffset = false
+        var reason = "relayout.anchor"
 
         UIView.performWithoutAnimation {
             tableView.beginUpdates()
@@ -784,7 +924,10 @@ final class StreamingDemoViewController: UIViewController {
             tableView.layoutIfNeeded()
 
             if shouldFollowBottom {
-                pinBottomWithoutAnimation()
+                reason = "relayout.follow"
+                let pinResult = pinBottomWithoutAnimation()
+                targetY = pinResult.targetY
+                appliedOffset = pinResult.applied
                 return
             }
 
@@ -793,10 +936,20 @@ final class StreamingDemoViewController: UIViewController {
 
             let maxOffsetY = maximumOffsetY(minOffsetY: minOffsetY)
             let anchoredOffsetY = min(max(previousOffsetY + delta, minOffsetY), maxOffsetY)
+            targetY = anchoredOffsetY
             if abs(anchoredOffsetY - tableView.contentOffset.y) >= 0.5 {
                 tableView.setContentOffset(CGPoint(x: tableView.contentOffset.x, y: anchoredOffsetY), animated: false)
+                appliedOffset = true
             }
         }
+
+        logScrollState(
+            reason: reason,
+            previousContentHeight: previousContentHeight,
+            previousOffsetY: previousOffsetY,
+            targetY: targetY,
+            applied: appliedOffset
+        )
     }
 
     @objc private func resetConversation() {
@@ -820,6 +973,7 @@ final class StreamingDemoViewController: UIViewController {
 
     @objc private func followSwitchChanged() {
         shouldFollowBottom = followSwitch.isOn
+        logScrollState(reason: "follow.toggle", note: "on=\(shouldFollowBottom ? 1 : 0)")
         if shouldFollowBottom {
             scrollToBottom(animated: true)
         }
@@ -866,6 +1020,11 @@ final class StreamingDemoViewController: UIViewController {
     private func scrollToBottom(animated: Bool) {
         guard !messages.isEmpty else { return }
         let bottom = IndexPath(row: messages.count - 1, section: 0)
+        logScrollState(
+            reason: "scroll.bottom",
+            targetY: maximumOffsetY(),
+            note: "animated=\(animated ? 1 : 0)"
+        )
         tableView.scrollToRow(at: bottom, at: .bottom, animated: animated)
     }
 
@@ -881,11 +1040,110 @@ final class StreamingDemoViewController: UIViewController {
         )
     }
 
-    private func pinBottomWithoutAnimation() {
+    private func pinBottomWithoutAnimation() -> (targetY: CGFloat, applied: Bool) {
         let targetY = maximumOffsetY()
         if abs(targetY - tableView.contentOffset.y) >= 0.5 {
             tableView.setContentOffset(CGPoint(x: tableView.contentOffset.x, y: targetY), animated: false)
+            return (targetY, true)
         }
+        return (targetY, false)
+    }
+
+    private var isScrollDebugEnabled: Bool {
+#if DEBUG
+        if let envValue = ProcessInfo.processInfo.environment[Self.scrollDebugEnvKey], envValue == "1" {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: Self.scrollDebugDefaultsKey)
+#else
+        return false
+#endif
+    }
+
+    private func toDebugInt(_ value: CGFloat) -> Int {
+        Int(value.rounded())
+    }
+
+    private func logScrollState(
+        reason: String,
+        previousContentHeight: CGFloat? = nil,
+        previousOffsetY: CGFloat? = nil,
+        targetY: CGFloat? = nil,
+        applied: Bool? = nil,
+        note: String? = nil
+    ) {
+        guard isScrollDebugEnabled else { return }
+
+        let insets = tableView.adjustedContentInset
+        let minOffset = minimumOffsetY()
+        let maxOffset = maximumOffsetY(minOffsetY: minOffset)
+        let offsetY = tableView.contentOffset.y
+        let contentHeight = tableView.contentSize.height
+
+        let snapshot = ScrollDebugSnapshot(
+            reason: reason,
+            followBottom: shouldFollowBottom,
+            streamingActive: activeStreamingMessageID != nil,
+            offsetY: toDebugInt(offsetY),
+            contentHeight: toDebugInt(contentHeight),
+            boundsHeight: toDebugInt(tableView.bounds.height),
+            insetTop: toDebugInt(insets.top),
+            insetBottom: toDebugInt(insets.bottom),
+            minOffsetY: toDebugInt(minOffset),
+            maxOffsetY: toDebugInt(maxOffset),
+            targetY: targetY.map(toDebugInt),
+            deltaHeight: previousContentHeight.map { toDebugInt(contentHeight - $0) } ?? 0,
+            deltaOffsetY: previousOffsetY.map { toDebugInt(offsetY - $0) } ?? 0,
+            applied: applied
+        )
+
+        let now = Date.timeIntervalSinceReferenceDate
+        if snapshot == lastScrollDebugSnapshot {
+            return
+        }
+        if reason.hasPrefix("scroll."), now - lastScrollDebugTimestamp < 0.08 {
+            return
+        }
+
+        lastScrollDebugSnapshot = snapshot
+        lastScrollDebugTimestamp = now
+
+        var message = "[XHSScroll] r=\(snapshot.reason)"
+        message += " follow=\(snapshot.followBottom ? 1 : 0)"
+        message += " stream=\(snapshot.streamingActive ? 1 : 0)"
+        message += " off=\(snapshot.offsetY)"
+        message += " h=\(snapshot.contentHeight)"
+        message += " b=\(snapshot.boundsHeight)"
+        message += " inset=\(snapshot.insetTop),\(snapshot.insetBottom)"
+        message += " range=\(snapshot.minOffsetY)...\(snapshot.maxOffsetY)"
+        if snapshot.deltaHeight != 0 {
+            message += " dH=\(snapshot.deltaHeight)"
+        }
+        if snapshot.deltaOffsetY != 0 {
+            message += " dY=\(snapshot.deltaOffsetY)"
+        }
+        if let targetY = snapshot.targetY {
+            message += " target=\(targetY)"
+        }
+        if let applied = snapshot.applied {
+            message += " set=\(applied ? 1 : 0)"
+        }
+        if let note, !note.isEmpty {
+            message += " \(note)"
+        }
+        print(message)
+    }
+}
+
+private extension StreamingDemoViewController {
+}
+
+private extension Dictionary where Key == String, Value == MarkdownContract.Value {
+    func valueString(forKey key: String) -> String? {
+        guard case let .string(value)? = self[key] else {
+            return nil
+        }
+        return value
     }
 }
 
@@ -900,5 +1158,18 @@ extension StreamingDemoViewController: UITableViewDataSource, UITableViewDelegat
         }
         cell.configure(with: messages[indexPath.row])
         return cell
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        guard scrollView === tableView else { return }
+        let isUserDriven = scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating
+        guard isUserDriven else { return }
+
+        let offsetY = scrollView.contentOffset.y
+        if lastUserScrollLoggedOffsetY.isFinite, abs(offsetY - lastUserScrollLoggedOffsetY) < 8 {
+            return
+        }
+        lastUserScrollLoggedOffsetY = offsetY
+        logScrollState(reason: "scroll.user")
     }
 }

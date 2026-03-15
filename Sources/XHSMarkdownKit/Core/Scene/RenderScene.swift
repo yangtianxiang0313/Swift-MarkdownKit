@@ -3,6 +3,46 @@ import UIKit
 import XHSMarkdownCore
 #endif
 
+enum SceneDebugLogger {
+    enum Level {
+        case compact
+        case verbose
+    }
+
+    private static let envKey = "XHS_SCENE_DEBUG"
+    private static let verboseEnvKey = "XHS_SCENE_DEBUG_VERBOSE"
+    private static let defaultsKey = "xhs.scene.debug"
+    private static let verboseDefaultsKey = "xhs.scene.debug.verbose"
+
+    static var isEnabled: Bool {
+#if DEBUG
+        if let envValue = ProcessInfo.processInfo.environment[envKey], envValue == "1" {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: defaultsKey)
+#else
+        return false
+#endif
+    }
+
+    static var isVerboseEnabled: Bool {
+#if DEBUG
+        if let envValue = ProcessInfo.processInfo.environment[verboseEnvKey], envValue == "1" {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: verboseDefaultsKey)
+#else
+        return false
+#endif
+    }
+
+    static func log(_ message: @autoclosure () -> String, level: Level = .compact) {
+        guard isEnabled else { return }
+        guard level == .compact || isVerboseEnabled else { return }
+        print("[XHSSceneDebug] \(message())")
+    }
+}
+
 public struct RevealState {
     public let displayedUnits: Int
     public let totalUnits: Int
@@ -66,6 +106,9 @@ public protocol AppearanceAnimatableComponent: RevealAnimatableComponent {
 public extension NSAttributedString.Key {
     static let xhsBaseForegroundColor = NSAttributedString.Key("xhs.baseForegroundColor")
     static let xhsBlockQuoteDepth = NSAttributedString.Key("xhs.blockQuoteDepth")
+    static let xhsInteractionNodeID = NSAttributedString.Key("xhs.interaction.nodeID")
+    static let xhsInteractionNodeKind = NSAttributedString.Key("xhs.interaction.nodeKind")
+    static let xhsInteractionStateKey = NSAttributedString.Key("xhs.interaction.stateKey")
 }
 
 public struct MergedTextSceneComponent: AppearanceAnimatableComponent {
@@ -130,49 +173,48 @@ public struct RuleSceneComponent: SceneComponent {
     public let color: UIColor
     public let height: CGFloat
     public let verticalPadding: CGFloat
+    public let leadingInset: CGFloat
+    public let trailingInset: CGFloat
 
-    public init(color: UIColor, height: CGFloat, verticalPadding: CGFloat = 0) {
+    public init(
+        color: UIColor,
+        height: CGFloat,
+        verticalPadding: CGFloat = 0,
+        leadingInset: CGFloat = 0,
+        trailingInset: CGFloat = 0
+    ) {
         self.color = color
         self.height = max(1, height)
         self.verticalPadding = max(0, verticalPadding)
+        self.leadingInset = max(0, leadingInset)
+        self.trailingInset = max(0, trailingInset)
     }
 
     public var reuseIdentifier: String { "scene.rule" }
 
     public func makeView() -> UIView {
-        let view = UIView()
-        view.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            view.heightAnchor.constraint(equalToConstant: height + verticalPadding * 2)
-        ])
-        let lineView = UIView()
-        lineView.tag = 1001
-        view.addSubview(lineView)
-        return view
+        RuleSceneView()
     }
 
     public func configure(view: UIView, maxWidth: CGFloat) {
-        let lineView: UIView
-        if let existing = view.viewWithTag(1001) {
-            lineView = existing
-        } else {
-            lineView = UIView()
-            lineView.tag = 1001
-            view.addSubview(lineView)
-        }
-        view.backgroundColor = .clear
-        lineView.backgroundColor = color
-        lineView.frame = CGRect(
-            x: 0,
-            y: verticalPadding,
-            width: view.bounds.width,
-            height: height
+        guard let ruleView = view as? RuleSceneView else { return }
+        ruleView.configure(
+            color: color,
+            lineHeight: height,
+            verticalPadding: verticalPadding,
+            leadingInset: leadingInset,
+            trailingInset: trailingInset,
+            maxWidth: maxWidth
         )
     }
 
     public func isContentEqual(to other: any SceneComponent) -> Bool {
         guard let rhs = other as? RuleSceneComponent else { return false }
-        return color == rhs.color && height == rhs.height && verticalPadding == rhs.verticalPadding
+        return color == rhs.color
+            && height == rhs.height
+            && verticalPadding == rhs.verticalPadding
+            && leadingInset == rhs.leadingInset
+            && trailingInset == rhs.trailingInset
     }
 }
 
@@ -338,7 +380,63 @@ public struct RenderScene: Equatable {
     }
 }
 
-private final class MergedTextSceneView: UIView {
+private final class RuleSceneView: UIView {
+    private let lineView = UIView()
+    private var lineHeight: CGFloat = 1
+    private var verticalPadding: CGFloat = 0
+    private var leadingInset: CGFloat = 0
+    private var trailingInset: CGFloat = 0
+    private var configuredMaxWidth: CGFloat = 1
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        addSubview(lineView)
+    }
+
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+
+    func configure(
+        color: UIColor,
+        lineHeight: CGFloat,
+        verticalPadding: CGFloat,
+        leadingInset: CGFloat,
+        trailingInset: CGFloat,
+        maxWidth: CGFloat
+    ) {
+        self.lineHeight = max(1, lineHeight)
+        self.verticalPadding = max(0, verticalPadding)
+        self.leadingInset = max(0, leadingInset)
+        self.trailingInset = max(0, trailingInset)
+        configuredMaxWidth = max(1, maxWidth)
+        lineView.backgroundColor = color
+        setNeedsLayout()
+        invalidateIntrinsicContentSize()
+    }
+
+    override func sizeThatFits(_ size: CGSize) -> CGSize {
+        let width = max(1, size.width > 0 ? size.width : configuredMaxWidth)
+        return CGSize(width: width, height: ceil(lineHeight + verticalPadding * 2))
+    }
+
+    override var intrinsicContentSize: CGSize {
+        CGSize(width: UIView.noIntrinsicMetric, height: ceil(lineHeight + verticalPadding * 2))
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let widthBasis = max(1, bounds.width > 0 ? bounds.width : configuredMaxWidth)
+        let lineWidth = max(0, widthBasis - leadingInset - trailingInset)
+        lineView.frame = CGRect(
+            x: leadingInset,
+            y: verticalPadding,
+            width: lineWidth,
+            height: lineHeight
+        )
+    }
+}
+
+private final class MergedTextSceneView: UIView, UITextViewDelegate, SceneInteractionEmitting {
     private let renderTextStorage = NSTextStorage()
     private let renderLayoutManager = QuoteDecoratedLayoutManager()
     private let renderTextContainer = NSTextContainer(size: .zero)
@@ -351,6 +449,7 @@ private final class MergedTextSceneView: UIView {
     private var fullText = NSAttributedString(string: "")
     private var totalGlyphCount = 0
     private var configuredMaxWidth: CGFloat = 0
+    var sceneInteractionHandler: ((SceneInteractionPayload) -> Bool)?
 
     override init(frame: CGRect) {
         renderTextContainer.lineFragmentPadding = 0
@@ -368,6 +467,7 @@ private final class MergedTextSceneView: UIView {
         textView.isSelectable = true
         textView.isScrollEnabled = false
         textView.backgroundColor = .clear
+        textView.delegate = self
         textView.textContainerInset = .zero
         textView.textContainer.lineFragmentPadding = 0
         textView.translatesAutoresizingMaskIntoConstraints = false
@@ -488,6 +588,37 @@ private final class MergedTextSceneView: UIView {
             width: targetWidth,
             height: max(1, ceil(resolvedHeight))
         )
+    }
+
+    func textView(
+        _ textView: UITextView,
+        shouldInteractWith URL: URL,
+        in characterRange: NSRange,
+        interaction: UITextItemInteraction
+    ) -> Bool {
+        var payloadData: [String: MarkdownContract.Value] = ["url": .string(URL.absoluteString)]
+        if let nodeID = stringAttribute(.xhsInteractionNodeID, in: characterRange) {
+            payloadData["eventNodeID"] = .string(nodeID)
+        }
+        if let nodeKind = stringAttribute(.xhsInteractionNodeKind, in: characterRange) {
+            payloadData["eventNodeKind"] = .string(nodeKind)
+        }
+        if let stateKey = stringAttribute(.xhsInteractionStateKey, in: characterRange) {
+            payloadData["stateKey"] = .string(stateKey)
+        }
+
+        let payload = SceneInteractionPayload(
+            action: "activate",
+            payload: payloadData
+        )
+        return sceneInteractionHandler?(payload) ?? true
+    }
+
+    private func stringAttribute(_ key: NSAttributedString.Key, in characterRange: NSRange) -> String? {
+        guard let attributed = textView.attributedText else { return nil }
+        guard attributed.length > 0 else { return nil }
+        let clampedLocation = max(0, min(characterRange.location, attributed.length - 1))
+        return attributed.attribute(key, at: clampedLocation, effectiveRange: nil) as? String
     }
 }
 

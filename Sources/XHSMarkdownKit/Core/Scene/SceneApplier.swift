@@ -2,6 +2,7 @@ import UIKit
 
 public final class SceneApplier {
     private let containerView: UIView
+    var interactionHandler: ((RenderScene.Node, SceneInteractionPayload) -> Bool)?
 
     public init(containerView: UIView) {
         self.containerView = containerView
@@ -59,10 +60,21 @@ public final class SceneApplier {
             }
 
             let view = resolveView(for: node, component: component, parent: parent, managedViews: &managedViews)
+            if let interactionView = view as? any SceneInteractionEmitting {
+                interactionView.sceneInteractionHandler = { [weak self] payload in
+                    self?.interactionHandler?(node, payload) ?? true
+                }
+            }
             component.configure(view: view, maxWidth: resolvedMaxWidth)
 
             let baseHeight = measuredHeight(for: view, width: resolvedMaxWidth)
             let spacingAfter = sanitize(node.spacingAfter, fallback: 0, minimum: 0)
+            if node.kind == "codeBlock" {
+                SceneDebugLogger.log(
+                    "SceneApplier layout node=\(node.id) width=\(resolvedMaxWidth) y=\(y) baseHeight=\(baseHeight) spacing=\(spacingAfter)",
+                    level: .verbose
+                )
+            }
 
             if let nestedContainer = view as? SceneContainerView {
                 let insets = sanitize(nestedContainer.sceneContentInsets)
@@ -159,7 +171,14 @@ public final class SceneApplier {
         if !measured.isFinite || measured <= 0 {
             measured = 1
         }
-        return max(1, ceil(measured))
+        let resolved = max(1, ceil(measured))
+        if String(describing: type(of: view)).contains("CodeBlockSceneView") {
+            SceneDebugLogger.log(
+                "SceneApplier measured view=\(type(of: view)) width=\(clampedWidth) height=\(resolved)",
+                level: .verbose
+            )
+        }
+        return resolved
     }
 
     private func syncSubviewOrder(in container: UIView, orderedViews: [UIView]) {
