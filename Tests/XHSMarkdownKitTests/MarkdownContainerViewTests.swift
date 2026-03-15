@@ -60,12 +60,13 @@ final class MarkdownContainerViewTests: XCTestCase {
         let view = makeConfiguredContainerView()
         view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
 
-        view.contractRenderAdapter.registerBlockRenderer(forExtension: ExtensionNodeTestSupport.calloutKind.rawValue) { block, _, adapter in
-            [adapter.makeTextNode(
-                id: block.id,
+        view.contractRenderAdapter.registerBlockMapper(forExtension: ExtensionNodeTestSupport.calloutKind.rawValue) { block, _, adapter in
+            let segment = adapter.makeMergeTextSegment(
+                sourceBlockID: block.id,
                 kind: "paragraph",
-                text: NSAttributedString(string: "CARD_OVERRIDE")
-            )]
+                attributedText: NSAttributedString(string: "CARD_OVERRIDE")
+            )
+            return [.mergeSegment(segment)]
         }
 
         let rewrite = MarkdownContract.CanonicalRewritePipeline(
@@ -85,12 +86,13 @@ final class MarkdownContainerViewTests: XCTestCase {
         let view = makeConfiguredContainerView()
         view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
 
-        view.contractRenderAdapter.registerBlockRenderer(forExtension: ExtensionNodeTestSupport.tabsKind.rawValue) { block, _, adapter in
-            [adapter.makeTextNode(
-                id: block.id,
+        view.contractRenderAdapter.registerBlockMapper(forExtension: ExtensionNodeTestSupport.tabsKind.rawValue) { block, _, adapter in
+            let segment = adapter.makeMergeTextSegment(
+                sourceBlockID: block.id,
                 kind: "paragraph",
-                text: NSAttributedString(string: "BADGE_OVERRIDE")
-            )]
+                attributedText: NSAttributedString(string: "BADGE_OVERRIDE")
+            )
+            return [.mergeSegment(segment)]
         }
 
         let rewrite = MarkdownContract.CanonicalRewritePipeline(
@@ -130,32 +132,19 @@ final class MarkdownContainerViewTests: XCTestCase {
         XCTAssertTrue(text.contains("after"))
     }
 
-    func testContainerViewContractStreamingUsesContractAnimationPlanMapper() throws {
+    func testContainerViewStreamingUsesQueueByDefault() throws {
         let view = makeConfiguredContainerView()
         view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
-
-        let mapper = SpyContractAnimationPlanMapper()
-        view.contractAnimationPlanMapper = mapper
-
-        _ = try view.appendContractStreamChunk("hello")
-
-        XCTAssertGreaterThanOrEqual(mapper.callCount, 1)
+        XCTAssertEqual(view.animationConcurrencyPolicy, .fullyOrdered)
     }
 
-    func testContainerViewSetContractRenderModelAutoCompilesAnimationPlanUsesMapper() throws {
+    func testContainerViewSubmissionModeMapsToConcurrencyPolicy() {
         let view = makeConfiguredContainerView()
-        view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
+        view.animationSubmissionMode = .queueLatest
+        XCTAssertEqual(view.animationConcurrencyPolicy, .fullyOrdered)
 
-        let mapper = SpyContractAnimationPlanMapper()
-        view.contractAnimationPlanMapper = mapper
-
-        try view.setContractMarkdown("legacy")
-
-        let engine = MarkdownnAdapter.makeEngine()
-        let model = try engine.render("# Title")
-        view.setContractRenderModel(model)
-
-        XCTAssertGreaterThanOrEqual(mapper.callCount, 1)
+        view.animationSubmissionMode = .interruptCurrent
+        XCTAssertEqual(view.animationConcurrencyPolicy, .latestWins)
     }
 
     private func makeConfiguredContainerView() -> MarkdownContainerView {
@@ -184,26 +173,5 @@ final class MarkdownContainerViewTests: XCTestCase {
             contractKit: MarkdownContract.UniversalMarkdownKit(registry: registry),
             contractStreamingEngine: streamingEngine
         )
-    }
-}
-
-private final class SpyContractAnimationPlanMapper: ContractAnimationPlanMapping {
-    private(set) var callCount: Int = 0
-
-    func makePlan(
-        contractPlan: MarkdownContract.CompiledAnimationPlan,
-        oldScene: RenderScene,
-        newScene: RenderScene,
-        diff: SceneDiff,
-        defaultEffectKey: AnimationEffectKey
-    ) -> AnimationPlan {
-        callCount += 1
-        return AnimationPlan(steps: [AnimationStep(
-            id: "spy.step",
-            effectKey: defaultEffectKey,
-            entityIDs: diff.changes.map(\.entityId),
-            fromScene: oldScene,
-            toScene: newScene
-        )])
     }
 }

@@ -34,6 +34,22 @@ class MarkdownPreviewViewController: UIViewController {
         sv.layer.borderColor = UIColor.systemGray4.cgColor
         return sv
     }()
+
+    private lazy var statusLabel: UILabel = {
+        let label = UILabel()
+        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        label.textColor = .systemRed
+        label.numberOfLines = 0
+        label.textAlignment = .left
+        label.backgroundColor = UIColor.systemRed.withAlphaComponent(0.08)
+        label.layer.cornerRadius = 8
+        label.layer.masksToBounds = true
+        label.isHidden = true
+        label.isUserInteractionEnabled = true
+        let tap = UITapGestureRecognizer(target: self, action: #selector(copyLatestError))
+        label.addGestureRecognizer(tap)
+        return label
+    }()
     
     private lazy var containerView: MarkdownContainerView = {
         let view = ExampleMarkdownRuntime.makeConfiguredContainer()
@@ -55,6 +71,7 @@ class MarkdownPreviewViewController: UIViewController {
     
     private var currentTheme: MarkdownTheme = .default
     private var markdownPluginInstalled = false
+    private var latestRenderErrorPayload: String?
     
     private let sampleMarkdowns: [(title: String, content: String)] = [
         ("基础语法", testHeight),
@@ -98,11 +115,13 @@ class MarkdownPreviewViewController: UIViewController {
         
         // 布局
         view.addSubview(segmentedControl)
+        view.addSubview(statusLabel)
         view.addSubview(textView)
         view.addSubview(previewScrollView)
         previewScrollView.addSubview(containerView)
 
         segmentedControl.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
         textView.translatesAutoresizingMaskIntoConstraints = false
         previewScrollView.translatesAutoresizingMaskIntoConstraints = false
         // containerView 使用 frame 布局，不使用 Auto Layout
@@ -113,11 +132,15 @@ class MarkdownPreviewViewController: UIViewController {
             segmentedControl.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
             segmentedControl.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
             segmentedControl.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            
-            textView.topAnchor.constraint(equalTo: segmentedControl.bottomAnchor, constant: 12),
+
+            statusLabel.topAnchor.constraint(equalTo: segmentedControl.bottomAnchor, constant: 10),
+            statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            statusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+
+            textView.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 10),
             textView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            
-            previewScrollView.topAnchor.constraint(equalTo: segmentedControl.bottomAnchor, constant: 12),
+
+            previewScrollView.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 10),
             previewScrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             previewScrollView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
         ])
@@ -153,6 +176,12 @@ class MarkdownPreviewViewController: UIViewController {
         }
         
         present(alertController, animated: true)
+    }
+
+    @objc private func copyLatestError() {
+        guard let payload = latestRenderErrorPayload, !payload.isEmpty else { return }
+        UIPasteboard.general.string = payload
+        statusLabel.text = "已复制错误信息到剪贴板。"
     }
 
     // MARK: - Layout
@@ -218,15 +247,52 @@ class MarkdownPreviewViewController: UIViewController {
                 markdown,
                 rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
             )
+            clearRenderErrorStatus()
             navigationItem.prompt = markdownPluginInstalled
                 ? "Contract 渲染链路（markdownn 插件已安装）"
                 : "Contract 渲染链路"
         } catch let modelError as MarkdownContract.ModelError
             where modelError.code == MarkdownContract.ModelError.Code.requiredFieldMissing.rawValue && modelError.path == "parserID" {
+            reportRenderError(modelError, markdown: markdown, source: "MarkdownPreviewViewController")
             navigationItem.prompt = "未安装 parser 插件，点击“安装插件”后重试"
         } catch {
+            reportRenderError(error, markdown: markdown, source: "MarkdownPreviewViewController")
             navigationItem.prompt = "Contract 渲染失败：\(error.localizedDescription)"
         }
+    }
+
+    private func reportRenderError(_ error: Error, markdown: String, source: String) {
+        let payload = buildErrorPayload(error: error, markdown: markdown, source: source)
+        latestRenderErrorPayload = payload
+        statusLabel.text = "渲染失败，点此复制错误信息"
+        statusLabel.isHidden = false
+        print(payload)
+    }
+
+    private func clearRenderErrorStatus() {
+        latestRenderErrorPayload = nil
+        statusLabel.isHidden = true
+        statusLabel.text = nil
+    }
+
+    private func buildErrorPayload(error: Error, markdown: String, source: String) -> String {
+        var lines: [String] = []
+        lines.append("=== XHSMarkdownKit Example Render Error ===")
+        lines.append("source: \(source)")
+        lines.append("time: \(ISO8601DateFormatter().string(from: Date()))")
+        if let modelError = error as? MarkdownContract.ModelError {
+            lines.append("code: \(modelError.code)")
+            if let path = modelError.path {
+                lines.append("path: \(path)")
+            }
+            lines.append("message: \(modelError.message)")
+        } else {
+            lines.append("error: \(String(reflecting: error))")
+        }
+        lines.append("--- markdown begin ---")
+        lines.append(markdown)
+        lines.append("--- markdown end ---")
+        return lines.joined(separator: "\n")
     }
     
     private func updateContainerFrame() {

@@ -9,7 +9,6 @@ extension MarkdownContract {
         public var document: CanonicalDocument
         public var model: RenderModel
         public var diff: RenderModelDiff
-        public var animationPlan: CompiledAnimationPlan
 
         public init(
             schemaVersion: Int = MarkdownContract.schemaVersion,
@@ -18,8 +17,7 @@ extension MarkdownContract {
             currentText: String,
             document: CanonicalDocument,
             model: RenderModel,
-            diff: RenderModelDiff,
-            animationPlan: CompiledAnimationPlan
+            diff: RenderModelDiff
         ) {
             self.schemaVersion = schemaVersion
             self.sequence = sequence
@@ -28,14 +26,12 @@ extension MarkdownContract {
             self.document = document
             self.model = model
             self.diff = diff
-            self.animationPlan = animationPlan
         }
     }
 
     public final class StreamingMarkdownSession {
         private let engine: MarkdownContractEngine
         private let differ: any RenderModelDiffer
-        private let animationCompiler: any RenderModelAnimationCompiler
         private let parseOptions: MarkdownContractParserOptions
         private let renderOptions: CanonicalRenderOptions
 
@@ -46,13 +42,11 @@ extension MarkdownContract {
         public init(
             engine: MarkdownContractEngine = MarkdownContractEngine(),
             differ: any RenderModelDiffer = DefaultRenderModelDiffer(),
-            animationCompiler: any RenderModelAnimationCompiler = DefaultRenderModelAnimationCompiler(),
             parseOptions: MarkdownContractParserOptions = MarkdownContractParserOptions(),
             renderOptions: CanonicalRenderOptions = CanonicalRenderOptions()
         ) {
             self.engine = engine
             self.differ = differ
-            self.animationCompiler = animationCompiler
             self.parseOptions = parseOptions
             self.renderOptions = renderOptions
         }
@@ -96,7 +90,6 @@ extension MarkdownContract {
             )
 
             let diff = differ.diff(old: oldModel, new: model)
-            let animationPlan = animationCompiler.compile(old: oldModel, new: model, diff: diff)
 
             sequence += 1
             lastModel = model
@@ -107,8 +100,7 @@ extension MarkdownContract {
                 currentText: buffer,
                 document: rewritten,
                 model: model,
-                diff: diff,
-                animationPlan: animationPlan
+                diff: diff
             )
         }
     }

@@ -1,2008 +1,904 @@
 import UIKit
 import XHSMarkdownKit
 
-/// 流式渲染演示页面
-/// 支持选择渲染内容、滚动跟随、参数配置、自定义内容
-class StreamingDemoViewController: UIViewController {
-    
-    // MARK: - UI Components
-    
-    /// 流式内容 ScrollView（外层可见区域高度由约束固定）
-    private lazy var scrollView: UIScrollView = {
-        let sv = UIScrollView()
-        sv.backgroundColor = UIColor.systemGray6
-        sv.layer.cornerRadius = 12
-        sv.alwaysBounceVertical = true
-        return sv
-    }()
-    
-    /// 配置区域包装（可滚动，避免内容过多时挤压展示区）
-    private lazy var configAreaScrollView: UIScrollView = {
-        let sv = UIScrollView()
-        sv.showsVerticalScrollIndicator = true
-        sv.alwaysBounceVertical = false
-        return sv
-    }()
-    
-    /// 是否启用逐字动画（否则即时显示）
-    private var animationEnabled = true
-    
-    /// 容器视图（由 makeContainerView 创建，切换动画开关时重建）
-    private var _containerView: MarkdownContainerView!
-    private var containerView: MarkdownContainerView { _containerView }
-    
-    private func makeContainerView() -> MarkdownContainerView {
-        let view = ExampleMarkdownRuntime.makeConfiguredContainer()
-        applyAnimationConfig(to: view)
-        view.delegate = self
-        return view
+final class StreamingDemoViewController: UIViewController {
+
+    private enum Role {
+        case user
+        case assistant
     }
 
-    private func currentPreset() -> MarkdownAnimationPreset {
-        switch animationPresetMode {
-        case .instant:
-            return .instant
-        case .typing:
-            return .typing(charactersPerSecond: typingCharactersPerSecond)
-        case .streamingMask:
-            return .streamingMask(charactersPerSecond: typingCharactersPerSecond)
-        }
-    }
+    private enum ReplyContentPreset: Int, CaseIterable {
+        case taskPlan
+        case reviewChecklist
+        case incidentResponse
 
-    private func applyAnimationConfig(to view: MarkdownContainerView) {
-        if animationEnabled {
-            view.setAnimationPreset(currentPreset())
-        } else {
-            view.setAnimationPreset(.instant)
-        }
-        view.typingCharactersPerSecond = typingCharactersPerSecond
-        view.animationSchedulingMode = schedulingMode
-        view.animationSubmissionMode = submitMode
-    }
-    
-    /// 内容选择器
-    private lazy var caseSelector: UIButton = {
-        let button = UIButton(type: .system)
-        button.setTitle("选择内容", for: .normal)
-        button.setImage(UIImage(systemName: "doc.text"), for: .normal)
-        button.backgroundColor = .systemBackground
-        button.setTitleColor(.label, for: .normal)
-        button.tintColor = .label
-        button.layer.cornerRadius = 8
-        button.layer.borderWidth = 1
-        button.layer.borderColor = UIColor.separator.cgColor
-        button.showsMenuAsPrimaryAction = true
-        button.menu = createCaseMenu()
-        return button
-    }()
-    
-    /// 配置区域
-    private lazy var configStack: UIStackView = {
-        let stack = UIStackView()
-        stack.axis = .vertical
-        stack.spacing = 8
-        return stack
-    }()
-    
-    /// 渲染速度标签
-    private lazy var speedLabel: UILabel = {
-        let label = UILabel()
-        label.text = "渲染: 1.0秒/次(全部)"
-        label.font = .systemFont(ofSize: 13)
-        label.textColor = .secondaryLabel
-        return label
-    }()
-    
-    /// 渲染速度滑块（0-100：0~8=burst，8~100=渐进加速）
-    private lazy var speedSlider: UISlider = {
-        let slider = UISlider()
-        slider.minimumValue = 0
-        slider.maximumValue = 100
-        slider.value = 4  // 默认 burst 模式
-        slider.minimumTrackTintColor = .systemBlue
-        slider.addTarget(self, action: #selector(speedChanged), for: .valueChanged)
-        return slider
-    }()
-    
-    /// 网络接收速度标签
-    private lazy var networkSpeedLabel: UILabel = {
-        let label = UILabel()
-        label.text = "网络: 3字/秒"
-        label.font = .systemFont(ofSize: 13)
-        label.textColor = .secondaryLabel
-        return label
-    }()
-    
-    /// 网络接收速度滑块
-    private lazy var networkSpeedSlider: UISlider = {
-        let slider = UISlider()
-        slider.minimumValue = 0
-        slider.maximumValue = 100
-        slider.value = 50  // 默认比渲染快
-        slider.minimumTrackTintColor = .systemGreen
-        slider.addTarget(self, action: #selector(networkSpeedChanged), for: .valueChanged)
-        return slider
-    }()
-    
-    /// 积压显示标签
-    private lazy var backlogLabel: UILabel = {
-        let label = UILabel()
-        label.text = "📦 积压: 0 字"
-        label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.textColor = .systemGray
-        return label
-    }()
-    
-    /// 滚动跟随开关
-    private lazy var autoScrollSwitch: UISwitch = {
-        let sw = UISwitch()
-        sw.isOn = true
-        sw.addTarget(self, action: #selector(autoScrollChanged), for: .valueChanged)
-        return sw
-    }()
-    
-    /// 网络模式开关（不稳定/稳定）
-    private lazy var networkModeSwitch: UISwitch = {
-        let sw = UISwitch()
-        sw.isOn = false  // 默认关闭不稳定模式，方便观察
-        sw.onTintColor = .systemOrange
-        sw.addTarget(self, action: #selector(networkModeChanged), for: .valueChanged)
-        return sw
-    }()
-    
-    /// 网络模式标签
-    private lazy var networkModeLabel: UILabel = {
-        let label = UILabel()
-        label.text = "🔗 稳定网络模式"
-        label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.textColor = .systemGreen
-        return label
-    }()
-    
-    /// 网络质量滑块（控制抖动频率、延迟概率等）
-    private lazy var networkQualitySlider: UISlider = {
-        let slider = UISlider()
-        slider.minimumValue = 0
-        slider.maximumValue = 100
-        slider.value = 50  // 默认中等质量
-        slider.minimumTrackTintColor = .systemOrange
-        slider.addTarget(self, action: #selector(networkQualityChanged), for: .valueChanged)
-        return slider
-    }()
-    
-    /// 网络质量标签
-    private lazy var networkQualityLabel: UILabel = {
-        let label = UILabel()
-        label.text = "网络质量: 中等"
-        label.font = .systemFont(ofSize: 13)
-        label.textColor = .secondaryLabel
-        return label
-    }()
-    
-    /// 自动加速开关
-    private lazy var autoAccelerateSwitch: UISwitch = {
-        let sw = UISwitch()
-        sw.isOn = true  // 默认开启
-        sw.onTintColor = .systemBlue
-        sw.addTarget(self, action: #selector(autoAccelerateChanged), for: .valueChanged)
-        return sw
-    }()
-    
-    /// 自动加速标签
-    private lazy var autoAccelerateLabel: UILabel = {
-        let label = UILabel()
-        label.text = "🚀 自动加速: 线性"
-        label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.textColor = .systemBlue
-        return label
-    }()
-    
-    /// 逐字动画开关
-    private lazy var animationSwitch: UISwitch = {
-        let sw = UISwitch()
-        sw.isOn = true
-        sw.onTintColor = .systemPurple
-        sw.addTarget(self, action: #selector(animationSwitchChanged), for: .valueChanged)
-        return sw
-    }()
-    
-    /// 逐字动画标签
-    private lazy var animationLabel: UILabel = {
-        let label = UILabel()
-        label.text = "✨ 逐字动画: 开"
-        label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.textColor = .systemPurple
-        return label
-    }()
-
-    /// 动画预设控制（即时/打字/遮罩）
-    private lazy var animationPresetControl: UISegmentedControl = {
-        let control = UISegmentedControl(items: ["即时", "打字", "遮罩"])
-        control.selectedSegmentIndex = 1
-        control.selectedSegmentTintColor = .systemPurple.withAlphaComponent(0.2)
-        control.addTarget(self, action: #selector(animationPresetChanged), for: .valueChanged)
-        return control
-    }()
-
-    /// 打字速度标签
-    private lazy var typingSpeedLabel: UILabel = {
-        let label = UILabel()
-        label.text = "打字速度: 30 字/秒"
-        label.font = .systemFont(ofSize: 13)
-        label.textColor = .secondaryLabel
-        return label
-    }()
-
-    /// 打字速度滑块
-    private lazy var typingSpeedSlider: UISlider = {
-        let slider = UISlider()
-        slider.minimumValue = 5
-        slider.maximumValue = 180
-        slider.value = 30
-        slider.minimumTrackTintColor = .systemPurple
-        slider.addTarget(self, action: #selector(typingSpeedChanged), for: .valueChanged)
-        return slider
-    }()
-
-    /// 调度模式（phase/serial/parallel）
-    private lazy var schedulingControl: UISegmentedControl = {
-        let control = UISegmentedControl(items: ["Phase", "Serial", "Parallel"])
-        control.selectedSegmentIndex = 0
-        control.selectedSegmentTintColor = .systemIndigo.withAlphaComponent(0.2)
-        control.addTarget(self, action: #selector(schedulingModeChanged), for: .valueChanged)
-        return control
-    }()
-
-    /// 提交策略（中断/排队）
-    private lazy var submitModeControl: UISegmentedControl = {
-        let control = UISegmentedControl(items: ["Interrupt", "Queue"])
-        control.selectedSegmentIndex = 1
-        control.selectedSegmentTintColor = .systemTeal.withAlphaComponent(0.2)
-        control.addTarget(self, action: #selector(submitModeChanged), for: .valueChanged)
-        return control
-    }()
-
-    /// 交付模式（双阶段 or SSE 直推）
-    private lazy var deliveryModeControl: UISegmentedControl = {
-        let control = UISegmentedControl(items: ["双阶段", "SSE直推"])
-        control.selectedSegmentIndex = 0
-        control.selectedSegmentTintColor = .systemGreen.withAlphaComponent(0.2)
-        control.addTarget(self, action: #selector(deliveryModeChanged), for: .valueChanged)
-        return control
-    }()
-
-    /// 渲染链路（contract）
-    private lazy var renderPathControl: UISegmentedControl = {
-        let control = UISegmentedControl(items: ["Contract"])
-        control.selectedSegmentIndex = 0
-        control.selectedSegmentTintColor = .systemBrown.withAlphaComponent(0.2)
-        control.addTarget(self, action: #selector(renderPathChanged), for: .valueChanged)
-        return control
-    }()
-
-    /// 首包延迟标签
-    private lazy var firstByteDelayLabel: UILabel = {
-        let label = UILabel()
-        label.text = "首包延迟: 0 ms"
-        label.font = .systemFont(ofSize: 13)
-        label.textColor = .secondaryLabel
-        return label
-    }()
-
-    /// 首包延迟滑块（0~3s）
-    private lazy var firstByteDelaySlider: UISlider = {
-        let slider = UISlider()
-        slider.minimumValue = 0
-        slider.maximumValue = 3000
-        slider.value = 0
-        slider.minimumTrackTintColor = .systemGreen
-        slider.addTarget(self, action: #selector(firstByteDelayChanged), for: .valueChanged)
-        return slider
-    }()
-
-    /// 网络包倍率标签
-    private lazy var packetScaleLabel: UILabel = {
-        let label = UILabel()
-        label.text = "数据包倍率: x1"
-        label.font = .systemFont(ofSize: 13)
-        label.textColor = .secondaryLabel
-        return label
-    }()
-
-    /// 网络包倍率滑块（1x~8x）
-    private lazy var packetScaleSlider: UISlider = {
-        let slider = UISlider()
-        slider.minimumValue = 1
-        slider.maximumValue = 8
-        slider.value = 1
-        slider.minimumTrackTintColor = .systemGreen
-        slider.addTarget(self, action: #selector(packetScaleChanged), for: .valueChanged)
-        return slider
-    }()
-
-    /// 动画链路配置摘要
-    private lazy var pipelineConfigLabel: UILabel = {
-        let label = UILabel()
-        label.font = .systemFont(ofSize: 12)
-        label.textColor = .tertiaryLabel
-        label.numberOfLines = 0
-        label.text = ""
-        return label
-    }()
-
-    /// 实时速率监控
-    private lazy var throughputLabel: UILabel = {
-        let label = UILabel()
-        label.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-        label.textColor = .secondaryLabel
-        label.numberOfLines = 0
-        label.text = ""
-        return label
-    }()
-
-    /// 速度模型解释
-    private lazy var speedModelLabel: UILabel = {
-        let label = UILabel()
-        label.font = .systemFont(ofSize: 12)
-        label.textColor = .secondaryLabel
-        label.numberOfLines = 0
-        label.text = ""
-        return label
-    }()
-    
-    /// 加速算法选择按钮
-    private lazy var algorithmButton: UIButton = {
-        let button = UIButton(type: .system)
-        button.setTitle("线性加速", for: .normal)
-        button.setImage(UIImage(systemName: "bolt.fill"), for: .normal)
-        button.backgroundColor = .systemBlue.withAlphaComponent(0.15)
-        button.setTitleColor(.systemBlue, for: .normal)
-        button.tintColor = .systemBlue
-        button.layer.cornerRadius = 6
-        button.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
-        button.contentEdgeInsets = UIEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
-        button.showsMenuAsPrimaryAction = true
-        button.menu = createAlgorithmMenu()
-        return button
-    }()
-    
-    private lazy var controlStack: UIStackView = {
-        let stack = UIStackView()
-        stack.axis = .horizontal
-        stack.spacing = 8
-        stack.distribution = .fillEqually
-        return stack
-    }()
-    
-    private lazy var startButton: UIButton = {
-        let button = UIButton(type: .system)
-        button.setTitle("开始", for: .normal)
-        button.setImage(UIImage(systemName: "play.fill"), for: .normal)
-        button.backgroundColor = .systemBlue
-        button.setTitleColor(.white, for: .normal)
-        button.tintColor = .white
-        button.layer.cornerRadius = 8
-        button.addTarget(self, action: #selector(startStreaming), for: .touchUpInside)
-        return button
-    }()
-    
-    private lazy var pauseButton: UIButton = {
-        let button = UIButton(type: .system)
-        button.setTitle("暂停", for: .normal)
-        button.setImage(UIImage(systemName: "pause.fill"), for: .normal)
-        button.backgroundColor = .systemOrange
-        button.setTitleColor(.white, for: .normal)
-        button.tintColor = .white
-        button.layer.cornerRadius = 8
-        button.addTarget(self, action: #selector(togglePause), for: .touchUpInside)
-        button.isEnabled = false
-        return button
-    }()
-    
-    private lazy var resetButton: UIButton = {
-        let button = UIButton(type: .system)
-        button.setTitle("重置", for: .normal)
-        button.setImage(UIImage(systemName: "arrow.counterclockwise"), for: .normal)
-        button.backgroundColor = .systemGray
-        button.setTitleColor(.white, for: .normal)
-        button.tintColor = .white
-        button.layer.cornerRadius = 8
-        button.addTarget(self, action: #selector(resetStreaming), for: .touchUpInside)
-        return button
-    }()
-    
-    private lazy var fastForwardButton: UIButton = {
-        let button = UIButton(type: .system)
-        button.setTitle("快进", for: .normal)
-        button.setImage(UIImage(systemName: "forward.fill"), for: .normal)
-        button.backgroundColor = .systemGreen
-        button.setTitleColor(.white, for: .normal)
-        button.tintColor = .white
-        button.layer.cornerRadius = 8
-        button.addTarget(self, action: #selector(fastForward), for: .touchUpInside)
-        button.isEnabled = false
-        return button
-    }()
-    
-    private lazy var addCaseButton: UIButton = {
-        let button = UIButton(type: .system)
-        button.setTitle("+ 自定义", for: .normal)
-        button.setImage(UIImage(systemName: "plus.circle"), for: .normal)
-        button.backgroundColor = .systemPurple
-        button.setTitleColor(.white, for: .normal)
-        button.tintColor = .white
-        button.layer.cornerRadius = 8
-        button.addTarget(self, action: #selector(addCustomCase), for: .touchUpInside)
-        return button
-    }()
-    
-    private lazy var statusLabel: UILabel = {
-        let label = UILabel()
-        label.font = .systemFont(ofSize: 14)
-        label.textColor = .secondaryLabel
-        label.textAlignment = .center
-        label.text = "点击「开始」模拟流式渲染"
-        return label
-    }()
-    
-    // MARK: - Properties
-    
-    private var streamingTimer: Timer?
-    private var networkTimer: Timer?  // 模拟网络接收的定时器
-    private var streamingBuffer: [Character] = []
-    private var currentIndex = 0        // 网络已接收到的位置
-    private var renderedIndex = 0       // 已渲染的位置
-    private var lastAppendedIndex = 0    // 已通过 appendText 发送到 container 的位置
-    private var isPaused = false
-    private var autoScrollEnabled = true
-    private var hasCompletedStreaming = false
-
-    private enum RenderPath: Int {
-        case contract = 0
-    }
-
-    private enum DeliveryMode: Int {
-        case twoStage = 0
-        case sseDirect = 1
-    }
-
-    private enum AnimationPresetMode: Int {
-        case instant = 0
-        case typing = 1
-        case streamingMask = 2
-    }
-
-    private var deliveryMode: DeliveryMode = .twoStage
-    private var animationPresetMode: AnimationPresetMode = .typing
-    private var typingCharactersPerSecond: Int = 30
-    private var schedulingMode: AnimationSchedulingMode = .groupedByPhase
-    private var submitMode: AnimationSubmitMode = .queueLatest
-
-    private var firstByteDelay: TimeInterval = 0
-    private var packetScale: Int = 1
-    private var streamStartTime: Date?
-    private var observedNetworkCPS: Double = 0
-    private var observedRenderCPS: Double = 0
-    private var renderPath: RenderPath = .contract
-    private var lastContractUpdateSequence: Int = 0
-    
-    /// 流式展示区域最大高度（只增不减，避免下方展开时压缩）
-    
-    /// 当前选中的 case 索引
-    private var selectedCaseIndex = 0
-    
-    // MARK: - 速度配置
-    
-    /// 渲染速度配置（默认 burst 模式：每 1 秒一次性塞入全部积压，便于观察 Markdown 内打字机动画）
-    private var renderSpeed: SpeedConfig = .burstEvery(interval: 1.0)
-    
-    /// 网络接收速度配置（模拟服务端推送节奏）
-    private var networkSpeed: SpeedConfig = .charsPerSecond(20)
-    
-    /// 速度配置枚举
-    private enum SpeedConfig {
-        case burstEvery(interval: TimeInterval)                     // 每 N 秒一次性塞入全部积压（便于观察动画）
-        case charsPerInterval(chars: Int, interval: TimeInterval)  // N字/间隔
-        case charsPerSecond(Int)                                    // N字/秒
-        case charsPerFrame(Int)                                     // N字/帧（高速模式）
-        
-        var description: String {
+        var title: String {
             switch self {
-            case .burstEvery(let interval):
-                return String(format: "%.1f秒/次(全部)", interval)
-            case .charsPerInterval(let chars, let interval):
-                if interval >= 1 {
-                    return "\(chars)字/\(Int(interval))秒"
-                } else {
-                    return "\(chars)字/\(String(format: "%.1f", interval))秒"
-                }
-            case .charsPerSecond(let n):
-                return "\(n)字/秒"
-            case .charsPerFrame(let n):
-                return "\(n)字/帧(极速)"
+            case .taskPlan:
+                return "任务拆解"
+            case .reviewChecklist:
+                return "评审清单"
+            case .incidentResponse:
+                return "故障响应"
             }
         }
-        
-        /// 转换为 Timer 间隔和每次字符数
-        func timerConfig() -> (interval: TimeInterval, chars: Int, useDisplayLink: Bool) {
+
+        var prompt: String {
             switch self {
-            case .burstEvery(let interval):
-                return (interval, 99999, false)  // 每 N 秒，一次消费全部积压
-            case .charsPerInterval(let chars, let interval):
-                return (interval, chars, false)
-            case .charsPerSecond(let n):
-                if n <= 10 {
-                    return (1.0 / Double(n), 1, false)
-                } else {
-                    return (0.05, max(1, n / 20), false)
-                }
-            case .charsPerFrame(let n):
-                return (1.0 / 60.0, n, true)
+            case .taskPlan:
+                return "那请把每一项展开成可执行步骤，并标注优先级。"
+            case .reviewChecklist:
+                return "给我一个本次改造的 Code Review 清单，按风险从高到低排列。"
+            case .incidentResponse:
+                return "如果上线后动画出现异常，请给我一份应急处理 Runbook。"
             }
         }
-    }
-    
-    // MARK: - 自动加速配置
-    
-    /// 是否启用自动加速
-    private var autoAccelerateEnabled = true
-    
-    /// 自动加速算法
-    private var accelerateAlgorithm: AccelerateAlgorithm = .linear
-    
-    /// 加速算法枚举
-    private enum AccelerateAlgorithm: String, CaseIterable {
-        case linear = "线性加速"
-        case exponential = "指数加速"
-        case step = "阶梯加速"
-        case adaptive = "自适应加速"
-        
-        var icon: String {
+
+        var markdown: String {
             switch self {
-            case .linear: return "chart.line.uptrend.xyaxis"
-            case .exponential: return "chart.line.uptrend.xyaxis.circle"
-            case .step: return "stairs"
-            case .adaptive: return "waveform.path.ecg"
+            case .taskPlan:
+                return """
+                好的，下面按**可执行步骤 + 优先级**展开：
+
+                ### 1) 开发任务（P0）
+                - [ ] 完成 `SceneDelta` 拆分：结构变化 / 内容变化
+                - [ ] 接入 `RenderCommitCoordinator`，统一 instant 与 animated 提交
+                - [ ] 校验 `latestWins` 与 `fullyOrdered` 两种并发策略
+
+                ### 2) 评审任务（P1）
+                - [ ] PR-A：重点看动画状态机是否有中间态泄漏
+                - [ ] PR-B：重点看高度同步是否和进度同帧
+                - [ ] 输出 review note：风险、建议、回归点
+
+                ### 3) 沟通任务（P1）
+                - [ ] 午前同步：说明当前改造范围和影响面
+                - [ ] 午后同步：反馈测试结果与剩余风险
+                - [ ] 收尾同步：确认上线策略与回滚点
+
+                > 建议节奏：先 P0，再并行推进两个 P1。
+                """
+
+            case .reviewChecklist:
+                return """
+                可以，下面是按风险排序的 review 清单：
+
+                ### P0 - 立即确认
+                - [ ] 并发策略切换后，是否存在动画中间态残留
+                - [ ] 流式 `appendChunk` 失败时，是否仍能在 `finish` 后收敛为完整内容
+                - [ ] `skipAnimation` 是否会留下高度不同步
+
+                ### P1 - 重点确认
+                - [ ] 高度变化和动画进度是否同帧提交
+                - [ ] 大文档下 `latestWins` 是否造成视觉跳变
+                - [ ] 气泡复用时 container 约束是否稳定
+
+                ### P2 - 稳定性确认
+                - [ ] 长列表滚动场景是否有抖动
+                - [ ] 切后台再回来，流式状态是否恢复正确
+                - [ ] 多次快速点击生成，状态机是否仍然收敛
+                """
+
+            case .incidentResponse:
+                return """
+                收到，下面是动画异常的应急 Runbook：
+
+                ### 1) 快速止损（5 分钟内）
+                - [ ] 切换到 `instant` 动画模式
+                - [ ] 将并发策略强制改为 `fullyOrdered`
+                - [ ] 暂停新的流式任务入口
+
+                ### 2) 现场诊断（30 分钟内）
+                - [ ] 拉取最近一次异常日志（含 chunk 序列）
+                - [ ] 比对 `append` 与 `finish` 的状态转换
+                - [ ] 检查是否出现高度回调风暴
+
+                ### 3) 修复与回归
+                - [ ] 修复后先灰度 10%
+                - [ ] 回归 3 组场景：普通消息 / 长文档 / 快速中断
+                - [ ] 全量前确认回滚开关可用
+
+                > 原则：先恢复可用性，再追求动画完整性。
+                """
             }
         }
-        
-        /// 计算加速后的字符数
-        func acceleratedChars(baseChars: Int, progress: Double, backlog: Int) -> Int {
+    }
+
+    private enum EffectMode: Int {
+        case typing
+        case streamingMask
+        case instant
+
+        var effectKey: AnimationEffectKey {
             switch self {
-            case .linear:
-                // 线性加速：随进度线性增加
-                let multiplier = 1.0 + progress * 2.0  // 最多 3x
-                return max(1, Int(Double(baseChars) * multiplier))
-                
-            case .exponential:
-                // 指数加速：后期急剧加速
-                let multiplier = pow(3.0, progress)  // 1x -> 3x
-                return max(1, Int(Double(baseChars) * multiplier))
-                
-            case .step:
-                // 阶梯加速：每 25% 提速一档
-                let step: Double
-                if progress < 0.25 { step = 1.0 }
-                else if progress < 0.5 { step = 1.5 }
-                else if progress < 0.75 { step = 2.5 }
-                else { step = 4.0 }
-                return max(1, Int(Double(baseChars) * step))
-                
-            case .adaptive:
-                // 自适应加速：根据积压量动态调整
-                if backlog > 100 {
-                    return baseChars * 5  // 积压多，快速追赶
-                } else if backlog > 50 {
-                    return baseChars * 3
-                } else if backlog > 20 {
-                    return baseChars * 2
-                }
-                return baseChars
+            case .typing:
+                return .typing
+            case .streamingMask:
+                return .streamingMask
+            case .instant:
+                return .instant
             }
         }
     }
-    
-    /// 积压字符数（模拟服务端发送但未渲染的数据）
-    private var backlogChars = 0
-    
-    // MARK: - 不稳定网络模拟
-    
-    /// 是否启用不稳定网络模拟
-    private var unstableNetworkEnabled = false  // 默认关闭
-    
-    /// 网络质量配置（0-100，100 最好）
-    private var networkQuality: Int = 50
-    
-    /// 网络质量参数（根据 networkQuality 计算）
-    private var networkParams: NetworkParams {
-        NetworkParams(quality: networkQuality)
-    }
-    
-    /// 网络参数结构体
-    private struct NetworkParams {
-        let jitterProbability: Int      // 抖动概率 (0-100)
-        let jitterDuration: ClosedRange<Int>  // 抖动持续 tick 数
-        let skipProbability: Int        // 跳过概率 (0-100)
-        let burstProbability: Int       // 爆发概率 (0-100)
-        let burstMultiplier: ClosedRange<Int>  // 爆发倍数
-        let variationRange: Int         // 数据包大小波动范围（基础值的倍数）
-        
-        init(quality: Int) {
-            // quality: 0=极差, 50=中等, 100=极好
-            let badness = 100 - quality  // 反转：0=极好, 100=极差
-            
-            // 抖动概率: 0-15%
-            jitterProbability = badness * 15 / 100
-            
-            // 抖动持续时间: 质量越差，持续越长
-            let minJitter = max(1, badness / 20)
-            let maxJitter = max(2, badness / 10)
-            jitterDuration = minJitter...maxJitter
-            
-            // 跳过概率: 0-30%
-            skipProbability = badness * 30 / 100
-            
-            // 爆发概率: 质量差时更可能爆发（补偿延迟）
-            burstProbability = badness * 15 / 100
-            
-            // 爆发倍数
-            let minBurst = 2
-            let maxBurst = max(3, 2 + badness / 20)
-            burstMultiplier = minBurst...maxBurst
-            
-            // 数据包波动范围
-            variationRange = max(1, badness / 25)
-        }
-        
-        var description: String {
-            let quality = 100 - (jitterProbability * 100 / 15)
-            switch quality {
-            case 90...100: return "极好"
-            case 70..<90: return "良好"
-            case 40..<70: return "中等"
-            case 20..<40: return "较差"
-            default: return "极差"
-            }
-        }
-    }
-    
-    /// 跳过计数器（模拟延迟）
-    private var skipTickCount = 0
-    
-    /// 抖动剩余次数
-    private var jitterTicksRemaining = 0
-    
-    /// 累计 tick 数
-    private var tickCounter = 0
-    
-    /// 预设的测试内容
-    private var testCases: [(name: String, content: String)] = [
-        ("基础演示", StreamingDemoViewController.basicDemo),
-        ("代码块测试", StreamingDemoViewController.codeBlockDemo),
-        ("表格测试", StreamingDemoViewController.tableDemo),
-        ("列表嵌套", StreamingDemoViewController.nestedListDemo),
-        ("引用块测试", StreamingDemoViewController.blockQuoteDemo),
-        ("长文本测试", StreamingDemoViewController.longTextDemo),
-        ("混合内容", StreamingDemoViewController.mixedDemo),
-    ]
-    
-    // MARK: - Lifecycle
-    
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        setupUI()
-        updateCaseSelector()
-        setupStreamingBuffer()
-        
-        // 初始化速度和加速状态
-        speedChanged()
-        networkSpeedChanged()
-        typingSpeedChanged()
-        firstByteDelayChanged()
-        packetScaleChanged()
-        deliveryModeChanged()
-        updateAutoAccelerateLabel()
-        updateNetworkQualityLabel()
-        updateBacklogLabel()
-        updatePipelineConfigLabel()
-        updateThroughputLabel()
-        updateSpeedModelLabel()
-    }
-    
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        updateScrollViewContentSize()
-    }
-    
-    // MARK: - Setup
-    
-    private func setupUI() {
-        view.backgroundColor = .systemBackground
-        title = "流式渲染"
-        
-        // 添加导航栏按钮
-        navigationItem.rightBarButtonItem = UIBarButtonItem(
-            image: UIImage(systemName: "gear"),
-            style: .plain,
-            target: self,
-            action: #selector(showSettings)
-        )
-        
-        let streamSectionLabel = UILabel()
-        streamSectionLabel.text = "流式展示区"
-        streamSectionLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        streamSectionLabel.textColor = .secondaryLabel
-        
-        _containerView = makeContainerView()
-        
-        view.addSubview(caseSelector)
-        view.addSubview(streamSectionLabel)
-        view.addSubview(scrollView)
-        scrollView.addSubview(containerView)
-        containerView.translatesAutoresizingMaskIntoConstraints = true
-        
-        let configContainer = UIView()
-        configContainer.addSubview(configStack)
-        configContainer.addSubview(controlStack)
-        configContainer.addSubview(statusLabel)
-        configAreaScrollView.addSubview(configContainer)
-        view.addSubview(configAreaScrollView)
-        
-        // 配置区域标题
-        let configTitleLabel = UILabel()
-        configTitleLabel.text = "参数配置"
-        configTitleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
-        configTitleLabel.textColor = .label
-        
-        // 配置行
-        let animationRow = createRow(label: "逐字动画", control: animationSwitch)
-        let animationPresetRow = createRow(label: "动画预设", control: animationPresetControl)
-        let typingSpeedRow = createRow(label: "打字速度", control: typingSpeedSlider)
-        let schedulingRow = createRow(label: "调度模式", control: schedulingControl)
-        let submitModeRow = createRow(label: "提交策略", control: submitModeControl)
-        let deliveryModeRow = createRow(label: "交付模式", control: deliveryModeControl)
-        let renderPathRow = createRow(label: "渲染链路", control: renderPathControl)
-        let networkSpeedRow = createRow(label: "网络接收", control: networkSpeedSlider)
-        let speedRow = createRow(label: "渲染速度", control: speedSlider)
-        let firstByteDelayRow = createRow(label: "首包延迟", control: firstByteDelaySlider)
-        let packetScaleRow = createRow(label: "包大小倍率", control: packetScaleSlider)
-        let autoScrollRow = createRow(label: "滚动跟随", control: autoScrollSwitch)
-        let networkModeRow = createRow(label: "网络抖动", control: networkModeSwitch)
-        let autoAccelerateRow = createRowWithButton(
-            label: "自动加速",
-            control: autoAccelerateSwitch,
-            button: algorithmButton
-        )
-        
-        // 配置区域内容
-        configStack.addArrangedSubview(configTitleLabel)
-        configStack.addArrangedSubview(animationRow)
-        configStack.addArrangedSubview(animationLabel)
-        configStack.addArrangedSubview(animationPresetRow)
-        configStack.addArrangedSubview(typingSpeedRow)
-        configStack.addArrangedSubview(typingSpeedLabel)
-        configStack.addArrangedSubview(schedulingRow)
-        configStack.addArrangedSubview(submitModeRow)
-        configStack.addArrangedSubview(deliveryModeRow)
-        configStack.addArrangedSubview(renderPathRow)
-        configStack.addArrangedSubview(pipelineConfigLabel)
-        configStack.addArrangedSubview(networkSpeedRow)
-        configStack.addArrangedSubview(networkSpeedLabel)
-        configStack.addArrangedSubview(speedRow)
-        configStack.addArrangedSubview(speedLabel)
-        configStack.addArrangedSubview(firstByteDelayRow)
-        configStack.addArrangedSubview(firstByteDelayLabel)
-        configStack.addArrangedSubview(packetScaleRow)
-        configStack.addArrangedSubview(packetScaleLabel)
-        configStack.addArrangedSubview(backlogLabel)
-        configStack.addArrangedSubview(throughputLabel)
-        configStack.addArrangedSubview(speedModelLabel)
-        configStack.addArrangedSubview(autoScrollRow)
-        configStack.addArrangedSubview(autoAccelerateRow)
-        configStack.addArrangedSubview(autoAccelerateLabel)
-        configStack.addArrangedSubview(networkModeRow)
-        configStack.addArrangedSubview(networkModeLabel)
-        
-        let networkQualityRow = createRow(label: "网络质量", control: networkQualitySlider)
-        configStack.addArrangedSubview(networkQualityRow)
-        configStack.addArrangedSubview(networkQualityLabel)
-        updateNetworkQualityVisibility()
-        
-        // 控制按钮
-        controlStack.addArrangedSubview(startButton)
-        controlStack.addArrangedSubview(pauseButton)
-        controlStack.addArrangedSubview(fastForwardButton)
-        controlStack.addArrangedSubview(resetButton)
-        
-        // 约束
-        caseSelector.translatesAutoresizingMaskIntoConstraints = false
-        streamSectionLabel.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        configAreaScrollView.translatesAutoresizingMaskIntoConstraints = false
-        configContainer.translatesAutoresizingMaskIntoConstraints = false
-        configStack.translatesAutoresizingMaskIntoConstraints = false
-        controlStack.translatesAutoresizingMaskIntoConstraints = false
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        NSLayoutConstraint.activate([
-            caseSelector.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
-            caseSelector.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            caseSelector.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            caseSelector.heightAnchor.constraint(equalToConstant: 40),
-            
-            streamSectionLabel.topAnchor.constraint(equalTo: caseSelector.bottomAnchor, constant: 12),
-            streamSectionLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            
-            scrollView.topAnchor.constraint(equalTo: streamSectionLabel.bottomAnchor, constant: 6),
-            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            scrollView.heightAnchor.constraint(equalTo: view.safeAreaLayoutGuide.heightAnchor, multiplier: 0.52),
-            scrollView.bottomAnchor.constraint(equalTo: configAreaScrollView.topAnchor, constant: -12),
-            
-            configAreaScrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            configAreaScrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            configAreaScrollView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
-            
-            configContainer.topAnchor.constraint(equalTo: configAreaScrollView.contentLayoutGuide.topAnchor),
-            configContainer.leadingAnchor.constraint(equalTo: configAreaScrollView.contentLayoutGuide.leadingAnchor),
-            configContainer.trailingAnchor.constraint(equalTo: configAreaScrollView.contentLayoutGuide.trailingAnchor),
-            configContainer.bottomAnchor.constraint(equalTo: configAreaScrollView.contentLayoutGuide.bottomAnchor),
-            configContainer.widthAnchor.constraint(equalTo: configAreaScrollView.frameLayoutGuide.widthAnchor),
-            
-            configStack.topAnchor.constraint(equalTo: configContainer.topAnchor),
-            configStack.leadingAnchor.constraint(equalTo: configContainer.leadingAnchor),
-            configStack.trailingAnchor.constraint(equalTo: configContainer.trailingAnchor),
-            configStack.bottomAnchor.constraint(equalTo: controlStack.topAnchor, constant: -12),
-            
-            controlStack.leadingAnchor.constraint(equalTo: configContainer.leadingAnchor),
-            controlStack.trailingAnchor.constraint(equalTo: configContainer.trailingAnchor),
-            controlStack.heightAnchor.constraint(equalToConstant: 44),
-            controlStack.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -12),
-            
-            statusLabel.leadingAnchor.constraint(equalTo: configContainer.leadingAnchor),
-            statusLabel.trailingAnchor.constraint(equalTo: configContainer.trailingAnchor),
-            statusLabel.bottomAnchor.constraint(equalTo: configContainer.bottomAnchor, constant: -12)
-        ])
-    }
-    
-    private func createRow(label: String, control: UIView) -> UIView {
-        let row = UIStackView()
-        row.axis = .horizontal
-        row.spacing = 12
-        
-        let labelView = UILabel()
-        labelView.text = label
-        labelView.font = .systemFont(ofSize: 14)
-        labelView.textColor = .secondaryLabel
-        labelView.setContentHuggingPriority(.required, for: .horizontal)
-        
-        row.addArrangedSubview(labelView)
-        row.addArrangedSubview(control)
-        
-        return row
-    }
-    
-    private func createRowWithButton(label: String, control: UIView, button: UIButton) -> UIView {
-        let row = UIStackView()
-        row.axis = .horizontal
-        row.spacing = 12
-        
-        let labelView = UILabel()
-        labelView.text = label
-        labelView.font = .systemFont(ofSize: 14)
-        labelView.textColor = .secondaryLabel
-        labelView.setContentHuggingPriority(.required, for: .horizontal)
-        
-        let spacer = UIView()
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        
-        row.addArrangedSubview(labelView)
-        row.addArrangedSubview(control)
-        row.addArrangedSubview(spacer)
-        row.addArrangedSubview(button)
-        
-        return row
-    }
-    
-    private func createAlgorithmMenu() -> UIMenu {
-        let actions = AccelerateAlgorithm.allCases.map { algorithm in
-            UIAction(
-                title: algorithm.rawValue,
-                image: UIImage(systemName: algorithm.icon),
-                state: algorithm == self.accelerateAlgorithm ? .on : .off
-            ) { [weak self] _ in
-                self?.selectAlgorithm(algorithm)
-            }
-        }
-        return UIMenu(title: "选择加速算法", children: actions)
-    }
-    
-    private func selectAlgorithm(_ algorithm: AccelerateAlgorithm) {
-        accelerateAlgorithm = algorithm
-        algorithmButton.setTitle(algorithm.rawValue, for: .normal)
-        algorithmButton.menu = createAlgorithmMenu()
-        updateAutoAccelerateLabel()
-    }
-    
-    private func updateAutoAccelerateLabel() {
-        if deliveryMode == .sseDirect {
-            autoAccelerateLabel.text = "🚫 自动加速: SSE直推模式下不生效"
-            autoAccelerateLabel.textColor = .tertiaryLabel
-        } else if autoAccelerateEnabled {
-            autoAccelerateLabel.text = "🚀 自动加速: \(accelerateAlgorithm.rawValue)"
-            autoAccelerateLabel.textColor = .systemBlue
-        } else {
-            autoAccelerateLabel.text = "⏸️ 自动加速: 已关闭"
-            autoAccelerateLabel.textColor = .secondaryLabel
-        }
-    }
-    
-    private func createCaseMenu() -> UIMenu {
-        var actions: [UIMenuElement] = testCases.enumerated().map { index, testCase in
-            UIAction(
-                title: testCase.name,
-                state: index == selectedCaseIndex ? .on : .off
-            ) { [weak self] _ in
-                self?.selectCase(at: index)
-            }
-        }
-        
-        // 添加分隔线和自定义选项
-        let addAction = UIAction(
-            title: "添加自定义内容...",
-            image: UIImage(systemName: "plus.circle")
-        ) { [weak self] _ in
-            self?.addCustomCase()
-        }
-        
-        return UIMenu(children: actions + [addAction])
-    }
-    
-    private func updateCaseSelector() {
-        let caseName = testCases[selectedCaseIndex].name
-        caseSelector.setTitle("📄 \(caseName)", for: .normal)
-        caseSelector.menu = createCaseMenu()
-    }
-    
-    private func selectCase(at index: Int) {
-        selectedCaseIndex = index
-        updateCaseSelector()
-        resetStreaming()
-    }
-    
-    private func setupStreamingBuffer() {
-        let content = testCases[selectedCaseIndex].content
-        streamingBuffer = Array(content)
-    }
-    
-    // MARK: - Actions
-    
-    @objc private func startStreaming() {
-        guard streamingTimer == nil && networkTimer == nil else { return }
-        
-        hasCompletedStreaming = false
-        lastContractUpdateSequence = 0
-        containerView.resetContractStreamingSession()
-        streamStartTime = Date()
-        startNetworkTimer()
-        if deliveryMode == .twoStage {
-            startRenderTimer()
-        }
-        
-        startButton.isEnabled = false
-        pauseButton.isEnabled = true
-        fastForwardButton.isEnabled = true
-        
-        let modeText = deliveryMode == .twoStage ? "正在流式渲染（双阶段）..." : "正在流式渲染（SSE直推）..."
-        statusLabel.text = "\(modeText) [Contract]"
-    }
-    
-    /// 启动网络接收定时器（模拟服务端发送数据）
-    private func startNetworkTimer() {
-        let config = networkSpeed.timerConfig()
-        networkTimer?.invalidate()
-        networkTimer = Timer.scheduledTimer(
-            timeInterval: config.interval,
-            target: self,
-            selector: #selector(networkTick),
-            userInfo: nil,
-            repeats: true
-        )
-        RunLoop.current.add(networkTimer!, forMode: .common)
-    }
-    
-    /// 启动渲染定时器（消费已接收的数据）
-    /// 动画关闭时强制 burst 模式，否则 Demo 层渐进 append 会制造假打字机效果
-    private func startRenderTimer() {
-        guard deliveryMode == .twoStage else {
-            streamingTimer?.invalidate()
-            streamingTimer = nil
-            return
-        }
-        let config: (interval: TimeInterval, chars: Int, useDisplayLink: Bool)
-        if animationEnabled {
-            config = renderSpeed.timerConfig()
-        } else {
-            config = SpeedConfig.burstEvery(interval: 1.0).timerConfig()
-        }
-        streamingTimer?.invalidate()
-        streamingTimer = Timer.scheduledTimer(
-            timeInterval: config.interval,
-            target: self,
-            selector: #selector(renderTick),
-            userInfo: nil,
-            repeats: true
-        )
-        RunLoop.current.add(streamingTimer!, forMode: .common)
-    }
-    
-    private func restartNetworkTimerIfNeeded() {
-        if networkTimer != nil && !isPaused {
-            startNetworkTimer()
-        }
-    }
-    
-    private func restartRenderTimerIfNeeded() {
-        if deliveryMode == .sseDirect {
-            streamingTimer?.invalidate()
-            streamingTimer = nil
-            return
-        }
-        if streamingTimer != nil && !isPaused {
-            startRenderTimer()
-        }
-    }
-    
-    @objc private func togglePause() {
-        isPaused.toggle()
-        pauseButton.setTitle(isPaused ? "继续" : "暂停", for: .normal)
-        pauseButton.setImage(UIImage(systemName: isPaused ? "play.fill" : "pause.fill"), for: .normal)
-        if isPaused {
-            statusLabel.text = "已暂停"
-        } else {
-            let modeText = deliveryMode == .twoStage ? "正在流式渲染（双阶段）..." : "正在流式渲染（SSE直推）..."
-            statusLabel.text = "\(modeText) [Contract]"
-        }
-        
-        if isPaused {
-            streamingTimer?.invalidate()
-            streamingTimer = nil
-            networkTimer?.invalidate()
-            networkTimer = nil
-        } else {
-            startNetworkTimer()
-            if deliveryMode == .twoStage {
-                startRenderTimer()
-            }
-        }
-    }
-    
-    @objc private func fastForward() {
-        streamingTimer?.invalidate()
-        streamingTimer = nil
-        networkTimer?.invalidate()
-        networkTimer = nil
-        
-        let fullText = testCases[selectedCaseIndex].content
-        do {
-            try containerView.setContractMarkdown(
-                fullText,
-                rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
-            )
-        } catch {
-            statusLabel.text = "Contract 快进失败：\(error.localizedDescription)"
-        }
-        
-        currentIndex = streamingBuffer.count
-        renderedIndex = streamingBuffer.count
-        lastAppendedIndex = renderedIndex
-        
-        startButton.isEnabled = false
-        pauseButton.isEnabled = false
-        fastForwardButton.isEnabled = false
-        
-        statusLabel.text = "渲染完成 (\(streamingBuffer.count) 字符)"
-        updateBacklogLabel()
-        observedNetworkCPS = 0
-        observedRenderCPS = 0
-        hasCompletedStreaming = true
-        updateThroughputLabel()
-        
-        if autoScrollEnabled {
-            scrollToBottom()
-        }
-    }
-    
-    @objc private func resetStreaming() {
-        streamingTimer?.invalidate()
-        streamingTimer = nil
-        networkTimer?.invalidate()
-        networkTimer = nil
-        
-        currentIndex = 0
-        renderedIndex = 0
-        lastAppendedIndex = 0
-        isPaused = false
-        hasCompletedStreaming = false
-        lastContractUpdateSequence = 0
-        
-        // 重置网络模拟状态
-        skipTickCount = 0
-        jitterTicksRemaining = 0
-        tickCounter = 0
-        backlogChars = 0
+    private final class ContainerDelegateProxy: NSObject, MarkdownContainerViewDelegate {
+        var onHeightChange: ((CGFloat) -> Void)?
 
-        setupStreamingBuffer()
-        try? containerView.setContractMarkdown(
-            "",
-            rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
-        )
-        
-        startButton.isEnabled = true
-        pauseButton.isEnabled = false
-        fastForwardButton.isEnabled = false
-        pauseButton.setTitle("暂停", for: .normal)
-        pauseButton.setImage(UIImage(systemName: "pause.fill"), for: .normal)
-        
-        statusLabel.text = "点击「开始」模拟流式渲染"
-        streamStartTime = nil
-        observedNetworkCPS = 0
-        observedRenderCPS = 0
-        updateThroughputLabel()
-        updatePipelineConfigLabel()
+        func containerView(_ view: MarkdownContainerView, didChangeContentHeight height: CGFloat) {
+            onHeightChange?(height)
+        }
     }
 
-    @objc private func animationPresetChanged() {
-        animationPresetMode = AnimationPresetMode(rawValue: animationPresetControl.selectedSegmentIndex) ?? .typing
-        applyAnimationConfig(to: containerView)
-        updatePipelineConfigLabel()
-        updateSpeedModelLabel()
-    }
+    private final class MessageItem {
+        let id: String
+        let role: Role
+        var markdown: String
+        var isStreaming: Bool
+        var streamSessionStarted: Bool
 
-    @objc private func typingSpeedChanged() {
-        typingCharactersPerSecond = max(1, Int(typingSpeedSlider.value.rounded()))
-        typingSpeedLabel.text = "打字速度: \(typingCharactersPerSecond) 字/秒"
-        applyAnimationConfig(to: containerView)
-        updatePipelineConfigLabel()
-    }
+        let container: MarkdownContainerView
+        let delegateProxy: ContainerDelegateProxy
 
-    @objc private func schedulingModeChanged() {
-        switch schedulingControl.selectedSegmentIndex {
-        case 1:
-            schedulingMode = .serialByChange
-        case 2:
-            schedulingMode = .parallelByChange
-        default:
-            schedulingMode = .groupedByPhase
-        }
-        applyAnimationConfig(to: containerView)
-        updatePipelineConfigLabel()
-    }
+        init(
+            id: String = UUID().uuidString,
+            role: Role,
+            markdown: String,
+            isStreaming: Bool = false,
+            animationConcurrencyPolicy: AnimationConcurrencyPolicy,
+            animationEffectKey: AnimationEffectKey,
+            typingCharactersPerSecond: Int,
+            typingEntityAppearanceMode: TypingEffect.EntityAppearanceMode,
+            onHeightChange: ((CGFloat) -> Void)?
+        ) {
+            self.id = id
+            self.role = role
+            self.markdown = markdown
+            self.isStreaming = isStreaming
+            self.streamSessionStarted = false
 
-    @objc private func submitModeChanged() {
-        submitMode = submitModeControl.selectedSegmentIndex == 0 ? .interruptCurrent : .queueLatest
-        applyAnimationConfig(to: containerView)
-        updatePipelineConfigLabel()
-    }
+            container = ExampleMarkdownRuntime.makeConfiguredContainer()
+            container.animationConcurrencyPolicy = animationConcurrencyPolicy
+            container.animationEffectKey = animationEffectKey
+            container.animationMode = animationEffectKey == .instant ? .instant : .dualPhase
+            container.typingCharactersPerSecond = max(1, typingCharactersPerSecond)
+            container.typingEntityAppearanceMode = typingEntityAppearanceMode
 
-    @objc private func deliveryModeChanged() {
-        deliveryMode = DeliveryMode(rawValue: deliveryModeControl.selectedSegmentIndex) ?? .twoStage
-        speedSlider.isEnabled = deliveryMode == .twoStage
-        speedSlider.alpha = deliveryMode == .twoStage ? 1 : 0.5
-        autoAccelerateSwitch.isEnabled = deliveryMode == .twoStage
-        autoAccelerateSwitch.alpha = deliveryMode == .twoStage ? 1 : 0.5
-        algorithmButton.isEnabled = autoAccelerateEnabled && deliveryMode == .twoStage
-        algorithmButton.alpha = (autoAccelerateEnabled && deliveryMode == .twoStage) ? 1 : 0.5
-        if deliveryMode == .sseDirect {
-            streamingTimer?.invalidate()
-            streamingTimer = nil
-        } else {
-            restartRenderTimerIfNeeded()
-        }
-        updateAutoAccelerateLabel()
-        updatePipelineConfigLabel()
-        updateSpeedModelLabel()
-        updateThroughputLabel()
-    }
-
-    @objc private func renderPathChanged() {
-        renderPath = RenderPath(rawValue: renderPathControl.selectedSegmentIndex) ?? .contract
-        lastContractUpdateSequence = 0
-        updatePipelineConfigLabel()
-        updateSpeedModelLabel()
-        updateThroughputLabel()
-        resetStreaming()
-    }
-
-    @objc private func firstByteDelayChanged() {
-        firstByteDelay = TimeInterval(firstByteDelaySlider.value / 1000)
-        firstByteDelayLabel.text = "首包延迟: \(Int(firstByteDelay * 1000)) ms"
-        updateSpeedModelLabel()
-    }
-
-    @objc private func packetScaleChanged() {
-        packetScale = max(1, Int(packetScaleSlider.value.rounded()))
-        packetScaleLabel.text = "数据包倍率: x\(packetScale)"
-        updateSpeedModelLabel()
-    }
-
-    private func updatePipelineConfigLabel() {
-        let preset: String
-        switch animationPresetMode {
-        case .instant: preset = "instant"
-        case .typing: preset = "typing"
-        case .streamingMask: preset = "streamingMask"
+            delegateProxy = ContainerDelegateProxy()
+            delegateProxy.onHeightChange = onHeightChange
+            container.delegate = delegateProxy
         }
 
-        let scheduling: String
-        switch schedulingMode {
-        case .groupedByPhase: scheduling = "groupedByPhase"
-        case .serialByChange: scheduling = "serialByChange"
-        case .parallelByChange: scheduling = "parallelByChange"
-        }
-
-        let submit = (submitMode == .interruptCurrent) ? "interruptCurrent" : "queueLatest"
-        let enabled = animationEnabled ? "ON" : "OFF"
-        let path = "contract"
-        let seq = "  seq=\(lastContractUpdateSequence)"
-        pipelineConfigLabel.text = "动画配置: path=\(path)  enabled=\(enabled)  preset=\(preset)  cps=\(typingCharactersPerSecond)  scheduling=\(scheduling)  submit=\(submit)\(seq)"
-    }
-
-    private func updateThroughputLabel() {
-        let pathText = "Contract"
-        let modeText = deliveryMode == .twoStage ? "双阶段(网络→渲染→动画)" : "SSE直推(网络→动画)"
-        let renderPart: String
-        if deliveryMode == .twoStage {
-            renderPart = String(format: "渲染推送 %.1f cps", observedRenderCPS)
-        } else {
-            renderPart = "渲染速度(滑块)已禁用"
-        }
-        let seqPart = "  |  contractSeq: \(lastContractUpdateSequence)"
-        throughputLabel.text = String(
-            format: "实时速率: 网络接收 %.1f cps  |  %@  |  模式: %@  |  链路: %@%@",
-            observedNetworkCPS,
-            renderPart,
-            modeText,
-            pathText,
-            seqPart
-        )
-    }
-
-    private func updateSpeedModelLabel() {
-        let appendAPI = "appendContractStreamChunk"
-        if deliveryMode == .twoStage {
-            speedModelLabel.text = "模型解释: 网络速度只影响“已接收(currentIndex)”，渲染速度只影响“\(appendAPI) 频率(renderedIndex)”，动画速度由 preset + 打字速度(cps)决定。"
-        } else {
-            speedModelLabel.text = "模型解释: SSE直推下网络速度直接决定 \(appendAPI) 频率；渲染速度滑块不参与，仅用于对照。首包延迟和包倍率用于模拟服务端首字延迟与 chunk 粒度。"
-        }
-    }
-    
-    @objc private func speedChanged() {
-        // 滑块值 0-100：0~8=burst（便于观察动画），8~100=渐进加速
-        let value = speedSlider.value
-        
-        if value < 8 {
-            // Burst 模式：每 0.5~2 秒一次性塞入全部积压，便于观察 Markdown 内打字机动画
-            let interval = 2.0 - Float(value) / 8 * 1.5  // 2秒 -> 0.5秒
-            renderSpeed = .burstEvery(interval: TimeInterval(interval))
-        } else if value < 18 {
-            // 超慢速: 1字/3秒 ~ 1字/1秒
-            let v = value - 8
-            let interval = 3.0 - (Double(v) / 10.0 * 2.0)
-            renderSpeed = .charsPerInterval(chars: 1, interval: interval)
-        } else if value < 38 {
-            // 慢速: 1字/秒 ~ 3字/秒
-            let cps = 1 + Int((value - 18) / 10 * 2)
-            renderSpeed = .charsPerSecond(cps)
-        } else if value < 68 {
-            // 正常: 3字/秒 ~ 15字/秒
-            let cps = 3 + Int((value - 38) / 30 * 12)
-            renderSpeed = .charsPerSecond(cps)
-        } else if value < 93 {
-            // 快速: 15字/秒 ~ 50字/秒
-            let cps = 15 + Int((value - 68) / 25 * 35)
-            renderSpeed = .charsPerSecond(cps)
-        } else {
-            // 极速: 2字/帧 ~ 10字/帧
-            let cpf = 2 + Int((value - 93) / 7 * 8)
-            renderSpeed = .charsPerFrame(cpf)
-        }
-        
-        if deliveryMode == .twoStage {
-            speedLabel.text = "渲染: \(renderSpeed.description)"
-        } else {
-            speedLabel.text = "渲染: \(renderSpeed.description)（SSE直推下不生效）"
-        }
-        restartRenderTimerIfNeeded()
-    }
-    
-    @objc private func networkSpeedChanged() {
-        let value = networkSpeedSlider.value
-        
-        if value < 10 {
-            // 超慢速: 1字/3秒 ~ 1字/1秒
-            let interval = 3.0 - (Double(value) / 10.0 * 2.0)
-            networkSpeed = .charsPerInterval(chars: 1, interval: interval)
-        } else if value < 30 {
-            // 慢速: 1字/秒 ~ 3字/秒
-            let cps = 1 + Int((value - 10) / 10 * 2)
-            networkSpeed = .charsPerSecond(cps)
-        } else if value < 60 {
-            // 正常: 3字/秒 ~ 15字/秒
-            let cps = 3 + Int((value - 30) / 30 * 12)
-            networkSpeed = .charsPerSecond(cps)
-        } else if value < 85 {
-            // 快速: 15字/秒 ~ 50字/秒
-            let cps = 15 + Int((value - 60) / 25 * 35)
-            networkSpeed = .charsPerSecond(cps)
-        } else {
-            // 极速: 2字/帧 ~ 10字/帧
-            let cpf = 2 + Int((value - 85) / 15 * 8)
-            networkSpeed = .charsPerFrame(cpf)
-        }
-        
-        networkSpeedLabel.text = "网络: \(networkSpeed.description)"
-        restartNetworkTimerIfNeeded()
-    }
-    
-    @objc private func autoScrollChanged() {
-        autoScrollEnabled = autoScrollSwitch.isOn
-    }
-    
-    @objc private func animationSwitchChanged() {
-        animationEnabled = animationSwitch.isOn
-        animationLabel.text = animationEnabled ? "✨ 逐字动画: 开" : "⚡ 逐字动画: 关"
-        animationLabel.textColor = animationEnabled ? .systemPurple : .secondaryLabel
-        updatePipelineConfigLabel()
-        
-        // 需重建容器以切换动画预设
-        replaceContainer()
-    }
-    
-    private func replaceContainer() {
-        streamingTimer?.invalidate()
-        streamingTimer = nil
-        networkTimer?.invalidate()
-        networkTimer = nil
-        currentIndex = 0
-        renderedIndex = 0
-        lastAppendedIndex = 0
-        isPaused = false
-        hasCompletedStreaming = false
-        skipTickCount = 0
-        jitterTicksRemaining = 0
-        tickCounter = 0
-        backlogChars = 0
-        streamStartTime = nil
-        observedNetworkCPS = 0
-        observedRenderCPS = 0
-        setupStreamingBuffer()
-        
-        _containerView.removeFromSuperview()
-        _containerView = makeContainerView()
-        scrollView.addSubview(containerView)
-        containerView.translatesAutoresizingMaskIntoConstraints = true
-        
-        startButton.isEnabled = true
-        pauseButton.isEnabled = false
-        fastForwardButton.isEnabled = false
-        statusLabel.text = "点击「开始」模拟流式渲染"
-        updateScrollViewContentSize()
-        updateThroughputLabel()
-    }
-    
-    @objc private func autoAccelerateChanged() {
-        autoAccelerateEnabled = autoAccelerateSwitch.isOn
-        let enabled = autoAccelerateEnabled && deliveryMode == .twoStage
-        algorithmButton.isEnabled = enabled
-        algorithmButton.alpha = enabled ? 1.0 : 0.5
-        updateAutoAccelerateLabel()
-    }
-    
-    @objc private func networkModeChanged() {
-        unstableNetworkEnabled = networkModeSwitch.isOn
-        
-        if unstableNetworkEnabled {
-            networkModeLabel.text = "📶 不稳定网络模拟"
-            networkModeLabel.textColor = .systemOrange
-        } else {
-            networkModeLabel.text = "🔗 稳定网络模式"
-            networkModeLabel.textColor = .systemGreen
-        }
-        
-        updateNetworkQualityVisibility()
-    }
-    
-    @objc private func networkQualityChanged() {
-        networkQuality = Int(networkQualitySlider.value)
-        updateNetworkQualityLabel()
-    }
-    
-    private func updateNetworkQualityVisibility() {
-        let shouldShow = unstableNetworkEnabled
-        networkQualitySlider.superview?.isHidden = !shouldShow
-        networkQualityLabel.isHidden = !shouldShow
-    }
-    
-    private func updateNetworkQualityLabel() {
-        let params = networkParams
-        let qualityText = params.description
-        networkQualityLabel.text = "网络质量: \(qualityText) (抖动:\(params.jitterProbability)% 跳过:\(params.skipProbability)%)"
-    }
-    
-    @objc private func showSettings() {
-        let alert = UIAlertController(title: "设置", message: nil, preferredStyle: .actionSheet)
-        
-        alert.addAction(UIAlertAction(title: "导出当前内容", style: .default) { [weak self] _ in
-            self?.exportCurrentContent()
-        })
-        
-        alert.addAction(UIAlertAction(title: "清除自定义内容", style: .destructive) { [weak self] _ in
-            self?.clearCustomCases()
-        })
-        
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        
-        present(alert, animated: true)
-    }
-    
-    @objc private func addCustomCase() {
-        let alert = UIAlertController(
-            title: "添加自定义内容",
-            message: "输入 Markdown 内容",
-            preferredStyle: .alert
-        )
-        
-        alert.addTextField { textField in
-            textField.placeholder = "名称"
-        }
-        
-        alert.addTextField { textField in
-            textField.placeholder = "Markdown 内容（支持多行）"
-        }
-        
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "添加", style: .default) { [weak self] _ in
-            guard let name = alert.textFields?[0].text, !name.isEmpty,
-                  let content = alert.textFields?[1].text, !content.isEmpty else { return }
-            
-            self?.addTestCase(name: name, content: content)
-        })
-        
-        // 添加长文本输入选项
-        alert.addAction(UIAlertAction(title: "从剪贴板粘贴", style: .default) { [weak self] _ in
-            if let content = UIPasteboard.general.string, !content.isEmpty {
-                self?.showNameInputForContent(content)
-            }
-        })
-        
-        present(alert, animated: true)
-    }
-    
-    private func showNameInputForContent(_ content: String) {
-        let alert = UIAlertController(
-            title: "命名",
-            message: "为这段内容命名",
-            preferredStyle: .alert
-        )
-        
-        alert.addTextField { textField in
-            textField.placeholder = "名称"
-        }
-        
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "添加", style: .default) { [weak self] _ in
-            let name = alert.textFields?[0].text ?? "自定义"
-            self?.addTestCase(name: name, content: content)
-        })
-        
-        present(alert, animated: true)
-    }
-    
-    private func addTestCase(name: String, content: String) {
-        testCases.append((name: name, content: content))
-        selectedCaseIndex = testCases.count - 1
-        updateCaseSelector()
-        resetStreaming()
-    }
-    
-    private func exportCurrentContent() {
-        let content = testCases[selectedCaseIndex].content
-        UIPasteboard.general.string = content
-        
-        let alert = UIAlertController(
-            title: "已复制",
-            message: "内容已复制到剪贴板",
-            preferredStyle: .alert
-        )
-        alert.addAction(UIAlertAction(title: "确定", style: .default))
-        present(alert, animated: true)
-    }
-    
-    private func clearCustomCases() {
-        // 保留前 7 个预设 case
-        testCases = Array(testCases.prefix(7))
-        selectedCaseIndex = min(selectedCaseIndex, testCases.count - 1)
-        updateCaseSelector()
-    }
-
-    private func completeStreamingIfNeeded() {
-        guard !hasCompletedStreaming else { return }
-        guard currentIndex >= streamingBuffer.count, renderedIndex >= streamingBuffer.count else { return }
-
-        hasCompletedStreaming = true
-        networkTimer?.invalidate()
-        networkTimer = nil
-        streamingTimer?.invalidate()
-        streamingTimer = nil
-        do {
-            let update = try containerView.finishContractStreaming()
-            lastContractUpdateSequence = update.sequence
-        } catch {
-            statusLabel.text = "Contract 收尾失败：\(error.localizedDescription)"
-        }
-        startButton.isEnabled = false
-        pauseButton.isEnabled = false
-        fastForwardButton.isEnabled = false
-        statusLabel.text = animationEnabled ? "数据接收完成，动画收尾中..." : "渲染完成 (\(streamingBuffer.count) 字符)"
-        updatePipelineConfigLabel()
-    }
-    
-    /// 网络接收 tick - 模拟服务端发送数据
-    @objc private func networkTick() {
-        guard !isPaused else { return }
-        guard currentIndex < streamingBuffer.count else {
-            // 网络接收完成
-            networkTimer?.invalidate()
-            networkTimer = nil
-            observedNetworkCPS = 0
-            updateThroughputLabel()
-            completeStreamingIfNeeded()
-            return
-        }
-
-        if let startTime = streamStartTime,
-           Date().timeIntervalSince(startTime) < firstByteDelay {
-            observedNetworkCPS = 0
-            updateThroughputLabel()
-            return
-        }
-        
-        // 获取基础字符数
-        let config = networkSpeed.timerConfig()
-        var charsToReceive = config.chars * packetScale
-        
-        // === 不稳定网络模拟 ===
-        if unstableNetworkEnabled {
-            let params = networkParams
-            
-            // 1. 处理抖动状态（完全暂停几次）
-            if jitterTicksRemaining > 0 {
-                jitterTicksRemaining -= 1
-                observedNetworkCPS = 0
-                updateThroughputLabel()
-                return
-            }
-            
-            // 2. 随机触发新的抖动
-            if Int.random(in: 0..<100) < params.jitterProbability {
-                jitterTicksRemaining = Int.random(in: params.jitterDuration)
-                observedNetworkCPS = 0
-                updateThroughputLabel()
-                return
-            }
-            
-            // 3. 随机跳过 tick
-            if Int.random(in: 0..<100) < params.skipProbability {
-                skipTickCount += 1
-                if skipTickCount < 2 {
-                    observedNetworkCPS = 0
-                    updateThroughputLabel()
-                    return
-                }
-            }
-            skipTickCount = 0
-            
-            // 4. 随机数据包大小波动
-            let maxVariation = charsToReceive * params.variationRange
-            let variation = Int.random(in: -charsToReceive...maxVariation)
-            charsToReceive = max(1, charsToReceive + variation)
-            
-            // 5. 偶尔爆发性接收
-            if Int.random(in: 0..<100) < params.burstProbability {
-                charsToReceive = charsToReceive * Int.random(in: params.burstMultiplier)
-            }
-        }
-        
-        let previousIndex = currentIndex
-        // 更新网络接收位置
-        let endIndex = min(currentIndex + charsToReceive, streamingBuffer.count)
-        currentIndex = endIndex
-        let receivedCount = max(0, currentIndex - previousIndex)
-        observedNetworkCPS = config.interval > 0 ? Double(receivedCount) / config.interval : 0
-
-        if deliveryMode == .sseDirect {
-            let backlog = currentIndex - renderedIndex
-            let shouldFlushInBulk = animationEnabled || backlog >= 48 || currentIndex >= streamingBuffer.count
-            if shouldFlushInBulk {
-                renderedIndex = currentIndex
-                renderCurrentText()
-                observedRenderCPS = observedNetworkCPS
-            } else {
-                observedRenderCPS = 0
-            }
-            let progress = Int(Double(max(renderedIndex, currentIndex)) / Double(max(1, streamingBuffer.count)) * 100)
-            statusLabel.text = "📡 \(progress)% 直推中 已接收:\(currentIndex)"
-        }
-        
-        // 更新积压
-        updateBacklogLabel()
-        updateThroughputLabel()
-        completeStreamingIfNeeded()
-    }
-    
-    /// 渲染 tick - 消费已接收的数据
-    @objc private func renderTick() {
-        guard !isPaused else { return }
-        guard deliveryMode == .twoStage else { return }
-        
-        // 计算当前积压
-        let backlog = currentIndex - renderedIndex
-        
-        // 没有积压时跳过
-        guard backlog > 0 else {
-            observedRenderCPS = 0
-            updateThroughputLabel()
-            completeStreamingIfNeeded()
-            return
-        }
-        
-        tickCounter += 1
-        
-        // 获取基础渲染字符数（动画关闭时强制 burst，避免 Demo 层制造假打字机效果）
-        let config = animationEnabled ? renderSpeed.timerConfig() : SpeedConfig.burstEvery(interval: 1.0).timerConfig()
-        var baseChars = config.chars
-        
-        // === 自动加速（根据积压量调整，burst 模式下 baseChars 已足够大可忽略）===
-        let charsToRender: Int
-        if animationEnabled, autoAccelerateEnabled {
-            let progress = Double(renderedIndex) / Double(streamingBuffer.count)
-            charsToRender = accelerateAlgorithm.acceleratedChars(
-                baseChars: baseChars,
-                progress: progress,
-                backlog: backlog
-            )
-        } else {
-            charsToRender = baseChars
-        }
-        
-        // 渲染不能超过已接收的数据
-        let actualChars = min(charsToRender, backlog)
-        let endIndex = renderedIndex + actualChars
-        renderedIndex = endIndex
-        observedRenderCPS = config.interval > 0 ? Double(actualChars) / config.interval : 0
-        
-        // 渲染当前文本（增量 append，走流式 Diff + 动画）
-        renderCurrentText()
-        
-        // 更新积压显示
-        updateBacklogLabel()
-        
-        // 更新状态栏
-        let progress = Int(Double(renderedIndex) / Double(streamingBuffer.count) * 100)
-        var statusParts: [String] = []
-        
-        if unstableNetworkEnabled {
-            statusParts.append("📶")
-        } else {
-            statusParts.append("🔗")
-        }
-        
-        if autoAccelerateEnabled {
-            statusParts.append("🚀")
-        }
-        
-        statusParts.append("\(progress)%")
-        statusParts.append("已渲染:\(renderedIndex)")
-        statusParts.append("已接收:\(currentIndex)")
-        
-        statusLabel.text = statusParts.joined(separator: " ")
-        
-        // 更新速度标签显示实时速度
-        let interval = config.interval
-        let actualSpeed: String
-        if interval >= 1 {
-            actualSpeed = "\(actualChars)字/\(String(format: "%.1f", interval))秒"
-        } else {
-            let cps = Double(actualChars) / interval
-            actualSpeed = String(format: "%.1f字/秒", cps)
-        }
-        let renderDesc = animationEnabled ? renderSpeed.description : "1.0秒/次(全部)[动画关]"
-        speedLabel.text = "渲染: \(renderDesc) → 实际: \(actualSpeed)"
-        updateThroughputLabel()
-        completeStreamingIfNeeded()
-    }
-    
-    private func updateBacklogLabel() {
-        let backlog = currentIndex - renderedIndex
-        if backlog > 50 {
-            backlogLabel.text = "📦 积压: \(backlog) 字 ⚠️"
-            backlogLabel.textColor = .systemRed
-        } else if backlog > 20 {
-            backlogLabel.text = "📦 积压: \(backlog) 字"
-            backlogLabel.textColor = .systemOrange
-        } else if backlog > 0 {
-            backlogLabel.text = "📦 积压: \(backlog) 字"
-            backlogLabel.textColor = .systemYellow
-        } else {
-            backlogLabel.text = "📦 积压: 0 字 ✓"
-            backlogLabel.textColor = .systemGreen
-        }
-    }
-    
-    private func renderCurrentText() {
-        // 使用 appendContractStreamChunk 追加增量，走流式 Diff 路径，触发 AnimatableContent 的逐字动画
-        guard lastAppendedIndex < renderedIndex else { return }
-        let delta = String(streamingBuffer[lastAppendedIndex..<renderedIndex])
-        if animationEnabled {
+        func renderStatic() {
             do {
-                let update = try containerView.appendContractStreamChunk(delta)
-                lastContractUpdateSequence = update.sequence
-            } catch {
-                statusLabel.text = "Contract 增量失败：\(error.localizedDescription)"
-            }
-        } else {
-            // 动画关闭时直接整段刷新，避免 Demo 侧 tick 粒度制造“假打字机”观感
-            let full = String(streamingBuffer[0..<renderedIndex])
-            do {
-                try containerView.setContractMarkdown(
-                    full,
+                try container.setContractMarkdown(
+                    markdown,
                     rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
                 )
             } catch {
-                statusLabel.text = "Contract 全量刷新失败：\(error.localizedDescription)"
+                // Keep demo resilient; failed render falls back to plain text paragraph.
+                try? container.setContractMarkdown(markdown)
+            }
+            isStreaming = false
+            streamSessionStarted = false
+        }
+
+        func appendChunk(_ chunk: String) {
+            markdown += chunk
+            do {
+                if !streamSessionStarted {
+                    container.resetContractStreamingSession()
+                    streamSessionStarted = true
+                }
+                _ = try container.appendContractStreamChunk(chunk)
+            } catch {
+                // Keep the streaming session alive. Intermediate chunks can be temporarily invalid.
+                // Resetting here would make subsequent chunks render only the tail.
             }
         }
-        lastAppendedIndex = renderedIndex
-        updatePipelineConfigLabel()
-        updateScrollViewContentSize()
-    }
-    
-    private func updateScrollViewContentSize() {
-        let contentH = containerView.contentHeight
-        let padding: CGFloat = 24
-        scrollView.contentSize = CGSize(
-            width: scrollView.bounds.width,
-            height: contentH + padding
-        )
-        containerView.frame = CGRect(
-            x: 12,
-            y: 12,
-            width: scrollView.bounds.width - 24,
-            height: contentH
-        )
-    }
-    
-    private func scrollToBottom() {
-        let bottomOffset = CGPoint(
-            x: 0,
-            y: max(0, scrollView.contentSize.height - scrollView.bounds.height)
-        )
-        scrollView.setContentOffset(bottomOffset, animated: true)
-    }
 
-    private func scrollToRevealAnchor(_ anchorY: CGFloat) {
-        let anchorInScroll = anchorY + 12
-        let followPadding: CGFloat = 28
-        let maxOffsetY = max(0, scrollView.contentSize.height - scrollView.bounds.height)
-        let targetY = max(0, min(anchorInScroll - scrollView.bounds.height + followPadding, maxOffsetY))
-        scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: true)
-    }
-}
-
-// MARK: - MarkdownContainerViewDelegate
-
-extension StreamingDemoViewController: MarkdownContainerViewDelegate {
-    func containerView(_ view: MarkdownContainerView, didChangeContentHeight height: CGFloat) {
-        updateScrollViewContentSize()
-        if autoScrollEnabled {
-            scrollToBottom()
+        func finishStreaming() {
+            if streamSessionStarted {
+                do {
+                    _ = try container.finishContractStreaming()
+                } catch {
+                    // Final fallback to the full accumulated markdown so tail-only rendering cannot persist.
+                    do {
+                        try container.setContractMarkdown(
+                            markdown,
+                            rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                        )
+                    } catch {
+                        try? container.setContractMarkdown(markdown)
+                    }
+                }
+            } else {
+                renderStatic()
+            }
+            isStreaming = false
+            streamSessionStarted = false
         }
     }
 
-    func containerViewDidCompleteAnimation(_ view: MarkdownContainerView) {
-        guard hasCompletedStreaming else { return }
-        statusLabel.text = "渲染完成 (\(streamingBuffer.count) 字符)"
+    private final class BubbleMarkdownCell: UITableViewCell {
+        static let reuseID = "BubbleMarkdownCell"
+
+        private let bubbleView = UIView()
+        private var leadingConstraint: NSLayoutConstraint!
+        private var trailingConstraint: NSLayoutConstraint!
+        private var maxWidthConstraint: NSLayoutConstraint!
+
+        private weak var hostedContainer: UIView?
+        private var hostedConstraints: [NSLayoutConstraint] = []
+
+        override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+            super.init(style: style, reuseIdentifier: reuseIdentifier)
+            selectionStyle = .none
+            backgroundColor = .clear
+            contentView.backgroundColor = .clear
+
+            bubbleView.layer.cornerRadius = 16
+            bubbleView.layer.cornerCurve = .continuous
+            bubbleView.layer.masksToBounds = true
+            bubbleView.translatesAutoresizingMaskIntoConstraints = false
+            contentView.addSubview(bubbleView)
+
+            leadingConstraint = bubbleView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12)
+            trailingConstraint = bubbleView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12)
+            maxWidthConstraint = bubbleView.widthAnchor.constraint(lessThanOrEqualTo: contentView.widthAnchor, multiplier: 0.82)
+
+            NSLayoutConstraint.activate([
+                bubbleView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
+                bubbleView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
+                maxWidthConstraint,
+                leadingConstraint
+            ])
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError() }
+
+        func configure(with item: MessageItem) {
+            switch item.role {
+            case .assistant:
+                leadingConstraint.isActive = true
+                trailingConstraint.isActive = false
+                bubbleView.backgroundColor = UIColor.secondarySystemBackground
+                bubbleView.layer.borderWidth = 1
+                bubbleView.layer.borderColor = UIColor.systemGray4.cgColor
+
+            case .user:
+                trailingConstraint.isActive = true
+                leadingConstraint.isActive = false
+                bubbleView.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.14)
+                bubbleView.layer.borderWidth = 0
+                bubbleView.layer.borderColor = nil
+            }
+
+            host(container: item.container)
+        }
+
+        private func host(container: UIView) {
+            if hostedContainer === container {
+                return
+            }
+
+            hostedContainer?.removeFromSuperview()
+            hostedConstraints.forEach { $0.isActive = false }
+            hostedConstraints.removeAll()
+
+            if container.superview != nil {
+                container.removeFromSuperview()
+            }
+
+            container.translatesAutoresizingMaskIntoConstraints = false
+            bubbleView.addSubview(container)
+            hostedConstraints = [
+                container.topAnchor.constraint(equalTo: bubbleView.topAnchor, constant: 10),
+                container.leadingAnchor.constraint(equalTo: bubbleView.leadingAnchor, constant: 12),
+                container.trailingAnchor.constraint(equalTo: bubbleView.trailingAnchor, constant: -12),
+                container.bottomAnchor.constraint(equalTo: bubbleView.bottomAnchor, constant: -10)
+            ]
+            NSLayoutConstraint.activate(hostedConstraints)
+
+            hostedContainer = container
+        }
     }
 
-    func containerView(_ view: MarkdownContainerView, didUpdateRevealAnchor anchorY: CGFloat) {
-        guard autoScrollEnabled else { return }
-        scrollToRevealAnchor(anchorY)
+    private lazy var tableView: UITableView = {
+        let table = UITableView(frame: .zero, style: .plain)
+        table.backgroundColor = UIColor.systemGroupedBackground
+        table.separatorStyle = .none
+        table.keyboardDismissMode = .interactive
+        table.rowHeight = UITableView.automaticDimension
+        table.estimatedRowHeight = 110
+        table.dataSource = self
+        table.delegate = self
+        table.register(BubbleMarkdownCell.self, forCellReuseIdentifier: BubbleMarkdownCell.reuseID)
+        table.translatesAutoresizingMaskIntoConstraints = false
+        return table
+    }()
+
+    private lazy var followLabel: UILabel = {
+        let label = UILabel()
+        label.text = "跟随底部"
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = .secondaryLabel
+        return label
+    }()
+
+    private lazy var followSwitch: UISwitch = {
+        let uiSwitch = UISwitch()
+        uiSwitch.isOn = true
+        uiSwitch.addTarget(self, action: #selector(followSwitchChanged), for: .valueChanged)
+        return uiSwitch
+    }()
+
+    private lazy var policyLabel: UILabel = {
+        let label = UILabel()
+        label.text = "并发"
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = .secondaryLabel
+        return label
+    }()
+
+    private lazy var policySegmentedControl: UISegmentedControl = {
+        let control = UISegmentedControl(items: ["Queue", "Latest"])
+        control.selectedSegmentIndex = 0
+        control.addTarget(self, action: #selector(policyChanged), for: .valueChanged)
+        return control
+    }()
+
+    private lazy var contentLabel: UILabel = {
+        let label = UILabel()
+        label.text = "内容模板"
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = .secondaryLabel
+        return label
+    }()
+
+    private lazy var contentSegmentedControl: UISegmentedControl = {
+        let control = UISegmentedControl(items: ReplyContentPreset.allCases.map(\.title))
+        control.selectedSegmentIndex = ReplyContentPreset.taskPlan.rawValue
+        control.addTarget(self, action: #selector(contentPresetChanged), for: .valueChanged)
+        return control
+    }()
+
+    private lazy var effectLabel: UILabel = {
+        let label = UILabel()
+        label.text = "动画"
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = .secondaryLabel
+        return label
+    }()
+
+    private lazy var effectSegmentedControl: UISegmentedControl = {
+        let control = UISegmentedControl(items: ["Typing", "Mask", "Instant"])
+        control.selectedSegmentIndex = EffectMode.typing.rawValue
+        control.addTarget(self, action: #selector(effectChanged), for: .valueChanged)
+        return control
+    }()
+
+    private lazy var entityLabel: UILabel = {
+        let label = UILabel()
+        label.text = "实体"
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = .secondaryLabel
+        return label
+    }()
+
+    private lazy var entitySegmentedControl: UISegmentedControl = {
+        let control = UISegmentedControl(items: ["Seq", "Sim"])
+        control.selectedSegmentIndex = 0
+        control.addTarget(self, action: #selector(entityModeChanged), for: .valueChanged)
+        return control
+    }()
+
+    private lazy var speedLabel: UILabel = {
+        let label = UILabel()
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.textColor = .secondaryLabel
+        return label
+    }()
+
+    private lazy var speedSlider: UISlider = {
+        let slider = UISlider()
+        slider.minimumValue = 5
+        slider.maximumValue = 120
+        slider.value = 32
+        slider.addTarget(self, action: #selector(speedChanged), for: .valueChanged)
+        return slider
+    }()
+
+    private lazy var streamChunkLabel: UILabel = {
+        let label = UILabel()
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.textColor = .secondaryLabel
+        return label
+    }()
+
+    private lazy var streamChunkSlider: UISlider = {
+        let slider = UISlider()
+        slider.minimumValue = 1
+        slider.maximumValue = 12
+        slider.value = 4
+        slider.addTarget(self, action: #selector(streamChunkChanged), for: .valueChanged)
+        return slider
+    }()
+
+    private lazy var streamIntervalLabel: UILabel = {
+        let label = UILabel()
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.textColor = .secondaryLabel
+        return label
+    }()
+
+    private lazy var streamIntervalSlider: UISlider = {
+        let slider = UISlider()
+        slider.minimumValue = 20
+        slider.maximumValue = 220
+        slider.value = 60
+        slider.addTarget(self, action: #selector(streamIntervalChanged), for: .valueChanged)
+        return slider
+    }()
+
+    private lazy var generateButton: UIButton = {
+        let button = UIButton(type: .system)
+        button.setTitle("生成回复", for: .normal)
+        button.setTitleColor(.white, for: .normal)
+        button.backgroundColor = .systemBlue
+        button.layer.cornerRadius = 10
+        button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
+        button.addTarget(self, action: #selector(startStreamingReply), for: .touchUpInside)
+        return button
+    }()
+
+    private lazy var resetButton: UIButton = {
+        let button = UIButton(type: .system)
+        button.setTitle("重置", for: .normal)
+        button.setTitleColor(.systemBlue, for: .normal)
+        button.layer.cornerRadius = 10
+        button.layer.borderWidth = 1
+        button.layer.borderColor = UIColor.systemBlue.cgColor
+        button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
+        button.addTarget(self, action: #selector(resetConversation), for: .touchUpInside)
+        return button
+    }()
+
+    private lazy var skipButton: UIButton = {
+        let button = UIButton(type: .system)
+        button.setTitle("跳过动画", for: .normal)
+        button.setTitleColor(.systemBlue, for: .normal)
+        button.layer.cornerRadius = 10
+        button.layer.borderWidth = 1
+        button.layer.borderColor = UIColor.systemBlue.cgColor
+        button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
+        button.addTarget(self, action: #selector(skipAnimation), for: .touchUpInside)
+        return button
+    }()
+
+    private lazy var settingsRow: UIStackView = {
+        let row = UIStackView(arrangedSubviews: [followLabel, followSwitch, UIView(), policyLabel, policySegmentedControl])
+        row.axis = .horizontal
+        row.alignment = .center
+        row.spacing = 10
+        return row
+    }()
+
+    private lazy var contentRow: UIStackView = {
+        let row = UIStackView(arrangedSubviews: [contentLabel, contentSegmentedControl])
+        row.axis = .vertical
+        row.alignment = .fill
+        row.spacing = 6
+        return row
+    }()
+
+    private lazy var effectRow: UIStackView = {
+        let row = UIStackView(arrangedSubviews: [effectLabel, effectSegmentedControl, UIView(), entityLabel, entitySegmentedControl])
+        row.axis = .horizontal
+        row.alignment = .center
+        row.spacing = 8
+        return row
+    }()
+
+    private lazy var speedRow: UIStackView = {
+        let row = UIStackView(arrangedSubviews: [speedLabel, speedSlider])
+        row.axis = .vertical
+        row.alignment = .fill
+        row.spacing = 6
+        return row
+    }()
+
+    private lazy var streamChunkRow: UIStackView = {
+        let row = UIStackView(arrangedSubviews: [streamChunkLabel, streamChunkSlider])
+        row.axis = .vertical
+        row.alignment = .fill
+        row.spacing = 6
+        return row
+    }()
+
+    private lazy var streamIntervalRow: UIStackView = {
+        let row = UIStackView(arrangedSubviews: [streamIntervalLabel, streamIntervalSlider])
+        row.axis = .vertical
+        row.alignment = .fill
+        row.spacing = 6
+        return row
+    }()
+
+    private lazy var actionsRow: UIStackView = {
+        let row = UIStackView(arrangedSubviews: [UIView(), skipButton, resetButton, generateButton])
+        row.axis = .horizontal
+        row.alignment = .center
+        row.spacing = 10
+        return row
+    }()
+
+    private lazy var bottomBar: UIStackView = {
+        let controls = UIStackView(arrangedSubviews: [
+            settingsRow,
+            contentRow,
+            effectRow,
+            speedRow,
+            streamChunkRow,
+            streamIntervalRow,
+            actionsRow
+        ])
+        controls.axis = .vertical
+        controls.alignment = .fill
+        controls.spacing = 8
+        controls.translatesAutoresizingMaskIntoConstraints = false
+        return controls
+    }()
+
+    private var messages: [MessageItem] = []
+    private var streamingTimer: Timer?
+    private var streamCharacters: [Character] = []
+    private var streamCursor = 0
+    private var activeStreamingMessageID: String?
+    private var shouldFollowBottom = true
+    private var isApplyingHeightUpdate = false
+    private var hasPendingHeightRelayout = false
+    private var currentConcurrencyPolicy: AnimationConcurrencyPolicy = .fullyOrdered
+    private var latestHeightsByMessageID: [String: CGFloat] = [:]
+
+    private var currentContentPreset: ReplyContentPreset = .taskPlan
+    private var currentEffectMode: EffectMode = .typing
+    private var currentEntityAppearanceMode: TypingEffect.EntityAppearanceMode = .sequential
+    private var currentTypingCharactersPerSecond: Int = 32
+    private var currentStreamChunkSize: Int = 4
+    private var currentStreamInterval: TimeInterval = 0.06
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = "流式 + 动画"
+        view.backgroundColor = UIColor.systemGroupedBackground
+        setupUI()
+        applyControlStateToUI()
+        seedConversation()
+    }
+
+    deinit {
+        streamingTimer?.invalidate()
+    }
+
+    private func setupUI() {
+        view.addSubview(tableView)
+        view.addSubview(bottomBar)
+
+        NSLayoutConstraint.activate([
+            bottomBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            bottomBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            bottomBar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
+
+            tableView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            tableView.bottomAnchor.constraint(equalTo: bottomBar.topAnchor, constant: -10)
+        ])
+    }
+
+    private func seedConversation() {
+        messages = [
+            makeMessage(role: .user, markdown: "请给我一个今天待办清单，包含开发、评审和沟通。"),
+            makeMessage(
+                role: .assistant,
+                markdown: """
+                当然可以，先给你一个结构化清单：
+
+                - **开发**：完成动画链路重构（Diff -> Commit -> UI）
+                - **评审**：review 2 个 PR，重点看并发和回归
+                - **沟通**：同步今天风险和阻塞
+                """
+            )
+        ]
+
+        tableView.reloadData()
+        scrollToBottom(animated: false)
+    }
+
+    private func makeMessage(role: Role, markdown: String, isStreaming: Bool = false) -> MessageItem {
+        let messageID = UUID().uuidString
+        let item = MessageItem(
+            id: messageID,
+            role: role,
+            markdown: markdown,
+            isStreaming: isStreaming,
+            animationConcurrencyPolicy: currentConcurrencyPolicy,
+            animationEffectKey: currentEffectMode.effectKey,
+            typingCharactersPerSecond: currentTypingCharactersPerSecond,
+            typingEntityAppearanceMode: currentEntityAppearanceMode
+        ) { [weak self] newHeight in
+            self?.handleContentHeightChange(messageID: messageID, newHeight: newHeight)
+        }
+
+        latestHeightsByMessageID[messageID] = 0
+        if !isStreaming {
+            item.renderStatic()
+        }
+        return item
+    }
+
+    private func applyAnimationConfiguration(to container: MarkdownContainerView) {
+        container.animationConcurrencyPolicy = currentConcurrencyPolicy
+        container.animationEffectKey = currentEffectMode.effectKey
+        container.animationMode = currentEffectMode == .instant ? .instant : .dualPhase
+        container.typingCharactersPerSecond = currentTypingCharactersPerSecond
+        container.typingEntityAppearanceMode = currentEntityAppearanceMode
+    }
+
+    private func applyAnimationConfigurationToAllMessages() {
+        for message in messages {
+            applyAnimationConfiguration(to: message.container)
+        }
+    }
+
+    private func applyControlStateToUI() {
+        speedLabel.text = "速度: \(currentTypingCharactersPerSecond) 字/秒"
+        streamChunkLabel.text = "分片大小: \(currentStreamChunkSize) 字/次"
+        streamIntervalLabel.text = "流式间隔: \(Int(currentStreamInterval * 1000)) ms"
+
+        let isInstant = currentEffectMode == .instant
+        entitySegmentedControl.isEnabled = !isInstant
+        speedSlider.isEnabled = !isInstant
+    }
+
+    private func findMessage(id: String) -> MessageItem? {
+        messages.first(where: { $0.id == id })
+    }
+
+    @objc private func startStreamingReply() {
+        guard streamingTimer == nil else { return }
+
+        let question = makeMessage(role: .user, markdown: currentContentPreset.prompt)
+        messages.append(question)
+
+        let streaming = makeMessage(role: .assistant, markdown: "", isStreaming: true)
+        messages.append(streaming)
+        activeStreamingMessageID = streaming.id
+
+        let startInsert = messages.count - 2
+        tableView.performBatchUpdates {
+            tableView.insertRows(at: [
+                IndexPath(row: startInsert, section: 0),
+                IndexPath(row: startInsert + 1, section: 0)
+            ], with: .automatic)
+        }
+
+        scrollToBottom(animated: true)
+
+        streamCharacters = Array(currentContentPreset.markdown)
+        streamCursor = 0
+
+        applyAnimationConfiguration(to: streaming.container)
+        streaming.container.resetContractStreamingSession()
+        scheduleStreamingTimer()
+    }
+
+    private func scheduleStreamingTimer() {
+        streamingTimer = Timer.scheduledTimer(withTimeInterval: currentStreamInterval, repeats: true) { [weak self] _ in
+            self?.emitNextChunk()
+        }
+    }
+
+    private func restartStreamingTimerIfNeeded() {
+        guard activeStreamingMessageID != nil else { return }
+        streamingTimer?.invalidate()
+        scheduleStreamingTimer()
+    }
+
+    private func emitNextChunk() {
+        guard let activeStreamingMessageID,
+              let message = findMessage(id: activeStreamingMessageID) else {
+            stopStreaming()
+            return
+        }
+
+        guard streamCursor < streamCharacters.count else {
+            message.finishStreaming()
+            stopStreaming()
+            return
+        }
+
+        let chunkSize = min(currentStreamChunkSize, streamCharacters.count - streamCursor)
+        let next = streamCursor + chunkSize
+        let chunk = String(streamCharacters[streamCursor..<next])
+        streamCursor = next
+
+        message.appendChunk(chunk)
+
+        if streamCursor >= streamCharacters.count {
+            message.finishStreaming()
+            stopStreaming()
+        }
+    }
+
+    private func stopStreaming() {
+        streamingTimer?.invalidate()
+        streamingTimer = nil
+        activeStreamingMessageID = nil
+        handleContentHeightChange(messageID: nil, newHeight: nil)
+    }
+
+    private func handleContentHeightChange(messageID: String?, newHeight: CGFloat?) {
+        if let messageID, let newHeight {
+            let previous = latestHeightsByMessageID[messageID] ?? 0
+            if abs(previous - newHeight) < 0.5 {
+                return
+            }
+            latestHeightsByMessageID[messageID] = newHeight
+        }
+
+        requestHeightRelayout()
+    }
+
+    private func requestHeightRelayout() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.requestHeightRelayout()
+            }
+            return
+        }
+
+        if isApplyingHeightUpdate {
+            hasPendingHeightRelayout = true
+            return
+        }
+
+        isApplyingHeightUpdate = true
+        applyHeightRelayoutPass()
+        isApplyingHeightUpdate = false
+
+        if hasPendingHeightRelayout {
+            hasPendingHeightRelayout = false
+            requestHeightRelayout()
+        }
+    }
+
+    private func applyHeightRelayoutPass() {
+        let previousContentHeight = tableView.contentSize.height
+        let previousOffsetY = tableView.contentOffset.y
+        let minOffsetY = minimumOffsetY()
+
+        UIView.performWithoutAnimation {
+            tableView.beginUpdates()
+            tableView.endUpdates()
+            tableView.layoutIfNeeded()
+
+            if shouldFollowBottom {
+                pinBottomWithoutAnimation()
+                return
+            }
+
+            let delta = tableView.contentSize.height - previousContentHeight
+            guard abs(delta) >= 0.5 else { return }
+
+            let maxOffsetY = maximumOffsetY(minOffsetY: minOffsetY)
+            let anchoredOffsetY = min(max(previousOffsetY + delta, minOffsetY), maxOffsetY)
+            if abs(anchoredOffsetY - tableView.contentOffset.y) >= 0.5 {
+                tableView.setContentOffset(CGPoint(x: tableView.contentOffset.x, y: anchoredOffsetY), animated: false)
+            }
+        }
+    }
+
+    @objc private func resetConversation() {
+        stopStreaming()
+        latestHeightsByMessageID.removeAll()
+        seedConversation()
+    }
+
+    @objc private func skipAnimation() {
+        if let activeStreamingMessageID,
+           let message = findMessage(id: activeStreamingMessageID) {
+            message.finishStreaming()
+            stopStreaming()
+        }
+
+        for message in messages {
+            message.container.skipAnimation()
+        }
+        requestHeightRelayout()
+    }
+
+    @objc private func followSwitchChanged() {
+        shouldFollowBottom = followSwitch.isOn
+        if shouldFollowBottom {
+            scrollToBottom(animated: true)
+        }
+    }
+
+    @objc private func policyChanged() {
+        currentConcurrencyPolicy = policySegmentedControl.selectedSegmentIndex == 0 ? .fullyOrdered : .latestWins
+        applyAnimationConfigurationToAllMessages()
+    }
+
+    @objc private func contentPresetChanged() {
+        currentContentPreset = ReplyContentPreset(rawValue: contentSegmentedControl.selectedSegmentIndex) ?? .taskPlan
+    }
+
+    @objc private func effectChanged() {
+        currentEffectMode = EffectMode(rawValue: effectSegmentedControl.selectedSegmentIndex) ?? .typing
+        applyControlStateToUI()
+        applyAnimationConfigurationToAllMessages()
+    }
+
+    @objc private func entityModeChanged() {
+        currentEntityAppearanceMode = entitySegmentedControl.selectedSegmentIndex == 0 ? .sequential : .simultaneous
+        applyAnimationConfigurationToAllMessages()
+    }
+
+    @objc private func speedChanged() {
+        currentTypingCharactersPerSecond = max(1, Int(speedSlider.value.rounded()))
+        applyControlStateToUI()
+        applyAnimationConfigurationToAllMessages()
+    }
+
+    @objc private func streamChunkChanged() {
+        currentStreamChunkSize = max(1, Int(streamChunkSlider.value.rounded()))
+        applyControlStateToUI()
+    }
+
+    @objc private func streamIntervalChanged() {
+        let milliseconds = max(20, Int(streamIntervalSlider.value.rounded()))
+        currentStreamInterval = TimeInterval(Double(milliseconds) / 1000.0)
+        applyControlStateToUI()
+        restartStreamingTimerIfNeeded()
+    }
+
+    private func scrollToBottom(animated: Bool) {
+        guard !messages.isEmpty else { return }
+        let bottom = IndexPath(row: messages.count - 1, section: 0)
+        tableView.scrollToRow(at: bottom, at: .bottom, animated: animated)
+    }
+
+    private func minimumOffsetY() -> CGFloat {
+        -tableView.adjustedContentInset.top
+    }
+
+    private func maximumOffsetY(minOffsetY: CGFloat? = nil) -> CGFloat {
+        let resolvedMin = minOffsetY ?? minimumOffsetY()
+        return max(
+            resolvedMin,
+            tableView.contentSize.height - tableView.bounds.height + tableView.adjustedContentInset.bottom
+        )
+    }
+
+    private func pinBottomWithoutAnimation() {
+        let targetY = maximumOffsetY()
+        if abs(targetY - tableView.contentOffset.y) >= 0.5 {
+            tableView.setContentOffset(CGPoint(x: tableView.contentOffset.x, y: targetY), animated: false)
+        }
     }
 }
 
-// MARK: - Demo Content
-
-extension StreamingDemoViewController {
-    
-    static let basicDemo = """
-    # V2 流式渲染演示
-    
-    这是一个**流式渲染**的演示，模拟 AI 回复的场景。
-    
-    ## 核心特性
-    
-    1. **逐字渐入** - 文字逐渐显示，类似打字机效果
-    2. **智能积压处理** - 积压过多时自动加速
-    3. **块展开动画** - 新块出现时有展开动画
-    
-    > 引用块也支持流式渲染
-    
-    感谢使用 XHSMarkdownKit V2！
-    """
-    
-    static let codeBlockDemo = """
-    # 代码块测试
-    
-    ## Swift 示例
-    
-    ```swift
-    let container = MarkdownContainerView()
-    container.setAnimationPreset(.typing(charactersPerSecond: 30))
-    
-    try? container.appendContractStreamChunk("New content...")
-    try? container.finishContractStreaming()
-    ```
-    
-    ## Python 示例
-    
-    ```python
-    def hello_world():
-        print("Hello, World!")
-        return True
-    
-    if __name__ == "__main__":
-        hello_world()
-    ```
-    
-    ## 长代码行测试
-    
-    ```swift
-    let veryLongLine = "This is a very long line that should trigger horizontal scrolling in the code block view to test the scroll functionality properly"
-    ```
-    """
-    
-    static let tableDemo = """
-    # 表格测试
-    
-    ## 基础表格
-    
-    | 功能 | 状态 | 备注 |
-    |:-----|:----:|-----:|
-    | 流式渲染 | ✅ | 完成 |
-    | 代码高亮 | ⚠️ | 进行中 |
-    | 图片加载 | ❌ | 待开发 |
-    
-    ## 带样式表格
-    
-    | 特性 | 描述 |
-    |------|------|
-    | **加粗** | 支持表格内加粗 |
-    | *斜体* | 支持表格内斜体 |
-    | `代码` | 支持表格内行内代码 |
-    """
-    
-    static let nestedListDemo = """
-    # 列表嵌套测试
-    
-    ## 无序列表嵌套
-    
-    - 第一层
-      - 第二层
-        - 第三层
-          - 第四层
-    
-    ## 有序列表嵌套
-    
-    1. 第一步
-       1. 子步骤 A
-       2. 子步骤 B
-    2. 第二步
-       1. 子步骤 C
-    
-    ## 混合嵌套
-    
-    - 无序项
-      1. 嵌套有序 1
-      2. 嵌套有序 2
-         - 再嵌套无序
-    """
-    
-    static let blockQuoteDemo = """
-    # 引用块测试
-    
-    ## 单层引用
-    
-    > 这是一段引用文字。
-    > 可以有多行。
-    
-    ## 嵌套引用
-    
-    > 第一层引用
-    > > 第二层引用
-    > > > 第三层引用
-    
-    ## 引用内列表
-    
-    > 引用块内容：
-    > - 列表项 A
-    > - 列表项 B
-    >   - 嵌套项
-    """
-    
-    static let longTextDemo = """
-    # 长文本测试
-    
-    这是一段较长的文本，用于测试流式渲染在处理大量内容时的性能表现。
-    
-    Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
-    
-    ## 多段落
-    
-    Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
-    
-    Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium doloremque laudantium, totam rem aperiam, eaque ipsa quae ab illo inventore veritatis et quasi architecto beatae vitae dicta sunt explicabo.
-    
-    ## 分隔线
-    
-    ---
-    
-    Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit, sed quia consequuntur magni dolores eos qui ratione voluptatem sequi nesciunt.
-    
-    ---
-    
-    测试完成。
-    """
-    
-    static let mixedDemo = """
-    # 混合内容测试
-    
-    这是一个包含**各种元素**的测试文档。
-    
-    ## 文本样式
-    
-    - **加粗文本**
-    - *斜体文本*
-    - ~~删除线~~
-    - `行内代码`
-    - [链接](https://example.com)
-    
-    ## 代码块
-    
-    ```swift
-    struct ContentView: View {
-        var body: some View {
-            Text("Hello, World!")
-        }
+extension StreamingDemoViewController: UITableViewDataSource, UITableViewDelegate {
+    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        messages.count
     }
-    ```
-    
-    ## 引用
-    
-    > 这是一段引用
-    > 包含**加粗**和*斜体*
-    
-    ## 表格
-    
-    | 名称 | 值 |
-    |------|-----|
-    | A | 100 |
-    | B | 200 |
-    
-    ## 分隔线
-    
-    ---
-    
-    **测试完成** ✅
-    """
+
+    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        guard let cell = tableView.dequeueReusableCell(withIdentifier: BubbleMarkdownCell.reuseID, for: indexPath) as? BubbleMarkdownCell else {
+            return UITableViewCell()
+        }
+        cell.configure(with: messages[indexPath.row])
+        return cell
+    }
 }

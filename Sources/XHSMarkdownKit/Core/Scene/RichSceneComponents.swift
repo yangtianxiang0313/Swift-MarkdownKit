@@ -1,6 +1,6 @@
 import UIKit
 
-public struct CodeBlockSceneComponent: SceneComponent {
+public struct CodeBlockSceneComponent: RevealAnimatableComponent {
     public let code: String
     public let language: String?
     public let font: UIFont
@@ -45,9 +45,9 @@ public struct CodeBlockSceneComponent: SceneComponent {
         codeView.configure(component: self, maxWidth: maxWidth)
     }
 
-    public func reveal(view: UIView, displayedUnits: Int) {
+    public func reveal(view: UIView, state: RevealState) {
         guard let codeView = view as? CodeBlockSceneView else { return }
-        codeView.reveal(upTo: displayedUnits)
+        codeView.reveal(upTo: state.displayedUnits)
     }
 
     public func isContentEqual(to other: any SceneComponent) -> Bool {
@@ -98,7 +98,6 @@ public struct TableSceneComponent: SceneComponent {
     }
 
     public var reuseIdentifier: String { "scene.table" }
-    public var revealUnitCount: Int { 1 }
 
     public func makeView() -> UIView {
         TableSceneView()
@@ -108,8 +107,6 @@ public struct TableSceneComponent: SceneComponent {
         guard let tableView = view as? TableSceneView else { return }
         tableView.configure(component: self, maxWidth: maxWidth)
     }
-
-    public func reveal(view: UIView, displayedUnits: Int) {}
 
     public func isContentEqual(to other: any SceneComponent) -> Bool {
         guard let rhs = other as? TableSceneComponent else { return false }
@@ -162,7 +159,6 @@ public struct ImagePlaceholderSceneComponent: SceneComponent {
     }
 
     public var reuseIdentifier: String { "scene.imagePlaceholder" }
-    public var revealUnitCount: Int { 1 }
 
     public func makeView() -> UIView {
         ImagePlaceholderSceneView()
@@ -172,8 +168,6 @@ public struct ImagePlaceholderSceneComponent: SceneComponent {
         guard let imageView = view as? ImagePlaceholderSceneView else { return }
         imageView.configure(component: self)
     }
-
-    public func reveal(view: UIView, displayedUnits: Int) {}
 
     public func isContentEqual(to other: any SceneComponent) -> Bool {
         guard let rhs = other as? ImagePlaceholderSceneComponent else { return false }
@@ -187,7 +181,7 @@ public struct ImagePlaceholderSceneComponent: SceneComponent {
     }
 }
 
-public struct BlockQuoteTextSceneComponent: SceneComponent {
+public struct BlockQuoteTextSceneComponent: RevealAnimatableComponent {
     public let attributedText: NSAttributedString
     public let numberOfLines: Int
     public let barColor: UIColor
@@ -226,9 +220,9 @@ public struct BlockQuoteTextSceneComponent: SceneComponent {
         quoteView.configure(component: self, maxWidth: maxWidth)
     }
 
-    public func reveal(view: UIView, displayedUnits: Int) {
+    public func reveal(view: UIView, state: RevealState) {
         guard let quoteView = view as? BlockQuoteTextSceneView else { return }
-        quoteView.reveal(upTo: displayedUnits)
+        quoteView.reveal(upTo: state.displayedUnits)
     }
 
     public func isContentEqual(to other: any SceneComponent) -> Bool {
@@ -265,7 +259,6 @@ public struct BlockQuoteContainerSceneComponent: SceneComponent {
     }
 
     public var reuseIdentifier: String { "scene.blockQuoteContainer" }
-    public var revealUnitCount: Int { 1 }
 
     public func makeView() -> UIView {
         BlockQuoteContainerSceneView()
@@ -275,8 +268,6 @@ public struct BlockQuoteContainerSceneComponent: SceneComponent {
         guard let quoteView = view as? BlockQuoteContainerSceneView else { return }
         quoteView.configure(component: self)
     }
-
-    public func reveal(view: UIView, displayedUnits: Int) {}
 
     public func isContentEqual(to other: any SceneComponent) -> Bool {
         guard let rhs = other as? BlockQuoteContainerSceneComponent else { return false }
@@ -529,56 +520,20 @@ private final class BlockQuoteTextSceneView: UIView {
 
 private final class BlockQuoteContainerSceneView: UIView, SceneContainerView {
     private let barView = UIView()
-    let contentStackView = UIStackView()
+    let contentContainerView = UIView()
 
-    private var contentLeadingConstraint: NSLayoutConstraint!
-    private var contentTrailingConstraint: NSLayoutConstraint!
-    private var contentTopConstraint: NSLayoutConstraint!
-    private var contentBottomConstraint: NSLayoutConstraint!
-    private var barLeadingConstraint: NSLayoutConstraint!
-    private var barWidthConstraint: NSLayoutConstraint!
-    private var barTopConstraint: NSLayoutConstraint!
-    private var barBottomConstraint: NSLayoutConstraint!
+    private var resolvedContentInsets: UIEdgeInsets = .zero
+    private var resolvedBarInsets: UIEdgeInsets = .zero
+    private var resolvedBarWidth: CGFloat = 3
 
-    var sceneContentStackView: UIStackView { contentStackView }
-
-    var sceneContentWidthReduction: CGFloat {
-        contentLeadingConstraint.constant + max(0, -contentTrailingConstraint.constant)
-    }
+    var sceneContentContainerView: UIView { contentContainerView }
+    var sceneContentInsets: UIEdgeInsets { resolvedContentInsets }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
 
-        barView.translatesAutoresizingMaskIntoConstraints = false
-        contentStackView.translatesAutoresizingMaskIntoConstraints = false
-        contentStackView.axis = .vertical
-        contentStackView.spacing = 0
-        contentStackView.alignment = .fill
-        contentStackView.distribution = .fill
-
         addSubview(barView)
-        addSubview(contentStackView)
-
-        barLeadingConstraint = barView.leadingAnchor.constraint(equalTo: leadingAnchor)
-        barWidthConstraint = barView.widthAnchor.constraint(equalToConstant: 3)
-        barTopConstraint = barView.topAnchor.constraint(equalTo: topAnchor)
-        barBottomConstraint = barView.bottomAnchor.constraint(equalTo: bottomAnchor)
-
-        contentLeadingConstraint = contentStackView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20)
-        contentTrailingConstraint = contentStackView.trailingAnchor.constraint(equalTo: trailingAnchor)
-        contentTopConstraint = contentStackView.topAnchor.constraint(equalTo: topAnchor)
-        contentBottomConstraint = contentStackView.bottomAnchor.constraint(equalTo: bottomAnchor)
-
-        NSLayoutConstraint.activate([
-            barLeadingConstraint,
-            barWidthConstraint,
-            barTopConstraint,
-            barBottomConstraint,
-            contentLeadingConstraint,
-            contentTrailingConstraint,
-            contentTopConstraint,
-            contentBottomConstraint
-        ])
+        addSubview(contentContainerView)
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
@@ -587,16 +542,35 @@ private final class BlockQuoteContainerSceneView: UIView, SceneContainerView {
         barView.backgroundColor = component.barColor
         backgroundColor = component.fillColor ?? .clear
 
-        barLeadingConstraint.constant = component.contentInsets.left
-        barTopConstraint.constant = component.contentInsets.top
-        barBottomConstraint.constant = -component.contentInsets.bottom
-        barWidthConstraint.constant = max(1, component.barWidth)
+        resolvedBarInsets = component.contentInsets
+        resolvedBarWidth = max(1, component.barWidth)
 
         let leading = max(component.contentInsets.left + component.barWidth + 1, component.contentLeadingInset)
-        contentLeadingConstraint.constant = leading
-        contentTrailingConstraint.constant = -component.contentInsets.right
-        contentTopConstraint.constant = component.contentInsets.top
-        contentBottomConstraint.constant = -component.contentInsets.bottom
+        resolvedContentInsets = UIEdgeInsets(
+            top: component.contentInsets.top,
+            left: leading,
+            bottom: component.contentInsets.bottom,
+            right: component.contentInsets.right
+        )
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+
+        barView.frame = CGRect(
+            x: resolvedBarInsets.left,
+            y: resolvedBarInsets.top,
+            width: resolvedBarWidth,
+            height: max(0, bounds.height - resolvedBarInsets.top - resolvedBarInsets.bottom)
+        )
+
+        contentContainerView.frame = CGRect(
+            x: resolvedContentInsets.left,
+            y: resolvedContentInsets.top,
+            width: max(0, bounds.width - resolvedContentInsets.left - resolvedContentInsets.right),
+            height: max(0, bounds.height - resolvedContentInsets.top - resolvedContentInsets.bottom)
+        )
     }
 }
 

@@ -264,6 +264,22 @@ extension MarkdownContract {
                 [reg.makeBlock(node: node, kind: .table, context: context, children: try reg.renderBlockChildren(of: node, context: context))]
             }
 
+            registry.registerBlockRenderer(for: .tableHead) { node, context, reg in
+                [reg.makeBlock(node: node, kind: .tableHead, context: context, children: try reg.renderBlockChildren(of: node, context: context))]
+            }
+
+            registry.registerBlockRenderer(for: .tableBody) { node, context, reg in
+                [reg.makeBlock(node: node, kind: .tableBody, context: context, children: try reg.renderBlockChildren(of: node, context: context))]
+            }
+
+            registry.registerBlockRenderer(for: .tableRow) { node, context, reg in
+                [reg.makeBlock(node: node, kind: .tableRow, context: context, children: try reg.renderBlockChildren(of: node, context: context))]
+            }
+
+            registry.registerBlockRenderer(for: .tableCell) { node, context, reg in
+                [reg.makeBlock(node: node, kind: .tableCell, context: context, inlines: try reg.renderInlineChildren(of: node, context: context))]
+            }
+
             registry.registerBlockRenderer(for: .thematicBreak) { node, context, reg in
                 [reg.makeBlock(node: node, kind: .thematicBreak, context: context)]
             }
@@ -348,6 +364,11 @@ extension MarkdownContract {
             registry.registerInlineRenderer(for: .strong) { node, context, reg in
                 let children = try reg.renderInlineChildren(of: node, context: context)
                 return reg.appendMark(name: "strong", value: nil, to: children)
+            }
+
+            registry.registerInlineRenderer(for: .strikethrough) { node, context, reg in
+                let children = try reg.renderInlineChildren(of: node, context: context)
+                return reg.appendMark(name: "strikethrough", value: nil, to: children)
             }
 
             registry.registerInlineRenderer(for: .image) { node, _, reg in

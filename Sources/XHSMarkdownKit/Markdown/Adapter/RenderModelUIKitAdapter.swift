@@ -8,6 +8,180 @@ extension MarkdownContract {
         func register(into adapter: RenderModelUIKitAdapter)
     }
 
+    public struct MergeTextSegment {
+        public var sourceBlockID: String
+        public var kind: String
+        public var attributedText: NSAttributedString
+        public var spacingAfter: CGFloat
+        public var metadata: [String: Value]
+        public var forceMergeBreakAfter: Bool
+
+        public init(
+            sourceBlockID: String,
+            kind: String,
+            attributedText: NSAttributedString,
+            spacingAfter: CGFloat = 0,
+            metadata: [String: Value] = [:],
+            forceMergeBreakAfter: Bool = false
+        ) {
+            self.sourceBlockID = sourceBlockID
+            self.kind = kind
+            self.attributedText = attributedText
+            if spacingAfter.isFinite {
+                self.spacingAfter = max(0, spacingAfter)
+            } else {
+                self.spacingAfter = 0
+            }
+            self.metadata = metadata
+            self.forceMergeBreakAfter = forceMergeBreakAfter
+        }
+    }
+
+    public struct StandaloneNodeDescriptor {
+        public var id: String
+        public var kind: String
+        public var component: any SceneComponent
+        public var spacingAfter: CGFloat
+        public var metadata: [String: Value]
+
+        public init(
+            id: String,
+            kind: String,
+            component: any SceneComponent,
+            spacingAfter: CGFloat = 0,
+            metadata: [String: Value] = [:]
+        ) {
+            self.id = id
+            self.kind = kind
+            self.component = component
+            if spacingAfter.isFinite {
+                self.spacingAfter = max(0, spacingAfter)
+            } else {
+                self.spacingAfter = 0
+            }
+            self.metadata = metadata
+        }
+    }
+
+    public enum BlockMappingResult {
+        case mergeSegment(MergeTextSegment)
+        case standalone(StandaloneNodeDescriptor)
+
+        fileprivate var spacingAfter: CGFloat {
+            switch self {
+            case let .mergeSegment(segment):
+                return segment.spacingAfter
+            case let .standalone(standalone):
+                return standalone.spacingAfter
+            }
+        }
+
+        fileprivate func withSpacingAfter(_ spacingAfter: CGFloat) -> BlockMappingResult {
+            let resolvedSpacing: CGFloat
+            if spacingAfter.isFinite {
+                resolvedSpacing = max(0, spacingAfter)
+            } else {
+                resolvedSpacing = 0
+            }
+            switch self {
+            case var .mergeSegment(segment):
+                segment.spacingAfter = resolvedSpacing
+                return .mergeSegment(segment)
+            case var .standalone(standalone):
+                standalone.spacingAfter = resolvedSpacing
+                return .standalone(standalone)
+            }
+        }
+
+        fileprivate func addingSpacingAfter(_ delta: CGFloat) -> BlockMappingResult {
+            withSpacingAfter(spacingAfter + max(0, delta))
+        }
+    }
+
+    public protocol SceneMergePolicy {
+        func shouldMerge(previous: MergeTextSegment, next: MergeTextSegment) -> Bool
+        func shouldBreak(after segment: MergeTextSegment) -> Bool
+        func mergedNodeID(for segments: [MergeTextSegment]) -> String
+        func mergedNodeKind(for segments: [MergeTextSegment]) -> String
+        func mergedNodeSpacingAfter(for segments: [MergeTextSegment]) -> CGFloat
+        func mergedNodeMetadata(for segments: [MergeTextSegment]) -> [String: Value]
+    }
+
+    public struct FirstBlockAnchoredMergePolicy: SceneMergePolicy {
+        public init() {}
+
+        public func shouldMerge(previous: MergeTextSegment, next: MergeTextSegment) -> Bool {
+            !shouldBreak(after: previous)
+        }
+
+        public func shouldBreak(after segment: MergeTextSegment) -> Bool {
+            segment.forceMergeBreakAfter
+        }
+
+        public func mergedNodeID(for segments: [MergeTextSegment]) -> String {
+            segments.first?.sourceBlockID ?? "merged.text"
+        }
+
+        public func mergedNodeKind(for segments: [MergeTextSegment]) -> String {
+            "mergedText"
+        }
+
+        public func mergedNodeSpacingAfter(for segments: [MergeTextSegment]) -> CGFloat {
+            segments.last?.spacingAfter ?? 0
+        }
+
+        public func mergedNodeMetadata(for segments: [MergeTextSegment]) -> [String: Value] {
+            var metadata: [String: Value] = [
+                "memberBlockIDs": .array(segments.map { .string($0.sourceBlockID) }),
+                "memberKinds": .array(segments.map { .string($0.kind) })
+            ]
+
+            for segment in segments {
+                for (key, value) in segment.metadata {
+                    metadata[key] = value
+                }
+            }
+            return metadata
+        }
+    }
+
+    public final class BlockMapperChain {
+        public typealias Mapper = (
+            _ block: RenderBlock,
+            _ context: RenderModelUIKitAdapter.Context,
+            _ adapter: RenderModelUIKitAdapter
+        ) throws -> [BlockMappingResult]?
+
+        private var mappers: [Mapper]
+
+        public init(mappers: [Mapper] = []) {
+            self.mappers = mappers
+        }
+
+        public func prepend(_ mapper: @escaping Mapper) {
+            mappers.insert(mapper, at: 0)
+        }
+
+        public func append(_ mapper: @escaping Mapper) {
+            mappers.append(mapper)
+        }
+
+        public var isEmpty: Bool { mappers.isEmpty }
+
+        fileprivate func map(
+            block: RenderBlock,
+            context: RenderModelUIKitAdapter.Context,
+            adapter: RenderModelUIKitAdapter
+        ) throws -> [BlockMappingResult]? {
+            for mapper in mappers {
+                if let mapped = try mapper(block, context, adapter) {
+                    return mapped
+                }
+            }
+            return nil
+        }
+    }
+
     public final class RenderModelUIKitAdapter {
         public struct Context {
             public var theme: MarkdownTheme
@@ -72,41 +246,64 @@ extension MarkdownContract {
             }
         }
 
-        public typealias BlockRenderer = (_ block: RenderBlock, _ context: Context, _ adapter: RenderModelUIKitAdapter) -> [RenderScene.Node]
-        public typealias InlineRenderer = (_ span: InlineSpan, _ block: RenderBlock, _ context: Context, _ adapter: RenderModelUIKitAdapter) -> NSAttributedString?
-        public typealias CustomMarkAttributeResolver = (_ mark: MarkToken, _ attributes: inout [NSAttributedString.Key: Any], _ block: RenderBlock, _ context: Context) -> Void
+        public typealias BlockMapper = (
+            _ block: RenderBlock,
+            _ context: Context,
+            _ adapter: RenderModelUIKitAdapter
+        ) throws -> [BlockMappingResult]
+
+        public typealias InlineRenderer = (
+            _ span: InlineSpan,
+            _ block: RenderBlock,
+            _ context: Context,
+            _ adapter: RenderModelUIKitAdapter
+        ) -> NSAttributedString?
+
+        public typealias CustomMarkAttributeResolver = (
+            _ mark: MarkToken,
+            _ attributes: inout [NSAttributedString.Key: Any],
+            _ block: RenderBlock,
+            _ context: Context
+        ) -> Void
 
         public var customMarkAttributeResolver: CustomMarkAttributeResolver?
 
-        private var blockRenderers: [String: BlockRenderer] = [:]
+        public var mergePolicy: any SceneMergePolicy
+        public var blockMapperChain: BlockMapperChain
+
         private var inlineRenderers: [String: InlineRenderer] = [:]
 
-        public init(plugins: [UIKitNodeRenderPlugin] = []) {
+        public init(
+            mergePolicy: any SceneMergePolicy,
+            blockMapperChain: BlockMapperChain,
+            plugins: [UIKitNodeRenderPlugin] = []
+        ) {
+            self.mergePolicy = mergePolicy
+            self.blockMapperChain = blockMapperChain
             plugins.forEach { $0.register(into: self) }
         }
 
-        public func registerBlockRenderer(for kind: BlockKind, renderer: @escaping BlockRenderer) {
-            blockRenderers[key(for: kind)] = renderer
+        public static func makeDefaultBlockMapperChain() -> BlockMapperChain {
+            let chain = BlockMapperChain()
+            chain.append { block, context, adapter in
+                try adapter.mapCoreBlock(block, context: context)
+            }
+            return chain
         }
 
-        public func registerBlockRenderer(forKey key: String, renderer: @escaping BlockRenderer) {
-            blockRenderers[key] = renderer
+        public func registerBlockMapper(for kind: BlockKind, mapper: @escaping BlockMapper) {
+            registerBlockMapper(forKey: key(for: kind), mapper: mapper)
         }
 
-        public func registerBlockRenderer(forExtension name: String, renderer: @escaping BlockRenderer) {
-            blockRenderers["ext:\(name)"] = renderer
+        public func registerBlockMapper(forKey key: String, mapper: @escaping BlockMapper) {
+            blockMapperChain.prepend { block, context, adapter in
+                guard adapter.candidateKeys(for: block).contains(key) else { return nil }
+                return try mapper(block, context, adapter)
+            }
         }
 
-        public func removeBlockRenderer(for kind: BlockKind) {
-            blockRenderers.removeValue(forKey: key(for: kind))
-        }
-
-        public func removeBlockRenderer(forKey key: String) {
-            blockRenderers.removeValue(forKey: key)
-        }
-
-        public func removeBlockRenderer(forExtension name: String) {
-            blockRenderers.removeValue(forKey: "ext:\(name)")
+        public func registerBlockMapper(forExtension name: String, mapper: @escaping BlockMapper) {
+            registerBlockMapper(forKey: "ext:\(name)", mapper: mapper)
         }
 
         public func registerInlineRenderer(for kind: InlineKind, renderer: @escaping InlineRenderer) {
@@ -137,53 +334,47 @@ extension MarkdownContract {
             model: RenderModel,
             theme: MarkdownTheme,
             maxWidth: CGFloat
-        ) -> RenderScene {
+        ) throws -> RenderScene {
+            guard !blockMapperChain.isEmpty else {
+                throw MarkdownContract.ModelError(
+                    code: .requiredFieldMissing,
+                    message: "BlockMapperChain is required",
+                    path: "RenderModelUIKitAdapter.blockMapperChain"
+                )
+            }
+
             let context = Context(theme: theme, maxWidth: maxWidth)
-            let nodes = renderBlocks(model.blocks, context: context)
+            let mapped = try mapBlocks(model.blocks, context: context)
+            let nodes = merge(mappedResults: mapped, theme: theme)
             return RenderScene(documentId: model.documentId, nodes: nodes, metadata: model.metadata)
         }
 
-        public func renderBlockAsDefault(_ block: RenderBlock, context: Context) -> [RenderScene.Node] {
-            defaultRender(block: block, context: context)
-        }
-
-        public func makeTextNode(
-            id: String,
+        public func makeMergeTextSegment(
+            sourceBlockID: String,
             kind: String,
-            text: NSAttributedString,
-            spacingAfter: CGFloat = 0,
-            metadata: [String: Value] = [:]
-        ) -> RenderScene.Node {
-            RenderScene.Node(
-                id: id,
-                kind: kind,
-                component: TextSceneComponent(attributedText: text),
-                spacingAfter: spacingAfter,
-                metadata: metadata
-            )
-        }
-
-        public func makeCustomViewNode(
-            id: String,
-            kind: String,
-            reuseIdentifier: String,
-            signature: String,
-            revealUnitCount: Int = 1,
+            attributedText: NSAttributedString,
             spacingAfter: CGFloat = 0,
             metadata: [String: Value] = [:],
-            makeView: @escaping () -> UIView,
-            configure: @escaping (UIView, CGFloat) -> Void,
-            reveal: ((UIView, Int) -> Void)? = nil
-        ) -> RenderScene.Node {
-            let component = CustomViewSceneComponent(
-                reuseIdentifier: reuseIdentifier,
-                revealUnitCount: revealUnitCount,
-                signature: signature,
-                make: makeView,
-                configure: configure,
-                reveal: reveal
+            forceMergeBreakAfter: Bool = false
+        ) -> MergeTextSegment {
+            MergeTextSegment(
+                sourceBlockID: sourceBlockID,
+                kind: kind,
+                attributedText: attributedText,
+                spacingAfter: spacingAfter,
+                metadata: metadata,
+                forceMergeBreakAfter: forceMergeBreakAfter
             )
-            return RenderScene.Node(
+        }
+
+        public func makeStandaloneNode(
+            id: String,
+            kind: String,
+            component: any SceneComponent,
+            spacingAfter: CGFloat = 0,
+            metadata: [String: Value] = [:]
+        ) -> StandaloneNodeDescriptor {
+            StandaloneNodeDescriptor(
                 id: id,
                 kind: kind,
                 component: component,
@@ -192,287 +383,531 @@ extension MarkdownContract {
             )
         }
 
-        fileprivate func renderBlocks(_ blocks: [RenderBlock], context: Context) -> [RenderScene.Node] {
-            blocks.flatMap { renderBlock($0, context: context) }
+        public func makeCustomStandaloneNode(
+            id: String,
+            kind: String,
+            reuseIdentifier: String,
+            signature: String,
+            revealUnitCount: Int = 0,
+            spacingAfter: CGFloat = 0,
+            metadata: [String: Value] = [:],
+            makeView: @escaping () -> UIView,
+            configure: @escaping (UIView, CGFloat) -> Void,
+            reveal: ((UIView, RevealState) -> Void)? = nil,
+            applyAppearance: ((UIView, AppearanceState) -> Void)? = nil
+        ) -> StandaloneNodeDescriptor {
+            let component = CustomViewSceneComponent(
+                reuseIdentifier: reuseIdentifier,
+                revealUnitCount: revealUnitCount,
+                signature: signature,
+                make: makeView,
+                configure: configure,
+                reveal: reveal,
+                applyAppearance: applyAppearance
+            )
+
+            return StandaloneNodeDescriptor(
+                id: id,
+                kind: kind,
+                component: component,
+                spacingAfter: spacingAfter,
+                metadata: metadata
+            )
         }
 
-        fileprivate func renderBlock(_ block: RenderBlock, context: Context) -> [RenderScene.Node] {
-            let resolvedContext = context.applying(layoutHints: block.layoutHints)
-
-            for candidate in candidateKeys(for: block) {
-                if let override = blockRenderers[candidate] {
-                    return override(block, resolvedContext, self)
-                }
+        public func renderBlockAsDefault(_ block: RenderBlock, context: Context) throws -> [BlockMappingResult] {
+            if let mapped = try mapCoreBlock(block, context: context) {
+                return mapped
             }
+            throw MarkdownContract.ModelError(
+                code: .unknownNodeKind,
+                message: "No default mapper handled \(block.kind.rawValue)",
+                path: "RenderModelUIKitAdapter.block[\(block.id)]"
+            )
+        }
 
-            return defaultRender(block: block, context: resolvedContext)
+        fileprivate func mapBlocks(_ blocks: [RenderBlock], context: Context) throws -> [BlockMappingResult] {
+            var results: [BlockMappingResult] = []
+            results.reserveCapacity(blocks.count)
+            for block in blocks {
+                let mapped = try mapBlock(block, context: context)
+                results.append(contentsOf: mapped)
+            }
+            return results
+        }
+
+        fileprivate func mapBlock(_ block: RenderBlock, context: Context) throws -> [BlockMappingResult] {
+            let resolvedContext = context.applying(layoutHints: block.layoutHints)
+            guard let mapped = try blockMapperChain.map(block: block, context: resolvedContext, adapter: self) else {
+                throw MarkdownContract.ModelError(
+                    code: .unknownNodeKind,
+                    message: "No block mapper handled \(block.kind.rawValue)",
+                    path: "RenderModelUIKitAdapter.block[\(block.id)]"
+                )
+            }
+            return mapped
         }
     }
 }
 
 private extension MarkdownContract.RenderModelUIKitAdapter {
-    func defaultRender(block: MarkdownContract.RenderBlock, context: Context) -> [RenderScene.Node] {
-        switch block.kind.coreKind {
-        case .document?:
-            return renderBlocks(block.children, context: context)
+    struct InlineBaseStyle {
+        let font: UIFont
+        let color: UIColor
+        let letterSpacing: CGFloat
+    }
 
-        case .paragraph?:
-            let attributed = renderInlines(block.inlines, in: block, context: context)
-            guard attributed.length > 0 else { return [] }
+    typealias Mapper = MarkdownContract.BlockMapperChain.Mapper
+
+    static let coreBlockHandlers: [String: Mapper] = {
+        var handlers: [String: Mapper] = [:]
+        handlers[MarkdownContract.BlockKind.document.rawValue] = { block, context, adapter in
+            try adapter.mapDocumentBlock(block, context: context)
+        }
+        handlers[MarkdownContract.BlockKind.paragraph.rawValue] = { block, context, adapter in
+            try adapter.mapParagraphBlock(block, context: context)
+        }
+        handlers[MarkdownContract.BlockKind.heading.rawValue] = { block, context, adapter in
+            try adapter.mapHeadingBlock(block, context: context)
+        }
+        handlers[MarkdownContract.BlockKind.list.rawValue] = { block, context, adapter in
+            try adapter.mapListBlock(block, context: context)
+        }
+        handlers[MarkdownContract.BlockKind.listItem.rawValue] = { block, context, adapter in
+            try adapter.mapListItemBlock(block, context: context)
+        }
+        handlers[MarkdownContract.BlockKind.blockQuote.rawValue] = { block, context, adapter in
+            try adapter.mapBlockQuoteBlock(block, context: context)
+        }
+        handlers[MarkdownContract.BlockKind.codeBlock.rawValue] = { block, context, adapter in
+            try adapter.mapCodeBlock(block, context: context)
+        }
+        handlers[MarkdownContract.BlockKind.table.rawValue] = { block, context, adapter in
+            try adapter.mapTableBlock(block, context: context)
+        }
+        handlers[MarkdownContract.BlockKind.thematicBreak.rawValue] = { block, context, adapter in
+            try adapter.mapThematicBreakBlock(block, context: context)
+        }
+        handlers[MarkdownContract.BlockKind.image.rawValue] = { block, context, adapter in
+            try adapter.mapImageBlock(block, context: context)
+        }
+        handlers[MarkdownContract.BlockKind.custom.rawValue] = { block, context, adapter in
+            try adapter.mapCustomBlock(block, context: context)
+        }
+        return handlers
+    }()
+
+    func mapCoreBlock(_ block: MarkdownContract.RenderBlock, context: Context) throws -> [MarkdownContract.BlockMappingResult]? {
+        for candidate in candidateKeys(for: block) {
+            if let handler = Self.coreBlockHandlers[candidate] {
+                return try handler(block, context, self)
+            }
+        }
+        return nil
+    }
+
+    func mapDocumentBlock(_ block: MarkdownContract.RenderBlock, context: Context) throws -> [MarkdownContract.BlockMappingResult] {
+        try mapBlocks(block.children, context: context)
+    }
+
+    func mapParagraphBlock(_ block: MarkdownContract.RenderBlock, context: Context) throws -> [MarkdownContract.BlockMappingResult] {
+        let attributed = renderInlines(
+            block.inlines,
+            in: block,
+            context: context,
+            baseStyle: defaultInlineBaseStyle(context: context)
+        )
+        guard attributed.length > 0 else { return [] }
+        let quoteIndent = quoteTextIndent(for: context)
+
+        let styled = applyingTextLayout(
+            to: attributed,
+            lineHeight: context.blockQuoteDepth > 0 ? context.theme.blockQuote.lineHeight : context.theme.body.lineHeight,
+            letterSpacing: context.theme.body.letterSpacing,
+            firstLineHeadIndent: context.indent + quoteIndent,
+            headIndent: context.indent + quoteIndent,
+            blockQuoteDepth: context.blockQuoteDepth
+        )
+
+        let segment = makeMergeTextSegment(
+            sourceBlockID: block.id,
+            kind: "paragraph",
+            attributedText: styled,
+            spacingAfter: blockSpacing(for: .paragraph, theme: context.theme, layoutHints: block.layoutHints),
+            metadata: block.metadata
+        )
+        return [.mergeSegment(segment)]
+    }
+
+    func mapHeadingBlock(_ block: MarkdownContract.RenderBlock, context: Context) throws -> [MarkdownContract.BlockMappingResult] {
+        let level = block.contractAttrInt(for: "level") ?? 1
+        let attributed = renderHeadingInlines(block.inlines, level: level, context: context)
+        guard attributed.length > 0 else { return [] }
+
+        let segment = makeMergeTextSegment(
+            sourceBlockID: block.id,
+            kind: "heading",
+            attributedText: attributed,
+            spacingAfter: blockSpacing(for: .heading, theme: context.theme, layoutHints: block.layoutHints),
+            metadata: block.metadata
+        )
+        return [.mergeSegment(segment)]
+    }
+
+    func mapListBlock(_ block: MarkdownContract.RenderBlock, context: Context) throws -> [MarkdownContract.BlockMappingResult] {
+        let ordered = block.contractAttrBool(for: "ordered") ?? false
+        let startIndex = block.contractAttrInt(for: "startIndex") ?? 1
+        let baseContext = context
+            .enteringList(ordered: ordered)
+            .withListItemIndex(startIndex - 1)
+
+        var results: [MarkdownContract.BlockMappingResult] = []
+        var runningIndex = startIndex - 1
+
+        for child in block.children {
+            let childContext: Context
+            if child.kind == .listItem {
+                childContext = baseContext.withListItemIndex(runningIndex)
+                runningIndex += 1
+            } else {
+                childContext = baseContext
+            }
+            results.append(contentsOf: try mapBlock(child, context: childContext))
+        }
+
+        return results
+    }
+
+    func mapListItemBlock(_ block: MarkdownContract.RenderBlock, context: Context) throws -> [MarkdownContract.BlockMappingResult] {
+        let marker: String
+        if context.isOrderedList {
+            marker = "\((context.listItemIndex ?? 0) + 1). "
+        } else {
+            marker = "\(context.theme.list.unorderedSymbol) "
+        }
+
+        var remainingChildren = block.children
+        let textBody: NSAttributedString
+
+        if !block.inlines.isEmpty {
+            textBody = renderInlines(
+                block.inlines,
+                in: block,
+                context: context,
+                baseStyle: defaultInlineBaseStyle(context: context)
+            )
+        } else if let firstChild = block.children.first, firstChild.kind == .paragraph {
+            let mergedParagraph = renderInlines(
+                firstChild.inlines,
+                in: firstChild,
+                context: context,
+                baseStyle: defaultInlineBaseStyle(context: context)
+            )
+            if mergedParagraph.length > 0 {
+                textBody = mergedParagraph
+                remainingChildren.removeFirst()
+            } else {
+                textBody = NSAttributedString(string: "")
+            }
+        } else {
+            textBody = NSAttributedString(string: "")
+        }
+
+        let markerFont = context.theme.list.orderedNumberFont
+        let markerWidth = (marker as NSString).size(withAttributes: [.font: markerFont]).width
+
+        let merged = NSMutableAttributedString(
+            string: marker,
+            attributes: [
+                .font: markerFont,
+                .foregroundColor: context.theme.list.symbolColor,
+                .xhsBaseForegroundColor: context.theme.list.symbolColor
+            ]
+        )
+        merged.append(textBody)
+
+        var results: [MarkdownContract.BlockMappingResult] = []
+        if merged.length > 0 {
+            let quoteIndent = quoteTextIndent(for: context)
+            let styled = applyingTextLayout(
+                to: merged,
+                lineHeight: context.blockQuoteDepth > 0 ? context.theme.blockQuote.lineHeight : context.theme.body.lineHeight,
+                letterSpacing: context.theme.body.letterSpacing,
+                firstLineHeadIndent: context.indent + quoteIndent,
+                headIndent: context.indent + quoteIndent + markerWidth,
+                blockQuoteDepth: context.blockQuoteDepth
+            )
+
+            let segment = makeMergeTextSegment(
+                sourceBlockID: block.id,
+                kind: "listItem",
+                attributedText: styled,
+                spacingAfter: blockSpacing(for: .listItem, theme: context.theme, layoutHints: block.layoutHints),
+                metadata: block.metadata
+            )
+            results.append(.mergeSegment(segment))
+        }
+
+        if !remainingChildren.isEmpty {
+            results.append(contentsOf: try mapBlocks(remainingChildren, context: context))
+        }
+
+        return results
+    }
+
+    func mapBlockQuoteBlock(_ block: MarkdownContract.RenderBlock, context: Context) throws -> [MarkdownContract.BlockMappingResult] {
+        var children = try mapBlocks(block.children, context: context.enteringBlockQuote())
+        guard !children.isEmpty else { return [] }
+
+        let extraSpacing = blockSpacing(for: .blockQuote, theme: context.theme, layoutHints: block.layoutHints)
+        if let last = children.last {
+            children[children.count - 1] = last.addingSpacingAfter(extraSpacing)
+        }
+        return children
+    }
+
+    func mapCodeBlock(_ block: MarkdownContract.RenderBlock, context: Context) throws -> [MarkdownContract.BlockMappingResult] {
+        let code = block.contractAttrString(for: "code") ?? block.inlines.map(\.text).joined()
+        let language = block.contractAttrString(for: "language")
+
+        let component = CodeBlockSceneComponent(
+            code: code,
+            language: language,
+            font: context.theme.code.font,
+            textColor: context.theme.code.block.textColor,
+            backgroundColor: context.theme.code.block.backgroundColor,
+            cornerRadius: context.theme.code.block.cornerRadius,
+            padding: context.theme.code.block.padding,
+            borderWidth: context.theme.code.block.borderWidth,
+            borderColor: context.theme.code.block.borderColor
+        )
+
+        let node = makeStandaloneNode(
+            id: block.id,
+            kind: "codeBlock",
+            component: component,
+            spacingAfter: blockSpacing(for: .codeBlock, theme: context.theme, layoutHints: block.layoutHints),
+            metadata: block.metadata
+        )
+
+        return [.standalone(node)]
+    }
+
+    func mapTableBlock(_ block: MarkdownContract.RenderBlock, context: Context) throws -> [MarkdownContract.BlockMappingResult] {
+        let tableComponent = try makeTableSceneComponent(block: block, context: context)
+
+        let node = makeStandaloneNode(
+            id: block.id,
+            kind: "table",
+            component: tableComponent,
+            spacingAfter: blockSpacing(for: .table, theme: context.theme, layoutHints: block.layoutHints),
+            metadata: block.metadata
+        )
+
+        return [.standalone(node)]
+    }
+
+    func mapThematicBreakBlock(_ block: MarkdownContract.RenderBlock, context: Context) throws -> [MarkdownContract.BlockMappingResult] {
+        let node = makeStandaloneNode(
+            id: block.id,
+            kind: "thematicBreak",
+            component: RuleSceneComponent(
+                color: context.theme.thematicBreak.color,
+                height: context.theme.thematicBreak.height,
+                verticalPadding: context.theme.thematicBreak.verticalPadding
+            ),
+            spacingAfter: blockSpacing(for: .thematicBreak, theme: context.theme, layoutHints: block.layoutHints),
+            metadata: block.metadata
+        )
+        return [.standalone(node)]
+    }
+
+    func mapImageBlock(_ block: MarkdownContract.RenderBlock, context: Context) throws -> [MarkdownContract.BlockMappingResult] {
+        let altText = block.contractAttrString(for: "altText") ?? "[image]"
+        let source = block.contractAttrString(for: "source")
+
+        let node = makeStandaloneNode(
+            id: block.id,
+            kind: "image",
+            component: ImagePlaceholderSceneComponent(
+                altText: altText,
+                source: source,
+                placeholderColor: context.theme.image.placeholderColor,
+                cornerRadius: context.theme.image.cornerRadius,
+                placeholderHeight: context.theme.image.placeholderHeight,
+                textFont: context.theme.body.font,
+                textColor: context.theme.body.color
+            ),
+            spacingAfter: blockSpacing(for: .image, theme: context.theme, layoutHints: block.layoutHints),
+            metadata: block.metadata
+        )
+
+        return [.standalone(node)]
+    }
+
+    func mapCustomBlock(_ block: MarkdownContract.RenderBlock, context: Context) throws -> [MarkdownContract.BlockMappingResult] {
+        let attributed = renderInlines(
+            block.inlines,
+            in: block,
+            context: context,
+            baseStyle: defaultInlineBaseStyle(context: context)
+        )
+        if attributed.length > 0 {
+            let quoteIndent = quoteTextIndent(for: context)
             let styled = applyingTextLayout(
                 to: attributed,
                 lineHeight: context.blockQuoteDepth > 0 ? context.theme.blockQuote.lineHeight : context.theme.body.lineHeight,
                 letterSpacing: context.theme.body.letterSpacing,
-                firstLineHeadIndent: context.indent,
-                headIndent: context.indent
+                firstLineHeadIndent: context.indent + quoteIndent,
+                headIndent: context.indent + quoteIndent,
+                blockQuoteDepth: context.blockQuoteDepth
             )
-            return [makeContextualTextNode(
-                id: block.id,
-                kind: "paragraph",
-                text: styled,
-                spacingAfter: blockSpacing(for: .paragraph, theme: context.theme, layoutHints: block.layoutHints),
-                metadata: block.metadata,
-                context: context
-            )]
 
-        case .heading?:
-            let level = block.contractAttrInt(for: "level") ?? 1
-            let attributed = renderHeadingInlines(block.inlines, level: level, context: context)
-            guard attributed.length > 0 else { return [] }
-            return [makeContextualTextNode(
-                id: block.id,
-                kind: "heading",
-                text: attributed,
-                spacingAfter: blockSpacing(for: .heading, theme: context.theme, layoutHints: block.layoutHints),
-                metadata: block.metadata,
-                context: context
-            )]
-
-        case .list?:
-            let ordered = block.contractAttrBool(for: "ordered") ?? false
-            let startIndex = block.contractAttrInt(for: "startIndex") ?? 1
-            let baseContext = context
-                .enteringList(ordered: ordered)
-                .withListItemIndex(startIndex - 1)
-
-            var nodes: [RenderScene.Node] = []
-            var runningIndex = startIndex - 1
-            for child in block.children {
-                let childContext: Context
-                if child.kind == .listItem {
-                    childContext = baseContext.withListItemIndex(runningIndex)
-                    runningIndex += 1
-                } else {
-                    childContext = baseContext
-                }
-                nodes.append(contentsOf: renderBlock(child, context: childContext))
-            }
-            return nodes
-
-        case .listItem?:
-            let marker: String
-            if context.isOrderedList {
-                marker = "\((context.listItemIndex ?? 0) + 1). "
-            } else {
-                marker = "\(context.theme.list.unorderedSymbol) "
-            }
-
-            var remainingChildren = block.children
-            let textBody: NSAttributedString
-            if !block.inlines.isEmpty {
-                textBody = renderInlines(block.inlines, in: block, context: context)
-            } else if let firstChild = block.children.first, firstChild.kind == .paragraph {
-                let mergedParagraph = renderInlines(firstChild.inlines, in: firstChild, context: context)
-                if mergedParagraph.length > 0 {
-                    textBody = mergedParagraph
-                    remainingChildren.removeFirst()
-                } else {
-                    textBody = NSAttributedString(string: "")
-                }
-            } else {
-                textBody = NSAttributedString(string: "")
-            }
-
-            let markerFont = context.theme.list.orderedNumberFont
-            let markerWidth = (marker as NSString).size(withAttributes: [.font: markerFont]).width
-            let merged = NSMutableAttributedString(
-                string: marker,
-                attributes: [
-                    .font: markerFont,
-                    .foregroundColor: context.theme.list.symbolColor
-                ]
+            let segment = makeMergeTextSegment(
+                sourceBlockID: block.id,
+                kind: "custom",
+                attributedText: styled,
+                spacingAfter: block.layoutHints.spacingAfter.map { CGFloat($0) } ?? context.theme.spacing.paragraph,
+                metadata: block.metadata
             )
-            merged.append(textBody)
+            return [.mergeSegment(segment)]
+        }
 
-            var nodes: [RenderScene.Node] = []
-            if merged.length > 0 {
-                let styled = applyingTextLayout(
-                    to: merged,
-                    lineHeight: context.blockQuoteDepth > 0 ? context.theme.blockQuote.lineHeight : context.theme.body.lineHeight,
-                    letterSpacing: context.theme.body.letterSpacing,
-                    firstLineHeadIndent: context.indent,
-                    headIndent: context.indent + markerWidth
-                )
-                nodes.append(makeContextualTextNode(
-                    id: block.id,
-                    kind: "listItem",
-                    text: styled,
-                    spacingAfter: blockSpacing(for: .listItem, theme: context.theme, layoutHints: block.layoutHints),
-                    metadata: block.metadata,
-                    context: context
+        return try mapBlocks(block.children, context: context)
+    }
+
+    func merge(mappedResults: [MarkdownContract.BlockMappingResult], theme: MarkdownTheme) -> [RenderScene.Node] {
+        var nodes: [RenderScene.Node] = []
+        var buffer: [MarkdownContract.MergeTextSegment] = []
+
+        func flushBuffer() {
+            guard !buffer.isEmpty else { return }
+
+            let id = mergePolicy.mergedNodeID(for: buffer)
+            let kind = mergePolicy.mergedNodeKind(for: buffer)
+            let spacingAfter = mergePolicy.mergedNodeSpacingAfter(for: buffer)
+            var metadata = mergePolicy.mergedNodeMetadata(for: buffer)
+            if metadata["memberBlockIDs"] == nil {
+                metadata["memberBlockIDs"] = .array(buffer.map { .string($0.sourceBlockID) })
+            }
+            if metadata["memberKinds"] == nil {
+                metadata["memberKinds"] = .array(buffer.map { .string($0.kind) })
+            }
+
+            let text = mergedAttributedText(from: buffer)
+            let component = MergedTextSceneComponent(
+                attributedText: text,
+                quoteBarColor: theme.blockQuote.barColor,
+                quoteBarWidth: theme.blockQuote.barWidth,
+                quoteNestingIndent: theme.blockQuote.nestingIndent
+            )
+
+            nodes.append(RenderScene.Node(
+                id: id,
+                kind: kind,
+                component: component,
+                spacingAfter: spacingAfter,
+                metadata: metadata
+            ))
+            buffer.removeAll(keepingCapacity: true)
+        }
+
+        for item in mappedResults {
+            switch item {
+            case let .standalone(standalone):
+                flushBuffer()
+                nodes.append(RenderScene.Node(
+                    id: standalone.id,
+                    kind: standalone.kind,
+                    component: standalone.component,
+                    spacingAfter: standalone.spacingAfter,
+                    metadata: standalone.metadata
                 ))
+
+            case let .mergeSegment(segment):
+                if let previous = buffer.last {
+                    let canMerge = mergePolicy.shouldMerge(previous: previous, next: segment)
+                    if canMerge {
+                        buffer.append(segment)
+                    } else {
+                        flushBuffer()
+                        buffer.append(segment)
+                    }
+                } else {
+                    buffer.append(segment)
+                }
+
+                if mergePolicy.shouldBreak(after: segment) {
+                    flushBuffer()
+                }
             }
+        }
 
-            if !remainingChildren.isEmpty {
-                nodes.append(contentsOf: renderBlocks(remainingChildren, context: context))
+        flushBuffer()
+        return nodes
+    }
+
+    func mergedAttributedText(from segments: [MarkdownContract.MergeTextSegment]) -> NSAttributedString {
+        let merged = NSMutableAttributedString()
+
+        for (index, segment) in segments.enumerated() {
+            let normalized = NSMutableAttributedString(attributedString: segment.attributedText)
+            applyParagraphSpacing(segment.spacingAfter, to: normalized)
+            merged.append(normalized)
+
+            if index < segments.count - 1 {
+                merged.append(NSAttributedString(string: "\n"))
             }
+        }
 
-            return nodes
+        return merged
+    }
 
-        case .blockQuote?:
-            let childContext = context.enteringBlockQuote()
-            let children = renderBlocks(block.children, context: childContext)
-            if children.isEmpty { return [] }
+    func applyParagraphSpacing(_ spacing: CGFloat, to attributed: NSMutableAttributedString) {
+        guard spacing > 0 else { return }
+        let fullRange = NSRange(location: 0, length: attributed.length)
+        guard fullRange.length > 0 else { return }
 
-            return [RenderScene.Node(
-                id: block.id,
-                kind: "blockQuote",
-                component: BlockQuoteContainerSceneComponent(
-                    barColor: context.theme.blockQuote.barColor,
-                    barWidth: context.theme.blockQuote.barWidth,
-                    contentLeadingInset: context.theme.blockQuote.nestingIndent,
-                    contentInsets: .zero,
-                    fillColor: nil
-                ),
-                children: children,
-                spacingAfter: blockSpacing(for: .blockQuote, theme: context.theme, layoutHints: block.layoutHints),
-                metadata: block.metadata
-            )]
-
-        case .codeBlock?:
-            let code = block.contractAttrString(for: "code") ?? block.inlines.map(\.text).joined()
-            let language = block.contractAttrString(for: "language")
-            return [RenderScene.Node(
-                id: block.id,
-                kind: "codeBlock",
-                component: CodeBlockSceneComponent(
-                    code: code,
-                    language: language,
-                    font: context.theme.code.font,
-                    textColor: context.theme.code.block.textColor,
-                    backgroundColor: context.theme.code.block.backgroundColor,
-                    cornerRadius: context.theme.code.block.cornerRadius,
-                    padding: context.theme.code.block.padding,
-                    borderWidth: context.theme.code.block.borderWidth,
-                    borderColor: context.theme.code.block.borderColor
-                ),
-                spacingAfter: blockSpacing(for: .codeBlock, theme: context.theme, layoutHints: block.layoutHints),
-                metadata: block.metadata
-            )]
-
-        case .table?:
-            if let tableComponent = makeTableSceneComponent(block: block, context: context) {
-                return [RenderScene.Node(
-                    id: block.id,
-                    kind: "table",
-                    component: tableComponent,
-                    spacingAfter: blockSpacing(for: .table, theme: context.theme, layoutHints: block.layoutHints),
-                    metadata: block.metadata
-                )]
-            }
-
-            let attributed = renderInlines(block.inlines, in: block, context: context)
-            if attributed.length > 0 {
-                return [makeContextualTextNode(
-                    id: block.id,
-                    kind: "table",
-                    text: attributed,
-                    spacingAfter: blockSpacing(for: .table, theme: context.theme, layoutHints: block.layoutHints),
-                    metadata: block.metadata,
-                    context: context
-                )]
-            }
-            return renderBlocks(block.children, context: context)
-
-        case .thematicBreak?:
-            return [RenderScene.Node(
-                id: block.id,
-                kind: "thematicBreak",
-                component: RuleSceneComponent(
-                    color: context.theme.thematicBreak.color,
-                    height: context.theme.thematicBreak.height,
-                    verticalPadding: context.theme.thematicBreak.verticalPadding
-                ),
-                spacingAfter: blockSpacing(for: .thematicBreak, theme: context.theme, layoutHints: block.layoutHints),
-                metadata: block.metadata
-            )]
-
-        case .image?:
-            let altText = block.contractAttrString(for: "altText") ?? "[image]"
-            let source = block.contractAttrString(for: "source")
-            return [RenderScene.Node(
-                id: block.id,
-                kind: "image",
-                component: ImagePlaceholderSceneComponent(
-                    altText: altText,
-                    source: source,
-                    placeholderColor: context.theme.image.placeholderColor,
-                    cornerRadius: context.theme.image.cornerRadius,
-                    placeholderHeight: context.theme.image.placeholderHeight,
-                    textFont: context.theme.body.font,
-                    textColor: context.theme.body.color
-                ),
-                spacingAfter: blockSpacing(for: .image, theme: context.theme, layoutHints: block.layoutHints),
-                metadata: block.metadata
-            )]
-
-        case .custom?:
-            let attributed = renderInlines(block.inlines, in: block, context: context)
-            if attributed.length > 0 {
-                return [makeContextualTextNode(
-                    id: block.id,
-                    kind: "custom",
-                    text: attributed,
-                    spacingAfter: block.layoutHints.spacingAfter.map { CGFloat($0) } ?? context.theme.spacing.paragraph,
-                    metadata: block.metadata,
-                    context: context
-                )]
-            }
-            return renderBlocks(block.children, context: context)
-
-        default:
-            let attributed = renderInlines(block.inlines, in: block, context: context)
-            if attributed.length > 0 {
-                return [makeContextualTextNode(
-                    id: block.id,
-                    kind: block.kind.rawValue,
-                    text: attributed,
-                    spacingAfter: block.layoutHints.spacingAfter.map { CGFloat($0) } ?? context.theme.spacing.paragraph,
-                    metadata: block.metadata,
-                    context: context
-                )]
-            }
-            return renderBlocks(block.children, context: context)
+        attributed.enumerateAttribute(.paragraphStyle, in: fullRange, options: []) { value, range, _ in
+            let base = (value as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
+            base.paragraphSpacing = max(base.paragraphSpacing, spacing)
+            attributed.addAttribute(.paragraphStyle, value: base, range: range)
         }
     }
 
     func renderHeadingInlines(_ inlines: [MarkdownContract.InlineSpan], level: Int, context: Context) -> NSAttributedString {
-        let attributed = NSMutableAttributedString(attributedString: renderInlines(inlines, in: .init(id: "", kind: .heading), context: context))
+        let headingStyle = InlineBaseStyle(
+            font: context.theme.heading.font(for: level),
+            color: context.theme.heading.color(for: level),
+            letterSpacing: context.theme.body.letterSpacing
+        )
+        let attributed = NSMutableAttributedString(attributedString: renderInlines(
+            inlines,
+            in: .init(id: "", kind: .heading),
+            context: context,
+            baseStyle: headingStyle
+        ))
         guard attributed.length > 0 else { return attributed }
+        let quoteIndent = quoteTextIndent(for: context)
 
         let paragraph = NSMutableParagraphStyle()
         paragraph.minimumLineHeight = context.theme.heading.lineHeight(for: level)
         paragraph.maximumLineHeight = context.theme.heading.lineHeight(for: level)
-        paragraph.firstLineHeadIndent = context.indent
-        paragraph.headIndent = context.indent
+        paragraph.firstLineHeadIndent = context.indent + quoteIndent
+        paragraph.headIndent = context.indent + quoteIndent
         paragraph.paragraphSpacingBefore = context.theme.spacing.headingSpacingBefore(for: level)
 
         attributed.addAttributes([
             .font: context.theme.heading.font(for: level),
             .foregroundColor: context.theme.heading.color(for: level),
+            .xhsBaseForegroundColor: context.theme.heading.color(for: level),
             .paragraphStyle: paragraph,
             .kern: context.theme.body.letterSpacing
         ], range: NSRange(location: 0, length: attributed.length))
+
+        if context.blockQuoteDepth > 0 {
+            attributed.addAttribute(.xhsBlockQuoteDepth, value: context.blockQuoteDepth, range: NSRange(location: 0, length: attributed.length))
+        }
 
         return attributed
     }
@@ -480,17 +915,18 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
     func renderInlines(
         _ inlines: [MarkdownContract.InlineSpan],
         in block: MarkdownContract.RenderBlock,
-        context: Context
+        context: Context,
+        baseStyle: InlineBaseStyle
     ) -> NSAttributedString {
         let merged = NSMutableAttributedString()
 
         for span in inlines {
             if let custom = renderInlineOverride(span, block: block, context: context) {
-                merged.append(custom)
+                merged.append(annotateBaseForegroundColor(in: custom, fallback: context.theme.body.color))
                 continue
             }
 
-            merged.append(defaultInline(span, block: block, context: context))
+            merged.append(defaultInline(span, block: block, context: context, baseStyle: baseStyle))
         }
 
         return merged
@@ -512,22 +948,22 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
     func defaultInline(
         _ span: MarkdownContract.InlineSpan,
         block: MarkdownContract.RenderBlock,
-        context: Context
+        context: Context,
+        baseStyle: InlineBaseStyle
     ) -> NSAttributedString {
-        let blockQuoteDepth = context.blockQuoteDepth
-        let baseColor = blockQuoteDepth > 0 ? context.theme.blockQuote.textColor : context.theme.body.color
-        let baseFont = blockQuoteDepth > 0 ? context.theme.blockQuote.font : context.theme.body.font
-        var baseAttributes: [NSAttributedString.Key: Any] = [
-            .font: baseFont,
-            .foregroundColor: baseColor
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: baseStyle.font,
+            .foregroundColor: baseStyle.color,
+            .xhsBaseForegroundColor: baseStyle.color
         ]
 
-        if context.theme.body.letterSpacing != 0 {
-            baseAttributes[.kern] = context.theme.body.letterSpacing
+        if baseStyle.letterSpacing != 0 {
+            attributes[.kern] = baseStyle.letterSpacing
         }
 
+        let coreKind = span.kind.coreKind
         let text: String
-        switch span.kind.coreKind {
+        switch coreKind {
         case .softBreak?:
             text = "\n"
         case .hardBreak?:
@@ -538,15 +974,10 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
             text = span.text
         }
 
-        var attributes = baseAttributes
-
-        for mark in span.marks {
-            apply(mark: mark, to: &attributes, span: span, block: block, context: context)
-        }
-
         if span.kind == .inlineCode {
             attributes[.font] = context.theme.code.font
             attributes[.foregroundColor] = context.theme.code.inlineColor
+            attributes[.xhsBaseForegroundColor] = context.theme.code.inlineColor
             if let background = context.theme.code.inlineBackgroundColor {
                 attributes[.backgroundColor] = background
             }
@@ -557,9 +988,14 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
                 attributes[.link] = destination
             }
             attributes[.foregroundColor] = context.theme.link.color
+            attributes[.xhsBaseForegroundColor] = context.theme.link.color
             if context.theme.link.underlineStyle != [] {
                 attributes[.underlineStyle] = context.theme.link.underlineStyle.rawValue
             }
+        }
+
+        for mark in span.marks {
+            apply(mark: mark, to: &attributes, block: block, context: context)
         }
 
         return NSAttributedString(string: text, attributes: attributes)
@@ -568,27 +1004,45 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
     func apply(
         mark: MarkdownContract.MarkToken,
         to attributes: inout [NSAttributedString.Key: Any],
-        span: MarkdownContract.InlineSpan,
         block: MarkdownContract.RenderBlock,
         context: Context
     ) {
-        switch mark.name {
-        case "strong", "bold":
+        if mark.name == "strong" || mark.name == "bold" {
             if let font = attributes[.font] as? UIFont {
                 attributes[.font] = font.bold
             }
-        case "emphasis", "italic":
+            return
+        }
+
+        if mark.name == "emphasis" || mark.name == "italic" {
             if let font = attributes[.font] as? UIFont {
                 attributes[.font] = font.italic
             }
-        case "strikethrough":
+            return
+        }
+
+        if mark.name == "strikethrough" {
             attributes[.strikethroughStyle] = context.theme.strikethrough.style.rawValue
             if let color = context.theme.strikethrough.color {
                 attributes[.strikethroughColor] = color
             }
-        default:
-            customMarkAttributeResolver?(mark, &attributes, block, context)
+            return
         }
+
+        if mark.name == "link" {
+            if case let .object(attrs)? = mark.value,
+               case let .string(destination)? = attrs["destination"] {
+                attributes[.link] = destination
+            }
+            attributes[.foregroundColor] = context.theme.link.color
+            attributes[.xhsBaseForegroundColor] = context.theme.link.color
+            if context.theme.link.underlineStyle != [] {
+                attributes[.underlineStyle] = context.theme.link.underlineStyle.rawValue
+            }
+            return
+        }
+
+        customMarkAttributeResolver?(mark, &attributes, block, context)
     }
 
     func blockSpacing(for kind: MarkdownContract.BlockKind, theme: MarkdownTheme, layoutHints: MarkdownContract.LayoutHints) -> CGFloat {
@@ -596,116 +1050,20 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
             return CGFloat(explicit)
         }
 
-        switch kind.coreKind {
-        case .heading?:
+        let coreKind = kind.coreKind
+        if coreKind == .heading {
             return theme.spacing.headingAfter
-        case .listItem?:
+        }
+        if coreKind == .listItem {
             return theme.spacing.listItem
-        case .blockQuote?:
+        }
+        if coreKind == .blockQuote {
             return theme.spacing.blockQuoteOther
-        case .thematicBreak?:
+        }
+        if coreKind == .thematicBreak {
             return 0
-        default:
-            return theme.spacing.paragraph
         }
-    }
-
-    func makeTableSceneComponent(
-        block: MarkdownContract.RenderBlock,
-        context: Context
-    ) -> TableSceneComponent? {
-        guard let attrs = block.contractAttrs else {
-            return nil
-        }
-
-        guard let headers = attrs["headers"]?.arrayStringValues, !headers.isEmpty else {
-            return nil
-        }
-
-        let rows = attrs["rows"]?.arrayOfArrayStringValues ?? []
-        let alignmentValues = attrs["alignments"]?.arrayOptionalStringValues
-            ?? attrs["columnAlignments"]?.arrayOptionalStringValues
-            ?? []
-
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.minimumLineHeight = context.theme.body.lineHeight
-        paragraph.maximumLineHeight = context.theme.body.lineHeight
-        paragraph.lineBreakMode = .byWordWrapping
-
-        let headerAttributes: [NSAttributedString.Key: Any] = [
-            .font: context.theme.table.headerFont,
-            .foregroundColor: context.theme.table.textColor,
-            .paragraphStyle: paragraph
-        ]
-
-        let cellAttributes: [NSAttributedString.Key: Any] = [
-            .font: context.theme.table.font,
-            .foregroundColor: context.theme.table.textColor,
-            .paragraphStyle: paragraph
-        ]
-
-        let headerText = headers.map {
-            NSAttributedString(string: $0, attributes: headerAttributes)
-        }
-        let rowText = rows.map { row in
-            row.map { NSAttributedString(string: $0, attributes: cellAttributes) }
-        }
-
-        return TableSceneComponent(
-            headers: headerText,
-            rows: rowText,
-            alignments: normalizedTableAlignments(values: alignmentValues, columnCount: headerText.count),
-            headerBackgroundColor: context.theme.table.headerBackgroundColor,
-            borderColor: context.theme.table.borderColor,
-            cornerRadius: context.theme.table.cornerRadius,
-            cellPadding: context.theme.table.cellPadding
-        )
-    }
-
-    func normalizedTableAlignments(
-        values: [String?],
-        columnCount: Int
-    ) -> [TableSceneComponent.ColumnAlignment] {
-        guard columnCount > 0 else {
-            return []
-        }
-
-        var alignments = values.map { raw -> TableSceneComponent.ColumnAlignment in
-            guard let raw else { return .left }
-            switch raw.lowercased() {
-            case "center":
-                return .center
-            case "right":
-                return .right
-            default:
-                return .left
-            }
-        }
-
-        if alignments.count < columnCount {
-            alignments.append(contentsOf: Array(repeating: .left, count: columnCount - alignments.count))
-        } else if alignments.count > columnCount {
-            alignments = Array(alignments.prefix(columnCount))
-        }
-        return alignments
-    }
-
-    func makeContextualTextNode(
-        id: String,
-        kind: String,
-        text: NSAttributedString,
-        spacingAfter: CGFloat,
-        metadata: [String: MarkdownContract.Value],
-        context: Context
-    ) -> RenderScene.Node {
-        _ = context
-        return makeTextNode(
-            id: id,
-            kind: kind,
-            text: text,
-            spacingAfter: spacingAfter,
-            metadata: metadata
-        )
+        return theme.spacing.paragraph
     }
 
     func applyingTextLayout(
@@ -713,7 +1071,8 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
         lineHeight: CGFloat,
         letterSpacing: CGFloat,
         firstLineHeadIndent: CGFloat,
-        headIndent: CGFloat
+        headIndent: CGFloat,
+        blockQuoteDepth: Int
     ) -> NSAttributedString {
         let styled = NSMutableAttributedString(attributedString: attributed)
         let fullRange = NSRange(location: 0, length: styled.length)
@@ -729,7 +1088,207 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
         if letterSpacing != 0 {
             styled.addAttribute(.kern, value: letterSpacing, range: fullRange)
         }
-        return styled
+
+        if blockQuoteDepth > 0 {
+            styled.addAttribute(.xhsBlockQuoteDepth, value: blockQuoteDepth, range: fullRange)
+        }
+
+        return annotateBaseForegroundColor(in: styled, fallback: .label)
+    }
+
+    func annotateBaseForegroundColor(in attributed: NSAttributedString, fallback: UIColor) -> NSAttributedString {
+        let mutable = NSMutableAttributedString(attributedString: attributed)
+        let range = NSRange(location: 0, length: mutable.length)
+        guard range.length > 0 else { return mutable }
+
+        mutable.enumerateAttribute(.foregroundColor, in: range, options: []) { value, subrange, _ in
+            let color = (value as? UIColor) ?? fallback
+            mutable.addAttribute(.foregroundColor, value: color, range: subrange)
+            mutable.addAttribute(.xhsBaseForegroundColor, value: color, range: subrange)
+        }
+
+        return mutable
+    }
+
+    func makeTableSceneComponent(
+        block: MarkdownContract.RenderBlock,
+        context: Context
+    ) throws -> TableSceneComponent {
+        guard let headBlock = block.children.first(where: { $0.kind.coreKind == .tableHead }) else {
+            throw MarkdownContract.ModelError(
+                code: .schemaInvalid,
+                message: "Table block requires tableHead child",
+                path: "RenderModelUIKitAdapter.block[\(block.id)]"
+            )
+        }
+        guard let bodyBlock = block.children.first(where: { $0.kind.coreKind == .tableBody }) else {
+            throw MarkdownContract.ModelError(
+                code: .schemaInvalid,
+                message: "Table block requires tableBody child",
+                path: "RenderModelUIKitAdapter.block[\(block.id)]"
+            )
+        }
+        let headerRows = tableRows(in: headBlock)
+        guard let firstHeaderRow = headerRows.first, !firstHeaderRow.isEmpty else {
+            throw MarkdownContract.ModelError(
+                code: .schemaInvalid,
+                message: "tableHead requires at least one tableCell",
+                path: "RenderModelUIKitAdapter.block[\(block.id)]"
+            )
+        }
+        let bodyRows = tableRows(in: bodyBlock)
+        let headerText = firstHeaderRow.map { cell in
+            renderTableCellText(cell: cell, isHeader: true, context: context)
+        }
+
+        let rowText = bodyRows.map { row in
+            let rendered = row.map { cell in
+                renderTableCellText(cell: cell, isHeader: false, context: context)
+            }
+            return normalizedRow(rendered, targetColumnCount: headerText.count)
+        }
+
+        let attrs = block.contractAttrs ?? [:]
+        let alignmentValues = attrs["alignments"]?.arrayOptionalStringValues
+            ?? attrs["columnAlignments"]?.arrayOptionalStringValues
+            ?? []
+
+        return TableSceneComponent(
+            headers: headerText,
+            rows: rowText,
+            alignments: normalizedTableAlignments(values: alignmentValues, columnCount: headerText.count),
+            headerBackgroundColor: context.theme.table.headerBackgroundColor,
+            borderColor: context.theme.table.borderColor,
+            cornerRadius: context.theme.table.cornerRadius,
+            cellPadding: context.theme.table.cellPadding
+        )
+    }
+
+    func renderTableCellText(
+        cell: MarkdownContract.RenderBlock,
+        isHeader: Bool,
+        context: Context
+    ) -> NSAttributedString {
+        let cellInlines = tableCellInlines(from: cell)
+        let rendered = renderInlines(
+            cellInlines,
+            in: cell,
+            context: context,
+            baseStyle: tableInlineBaseStyle(context: context, isHeader: isHeader)
+        )
+
+        guard rendered.length > 0 else {
+            return NSAttributedString(string: "")
+        }
+
+        let mutable = NSMutableAttributedString(attributedString: rendered)
+        let fullRange = NSRange(location: 0, length: mutable.length)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.minimumLineHeight = context.theme.body.lineHeight
+        paragraph.maximumLineHeight = context.theme.body.lineHeight
+        paragraph.lineBreakMode = .byWordWrapping
+        mutable.addAttribute(.paragraphStyle, value: paragraph, range: fullRange)
+        return mutable
+    }
+
+    func tableCellInlines(from cell: MarkdownContract.RenderBlock) -> [MarkdownContract.InlineSpan] {
+        if !cell.inlines.isEmpty {
+            return cell.inlines
+        }
+
+        var merged: [MarkdownContract.InlineSpan] = []
+        let paragraphChildren = cell.children.filter { $0.kind.coreKind == .paragraph }
+        for (index, paragraph) in paragraphChildren.enumerated() {
+            merged.append(contentsOf: paragraph.inlines)
+            if index < paragraphChildren.count - 1 {
+                merged.append(.init(
+                    id: "\(cell.id).softBreak.\(index)",
+                    kind: .softBreak,
+                    text: "\n"
+                ))
+            }
+        }
+        return merged
+    }
+
+    func tableRows(in section: MarkdownContract.RenderBlock) -> [[MarkdownContract.RenderBlock]] {
+        let rowBlocks = section.children.filter { $0.kind.coreKind == .tableRow }
+        if !rowBlocks.isEmpty {
+            return rowBlocks.map { row in
+                row.children.filter { $0.kind.coreKind == .tableCell }
+            }
+        }
+
+        let directCells = section.children.filter { $0.kind.coreKind == .tableCell }
+        if !directCells.isEmpty {
+            return [directCells]
+        }
+
+        return []
+    }
+
+    func normalizedRow(_ row: [NSAttributedString], targetColumnCount: Int) -> [NSAttributedString] {
+        guard targetColumnCount > 0 else { return [] }
+        if row.count == targetColumnCount {
+            return row
+        }
+        if row.count > targetColumnCount {
+            return Array(row.prefix(targetColumnCount))
+        }
+        var padded = row
+        padded.append(contentsOf: Array(repeating: NSAttributedString(string: ""), count: targetColumnCount - row.count))
+        return padded
+    }
+
+    func quoteTextIndent(for context: Context) -> CGFloat {
+        guard context.blockQuoteDepth > 0 else { return 0 }
+        let style = context.theme.blockQuote
+        let levelOffset = CGFloat(max(0, context.blockQuoteDepth - 1)) * style.nestingIndent
+        return levelOffset + max(1, style.barWidth) + max(0, style.barLeftMargin)
+    }
+
+    func defaultInlineBaseStyle(context: Context) -> InlineBaseStyle {
+        let inQuote = context.blockQuoteDepth > 0
+        return InlineBaseStyle(
+            font: inQuote ? context.theme.blockQuote.font : context.theme.body.font,
+            color: inQuote ? context.theme.blockQuote.textColor : context.theme.body.color,
+            letterSpacing: context.theme.body.letterSpacing
+        )
+    }
+
+    func tableInlineBaseStyle(context: Context, isHeader: Bool) -> InlineBaseStyle {
+        InlineBaseStyle(
+            font: isHeader ? context.theme.table.headerFont : context.theme.table.font,
+            color: context.theme.table.textColor,
+            letterSpacing: 0
+        )
+    }
+
+    func normalizedTableAlignments(
+        values: [String?],
+        columnCount: Int
+    ) -> [TableSceneComponent.ColumnAlignment] {
+        guard columnCount > 0 else {
+            return []
+        }
+
+        var alignments = values.map { raw -> TableSceneComponent.ColumnAlignment in
+            guard let raw else { return .left }
+            if raw.lowercased() == "center" {
+                return .center
+            }
+            if raw.lowercased() == "right" {
+                return .right
+            }
+            return .left
+        }
+
+        if alignments.count < columnCount {
+            alignments.append(contentsOf: Array(repeating: .left, count: columnCount - alignments.count))
+        } else if alignments.count > columnCount {
+            alignments = Array(alignments.prefix(columnCount))
+        }
+        return alignments
     }
 
     func candidateKeys(for block: MarkdownContract.RenderBlock) -> [String] {

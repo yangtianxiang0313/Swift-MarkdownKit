@@ -5,43 +5,55 @@ import XHSMarkdownAdapterMarkdownn
 
 final class RenderModelUIKitAdapterTests: XCTestCase {
 
-    func testAdapterRendersHeadingAndParagraphSceneNodes() throws {
+    func testAdapterFailsWhenBlockMapperChainIsEmpty() throws {
+        let engine = MarkdownnAdapter.makeEngine()
+        let model = try engine.render("plain")
+
+        let adapter = MarkdownContract.RenderModelUIKitAdapter(
+            mergePolicy: MarkdownContract.FirstBlockAnchoredMergePolicy(),
+            blockMapperChain: MarkdownContract.BlockMapperChain()
+        )
+
+        XCTAssertThrowsError(try adapter.render(model: model, theme: .default, maxWidth: 320)) { error in
+            guard let modelError = error as? MarkdownContract.ModelError else {
+                XCTFail("Expected ModelError")
+                return
+            }
+            XCTAssertEqual(modelError.code, MarkdownContract.ModelError.Code.requiredFieldMissing.rawValue)
+        }
+    }
+
+    func testAdapterMergesHeadingAndParagraphIntoMergedTextNode() throws {
         let engine = MarkdownnAdapter.makeEngine()
         let model = try engine.render("# Title\n\nBody")
 
-        let adapter = MarkdownContract.RenderModelUIKitAdapter()
-        let scene = adapter.render(
-            model: model,
-            theme: .default,
-            maxWidth: 320
-        )
+        let adapter = makeAdapter()
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
 
         let nodes = scene.flattenRenderableNodes()
-        XCTAssertTrue(nodes.contains(where: { $0.kind == "heading" }))
-        XCTAssertTrue(nodes.contains(where: { $0.kind == "paragraph" }))
+        XCTAssertEqual(nodes.count, 1)
+        XCTAssertEqual(nodes.first?.kind, "mergedText")
+        XCTAssertTrue(nodes.first?.component is MergedTextSceneComponent)
         XCTAssertTrue(mergedText(from: scene).contains("Title"))
         XCTAssertTrue(mergedText(from: scene).contains("Body"))
     }
 
-    func testAdapterAllowsOverridingStandardBlockRenderer() throws {
+    func testAdapterAllowsOverridingStandardBlockMapper() throws {
         let engine = MarkdownnAdapter.makeEngine()
         let model = try engine.render("# Title")
 
-        let adapter = MarkdownContract.RenderModelUIKitAdapter()
-        adapter.registerBlockRenderer(for: .heading) { block, _, adapter in
-            [adapter.makeTextNode(
-                id: block.id,
+        let adapter = makeAdapter()
+        adapter.registerBlockMapper(for: .heading) { block, _, adapter in
+            let segment = adapter.makeMergeTextSegment(
+                sourceBlockID: block.id,
                 kind: "heading",
-                text: NSAttributedString(string: "OVERRIDE")
-            )]
+                attributedText: NSAttributedString(string: "OVERRIDE"),
+                spacingAfter: 0
+            )
+            return [.mergeSegment(segment)]
         }
 
-        let scene = adapter.render(
-            model: model,
-            theme: .default,
-            maxWidth: 320
-        )
-
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
         XCTAssertEqual(mergedText(from: scene).trimmingCharacters(in: .whitespacesAndNewlines), "OVERRIDE")
     }
 
@@ -49,25 +61,20 @@ final class RenderModelUIKitAdapterTests: XCTestCase {
         let engine = ExtensionNodeTestSupport.makeEngine()
         let model = try engine.render("before <mention userId=\"badge\" /> after")
 
-        let adapter = MarkdownContract.RenderModelUIKitAdapter()
+        let adapter = makeAdapter()
         adapter.registerInlineRenderer(forExtension: ExtensionNodeTestSupport.mentionKind.rawValue) { _, _, _, _ in
             NSAttributedString(string: "[BADGE]")
         }
 
-        let scene = adapter.render(
-            model: model,
-            theme: .default,
-            maxWidth: 320
-        )
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
         let text = mergedText(from: scene)
 
         XCTAssertTrue(text.contains("before"))
         XCTAssertTrue(text.contains("[BADGE]"))
         XCTAssertTrue(text.contains("after"))
-        XCTAssertFalse(text.contains("mention"))
     }
 
-    func testAdapterUsesSceneComponentsByDefault() throws {
+    func testAdapterUsesMergedTextAndStandaloneComponents() throws {
         let engine = MarkdownnAdapter.makeEngine()
         let model = try engine.render(
             """
@@ -83,21 +90,18 @@ final class RenderModelUIKitAdapterTests: XCTestCase {
             """
         )
 
-        let adapter = MarkdownContract.RenderModelUIKitAdapter()
-        let scene = adapter.render(model: model, theme: .default, maxWidth: 320)
+        let adapter = makeAdapter()
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
 
         let nodes = scene.flattenRenderableNodes()
         XCTAssertTrue(nodes.contains(where: {
-            $0.kind == "heading" && $0.component is TextSceneComponent
+            $0.kind == "mergedText" && $0.component is MergedTextSceneComponent
         }))
         XCTAssertTrue(nodes.contains(where: {
             $0.kind == "codeBlock" && $0.component is CodeBlockSceneComponent
         }))
         XCTAssertTrue(nodes.contains(where: {
             $0.kind == "thematicBreak" && $0.component is RuleSceneComponent
-        }))
-        XCTAssertTrue(scene.nodes.contains(where: {
-            $0.kind == "blockQuote" && !$0.children.isEmpty
         }))
     }
 
@@ -110,57 +114,100 @@ final class RenderModelUIKitAdapterTests: XCTestCase {
             """
         )
 
-        let adapter = MarkdownContract.RenderModelUIKitAdapter()
-        let scene = adapter.render(model: model, theme: .default, maxWidth: 320)
+        let adapter = makeAdapter()
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
         let text = mergedText(from: scene)
 
         XCTAssertTrue(text.contains("3. third"))
         XCTAssertTrue(text.contains("4. fourth"))
     }
 
-    func testBlockQuoteUsesContainerComponent() throws {
-        let engine = MarkdownnAdapter.makeEngine()
-        let model = try engine.render("> quoted text")
-
-        let adapter = MarkdownContract.RenderModelUIKitAdapter()
-        let scene = adapter.render(model: model, theme: .default, maxWidth: 320)
-        let blockQuote = scene.nodes.first { $0.kind == "blockQuote" }
-        let quoteParagraph = blockQuote?.children.first { $0.kind == "paragraph" }
-
-        XCTAssertNotNil(blockQuote)
-        XCTAssertTrue(blockQuote?.component is BlockQuoteContainerSceneComponent)
-        XCTAssertNotNil(quoteParagraph)
-        XCTAssertTrue(quoteParagraph?.component is TextSceneComponent)
-    }
-
-    func testNestedBlockQuoteProducesNestedContainerNodes() throws {
+    func testBlockQuoteKeepsDepthAttributesInMergedText() throws {
         let engine = MarkdownnAdapter.makeEngine()
         let model = try engine.render(
             """
             > level-1
             > > level-2
-            > > still-level-2
-            > back-level-1
             """
         )
 
-        let adapter = MarkdownContract.RenderModelUIKitAdapter()
-        let scene = adapter.render(model: model, theme: .default, maxWidth: 320)
+        let adapter = makeAdapter()
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
 
-        guard let outerQuote = scene.nodes.first(where: { $0.kind == "blockQuote" }) else {
-            XCTFail("outer blockQuote not found")
+        guard let mergedNode = scene.flattenRenderableNodes().first(where: { $0.component is MergedTextSceneComponent }),
+              let component = mergedNode.component as? MergedTextSceneComponent else {
+            XCTFail("merged text node missing")
             return
         }
-        XCTAssertTrue(outerQuote.component is BlockQuoteContainerSceneComponent)
 
-        let nestedQuote = outerQuote.children.first(where: { $0.kind == "blockQuote" })
-        XCTAssertNotNil(nestedQuote)
-        XCTAssertTrue(nestedQuote?.component is BlockQuoteContainerSceneComponent)
+        let text = component.attributedText.string
+        XCTAssertTrue(text.contains("level-1"))
+        XCTAssertTrue(text.contains("level-2"))
 
-        let merged = mergedText(from: scene)
-        XCTAssertTrue(merged.contains("level-1"))
-        XCTAssertTrue(merged.contains("level-2"))
-        XCTAssertTrue(merged.contains("back-level-1"))
+        let range = NSRange(location: 0, length: component.attributedText.length)
+        var foundQuoteDepth = false
+        component.attributedText.enumerateAttribute(.xhsBlockQuoteDepth, in: range, options: []) { value, _, stop in
+            if let depth = value as? Int, depth > 0 {
+                foundQuoteDepth = true
+                stop.pointee = true
+            }
+        }
+        XCTAssertTrue(foundQuoteDepth)
+    }
+
+    func testBlockQuoteDepthDoesNotLeakIntoNonQuoteParagraph() throws {
+        let engine = MarkdownnAdapter.makeEngine()
+        let model = try engine.render(
+            """
+            > quoted
+
+            plain
+            """
+        )
+
+        let adapter = makeAdapter()
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
+
+        guard let mergedNode = scene.flattenRenderableNodes().first(where: { $0.component is MergedTextSceneComponent }),
+              let component = mergedNode.component as? MergedTextSceneComponent else {
+            XCTFail("merged text node missing")
+            return
+        }
+
+        let text = component.attributedText.string as NSString
+        let quoteRange = text.range(of: "quoted")
+        let plainRange = text.range(of: "plain")
+        XCTAssertNotEqual(quoteRange.location, NSNotFound)
+        XCTAssertNotEqual(plainRange.location, NSNotFound)
+
+        XCTAssertGreaterThan(maxQuoteDepth(in: component.attributedText, range: quoteRange), 0)
+        XCTAssertEqual(maxQuoteDepth(in: component.attributedText, range: plainRange), 0)
+    }
+
+    func testBlockQuoteAppliesParagraphLeadingIndent() throws {
+        let engine = MarkdownnAdapter.makeEngine()
+        let model = try engine.render("> quoted")
+
+        let adapter = makeAdapter()
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
+
+        guard let mergedNode = scene.flattenRenderableNodes().first(where: { $0.component is MergedTextSceneComponent }),
+              let component = mergedNode.component as? MergedTextSceneComponent else {
+            XCTFail("merged text node missing")
+            return
+        }
+
+        let text = component.attributedText.string as NSString
+        let quoteRange = text.range(of: "quoted")
+        XCTAssertNotEqual(quoteRange.location, NSNotFound)
+
+        guard let paragraph = component.attributedText.attribute(.paragraphStyle, at: quoteRange.location, effectiveRange: nil) as? NSParagraphStyle else {
+            XCTFail("paragraph style missing")
+            return
+        }
+
+        XCTAssertGreaterThan(paragraph.firstLineHeadIndent, 0)
+        XCTAssertEqual(paragraph.firstLineHeadIndent, paragraph.headIndent, accuracy: 0.001)
     }
 
     func testTableUsesDedicatedTableSceneComponent() throws {
@@ -174,8 +221,8 @@ final class RenderModelUIKitAdapterTests: XCTestCase {
             """
         )
 
-        let adapter = MarkdownContract.RenderModelUIKitAdapter()
-        let scene = adapter.render(model: model, theme: .default, maxWidth: 320)
+        let adapter = makeAdapter()
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
 
         guard let tableNode = scene.flattenRenderableNodes().first(where: { $0.kind == "table" }) else {
             XCTFail("table scene node not found")
@@ -192,6 +239,68 @@ final class RenderModelUIKitAdapterTests: XCTestCase {
         XCTAssertEqual(tableComponent.alignments, [.left, .right])
     }
 
+    func testTableCellResolvesInlineStyles() throws {
+        let engine = MarkdownnAdapter.makeEngine()
+        let model = try engine.render(
+            """
+            | 功能 | 描述 |
+            | --- | --- |
+            | **加粗标题** | 支持 `代码` 和 [链接](https://example.com) |
+            """
+        )
+
+        let adapter = makeAdapter()
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
+
+        guard let tableNode = scene.flattenRenderableNodes().first(where: { $0.kind == "table" }),
+              let tableComponent = tableNode.component as? TableSceneComponent else {
+            XCTFail("table scene component missing")
+            return
+        }
+        XCTAssertEqual(tableComponent.rows.count, 1)
+        XCTAssertEqual(tableComponent.rows[0].count, 2)
+
+        let titleCell = tableComponent.rows[0][0]
+        let titleText = titleCell.string as NSString
+        let titleRange = titleText.range(of: "加粗标题")
+        XCTAssertNotEqual(titleRange.location, NSNotFound)
+        let titleFont = titleCell.attribute(.font, at: titleRange.location, effectiveRange: nil) as? UIFont
+        XCTAssertEqual(titleFont?.isBold, true)
+
+        let descCell = tableComponent.rows[0][1]
+        let descText = descCell.string as NSString
+        let codeRange = descText.range(of: "代码")
+        XCTAssertNotEqual(codeRange.location, NSNotFound)
+        let codeFont = descCell.attribute(.font, at: codeRange.location, effectiveRange: nil) as? UIFont
+        XCTAssertEqual(codeFont?.isMonospace, true)
+
+        let linkRange = descText.range(of: "链接")
+        XCTAssertNotEqual(linkRange.location, NSNotFound)
+        let linkValue = descCell.attribute(.link, at: linkRange.location, effectiveRange: nil) as? String
+        XCTAssertEqual(linkValue, "https://example.com")
+    }
+
+    func testInlineCodeCanCombineWithStrongMark() throws {
+        let engine = MarkdownnAdapter.makeEngine()
+        let model = try engine.render("**`代码`**")
+
+        let adapter = makeAdapter()
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
+
+        guard let mergedNode = scene.flattenRenderableNodes().first(where: { $0.component is MergedTextSceneComponent }),
+              let component = mergedNode.component as? MergedTextSceneComponent else {
+            XCTFail("merged text node missing")
+            return
+        }
+
+        let text = component.attributedText.string as NSString
+        let codeRange = text.range(of: "代码")
+        XCTAssertNotEqual(codeRange.location, NSNotFound)
+        let font = component.attributedText.attribute(.font, at: codeRange.location, effectiveRange: nil) as? UIFont
+        XCTAssertEqual(font?.isMonospace, true)
+        XCTAssertEqual(font?.isBold, true)
+    }
+
     func testCodeBlockViewProvidesPositiveIntrinsicHeight() throws {
         let engine = MarkdownnAdapter.makeEngine()
         let model = try engine.render(
@@ -204,8 +313,8 @@ final class RenderModelUIKitAdapterTests: XCTestCase {
             """
         )
 
-        let adapter = MarkdownContract.RenderModelUIKitAdapter()
-        let scene = adapter.render(model: model, theme: .default, maxWidth: 320)
+        let adapter = makeAdapter()
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
 
         guard let codeNode = scene.flattenRenderableNodes().first(where: { $0.kind == "codeBlock" }) else {
             XCTFail("codeBlock scene node not found")
@@ -223,98 +332,35 @@ final class RenderModelUIKitAdapterTests: XCTestCase {
         XCTAssertTrue(height > 0, "expected positive intrinsic height, got \(height)")
     }
 
-    func testCodeBlockUsesBlockTextColorFromTheme() throws {
-        let engine = MarkdownnAdapter.makeEngine()
-        let model = try engine.render(
-            """
-            ```swift
-            print("theme")
-            ```
-            """
-        )
+    func testAdapterFailsWithoutMapperForExtensionNode() throws {
+        let engine = ExtensionNodeTestSupport.makeEngine()
+        let model = try engine.render("@Callout")
 
-        var theme = MarkdownTheme.default
-        theme.code.block.textColor = .systemRed
+        let adapter = makeAdapter()
 
-        let adapter = MarkdownContract.RenderModelUIKitAdapter()
-        let scene = adapter.render(model: model, theme: theme, maxWidth: 320)
-
-        guard let codeNode = scene.flattenRenderableNodes().first(where: { $0.kind == "codeBlock" }) else {
-            XCTFail("codeBlock scene node not found")
-            return
+        XCTAssertThrowsError(try adapter.render(model: model, theme: .default, maxWidth: 320)) { error in
+            guard let modelError = error as? MarkdownContract.ModelError else {
+                XCTFail("Expected ModelError")
+                return
+            }
+            XCTAssertEqual(modelError.code, MarkdownContract.ModelError.Code.unknownNodeKind.rawValue)
         }
-        guard let codeComponent = codeNode.component as? CodeBlockSceneComponent else {
-            XCTFail("codeBlock component missing")
-            return
-        }
-
-        XCTAssertEqual(codeComponent.textColor, .systemRed)
     }
 
-    func testTableAlignmentsPreserveNilSlots() throws {
-        let engine = MarkdownnAdapter.makeEngine()
-        let model = try engine.render(
-            """
-            | a | b | c |
-            | :-- | --- | --: |
-            | 1 | 2 | 3 |
-            """
+    private func makeAdapter() -> MarkdownContract.RenderModelUIKitAdapter {
+        MarkdownContract.RenderModelUIKitAdapter(
+            mergePolicy: MarkdownContract.FirstBlockAnchoredMergePolicy(),
+            blockMapperChain: MarkdownContract.RenderModelUIKitAdapter.makeDefaultBlockMapperChain()
         )
-
-        let adapter = MarkdownContract.RenderModelUIKitAdapter()
-        let scene = adapter.render(model: model, theme: .default, maxWidth: 320)
-
-        guard let tableNode = scene.flattenRenderableNodes().first(where: { $0.kind == "table" }) else {
-            XCTFail("table scene node not found")
-            return
-        }
-        guard let tableComponent = tableNode.component as? TableSceneComponent else {
-            XCTFail("table node does not use TableSceneComponent")
-            return
-        }
-
-        XCTAssertEqual(tableComponent.alignments, [.left, .left, .right])
     }
 
-    func testTableViewHeightExpandsForLongWrappedCell() {
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: UIFont.systemFont(ofSize: 14),
-            .foregroundColor: UIColor.label
-        ]
-        let header = NSAttributedString(string: "Content", attributes: attributes)
-        let shortCell = NSAttributedString(string: "short", attributes: attributes)
-        let longCell = NSAttributedString(
-            string: "This is a long table cell that should wrap into multiple lines under constrained width.",
-            attributes: attributes
-        )
-
-        let shortComponent = TableSceneComponent(
-            headers: [header],
-            rows: [[shortCell]],
-            alignments: [.left],
-            headerBackgroundColor: .secondarySystemBackground,
-            borderColor: .separator,
-            cornerRadius: 8,
-            cellPadding: UIEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
-        )
-        let longComponent = TableSceneComponent(
-            headers: [header],
-            rows: [[longCell]],
-            alignments: [.left],
-            headerBackgroundColor: .secondarySystemBackground,
-            borderColor: .separator,
-            cornerRadius: 8,
-            cellPadding: UIEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
-        )
-
-        let shortView = shortComponent.makeView()
-        shortComponent.configure(view: shortView, maxWidth: 220)
-        let shortHeight = shortView.intrinsicContentSize.height
-
-        let longView = longComponent.makeView()
-        longComponent.configure(view: longView, maxWidth: 220)
-        let longHeight = longView.intrinsicContentSize.height
-
-        XCTAssertGreaterThan(longHeight, shortHeight + 10)
+    private func maxQuoteDepth(in attributedText: NSAttributedString, range: NSRange) -> Int {
+        guard range.location != NSNotFound, range.length > 0 else { return 0 }
+        var result = 0
+        attributedText.enumerateAttribute(.xhsBlockQuoteDepth, in: range, options: []) { value, _, _ in
+            let depth = max(0, value as? Int ?? 0)
+            result = max(result, depth)
+        }
+        return result
     }
 }

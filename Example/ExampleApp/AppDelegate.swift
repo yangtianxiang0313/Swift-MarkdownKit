@@ -41,11 +41,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // 流式渲染演示页面
         let streamingVC = StreamingDemoViewController()
         streamingVC.tabBarItem = UITabBarItem(
-            title: "流式",
+            title: "流式+动画",
             image: UIImage(systemName: "play.circle"),
             selectedImage: UIImage(systemName: "play.circle.fill")
         )
-        
+
         tabBarController.viewControllers = [
             UINavigationController(rootViewController: previewVC),
             UINavigationController(rootViewController: themeVC),

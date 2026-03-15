@@ -7,8 +7,10 @@ func mergedText(from scene: RenderScene) -> String {
 
 func mergedText(from nodes: [RenderScene.Node]) -> String {
     nodes.compactMap { node in
-        guard let text = node.component as? TextSceneComponent else { return nil }
-        return text.attributedText.string
+        if let text = node.component as? MergedTextSceneComponent {
+            return text.attributedText.string
+        }
+        return nil
     }
     .joined(separator: "\n")
 }

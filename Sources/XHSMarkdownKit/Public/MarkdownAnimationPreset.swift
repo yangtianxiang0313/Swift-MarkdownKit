@@ -11,18 +11,21 @@ public extension MarkdownContainerView {
         switch preset {
         case .instant:
             animationEffectKey = .instant
-            animationSubmissionMode = .interruptCurrent
+            animationConcurrencyPolicy = .fullyOrdered
+            animationMode = .instant
             typingEntityAppearanceMode = .simultaneous
 
         case .typing(let cps):
             animationEffectKey = .typing
-            animationSubmissionMode = .queueLatest
+            animationConcurrencyPolicy = .fullyOrdered
+            animationMode = .dualPhase
             typingCharactersPerSecond = max(1, cps)
             typingEntityAppearanceMode = .sequential
 
         case .streamingMask(let cps):
             animationEffectKey = .streamingMask
-            animationSubmissionMode = .queueLatest
+            animationConcurrencyPolicy = .fullyOrdered
+            animationMode = .dualPhase
             typingCharactersPerSecond = max(1, cps)
             typingEntityAppearanceMode = .sequential
         }

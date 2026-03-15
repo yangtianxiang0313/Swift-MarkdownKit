@@ -1,18 +1,11 @@
 import UIKit
 
 public final class SceneApplier {
-    private struct ArrangedEntry {
-        let view: UIView
-        let spacingAfter: CGFloat
-    }
+    private let containerView: UIView
 
-    private let stackView: UIStackView
-
-    public init(stackView: UIStackView) {
-        self.stackView = stackView
-        stackView.axis = .vertical
-        stackView.alignment = .fill
-        stackView.spacing = 0
+    public init(containerView: UIView) {
+        self.containerView = containerView
+        containerView.clipsToBounds = true
     }
 
     @discardableResult
@@ -24,115 +17,189 @@ public final class SceneApplier {
         let targetIDs = scene.componentNodeIDs()
 
         for (id, view) in managedViews where !targetIDs.contains(id) {
-            if let container = view.superview as? UIStackView {
-                container.removeArrangedSubview(view)
-            }
             view.removeFromSuperview()
             managedViews.removeValue(forKey: id)
         }
 
-        let topEntries = apply(nodes: scene.nodes, in: stackView, maxWidth: maxWidth, managedViews: &managedViews)
-        sync(stack: stackView, entries: topEntries)
-
-        stackView.layoutIfNeeded()
-        let targetSize = CGSize(width: maxWidth, height: UIView.layoutFittingCompressedSize.height)
-        let fitted = stackView.systemLayoutSizeFitting(
-            targetSize,
-            withHorizontalFittingPriority: .required,
-            verticalFittingPriority: .fittingSizeLevel
+        let result = layout(
+            nodes: scene.nodes,
+            in: containerView,
+            originY: 0,
+            maxWidth: max(1, maxWidth),
+            managedViews: &managedViews
         )
-        return max(0, ceil(fitted.height))
+
+        syncSubviewOrder(in: containerView, orderedViews: result.orderedViews)
+        return max(0, ceil(result.endY))
     }
 
-    private func apply(
+    private func layout(
         nodes: [RenderScene.Node],
-        in container: UIStackView,
+        in parent: UIView,
+        originY: CGFloat,
         maxWidth: CGFloat,
         managedViews: inout [String: UIView]
-    ) -> [ArrangedEntry] {
-        var entries: [ArrangedEntry] = []
+    ) -> LayoutResult {
+        let resolvedMaxWidth = sanitize(maxWidth, fallback: 1, minimum: 1)
+        var y = sanitize(originY, fallback: 0, minimum: 0)
+        var orderedViews: [UIView] = []
 
         for node in nodes {
             guard let component = node.component else {
-                let passthrough = apply(nodes: node.children, in: container, maxWidth: maxWidth, managedViews: &managedViews)
-                entries.append(contentsOf: passthrough)
+                let passthrough = layout(
+                    nodes: node.children,
+                    in: parent,
+                    originY: y,
+                    maxWidth: resolvedMaxWidth,
+                    managedViews: &managedViews
+                )
+                y = sanitize(passthrough.endY, fallback: y, minimum: 0)
+                orderedViews.append(contentsOf: passthrough.orderedViews)
                 continue
             }
 
-            let view = resolveView(for: node, component: component, managedViews: &managedViews)
-            component.configure(view: view, maxWidth: maxWidth)
+            let view = resolveView(for: node, component: component, parent: parent, managedViews: &managedViews)
+            component.configure(view: view, maxWidth: resolvedMaxWidth)
+
+            let baseHeight = measuredHeight(for: view, width: resolvedMaxWidth)
+            let spacingAfter = sanitize(node.spacingAfter, fallback: 0, minimum: 0)
 
             if let nestedContainer = view as? SceneContainerView {
-                let childMaxWidth = max(1, maxWidth - nestedContainer.sceneContentWidthReduction)
-                let nestedEntries = apply(
+                let insets = sanitize(nestedContainer.sceneContentInsets)
+                let childMaxWidth = sanitize(resolvedMaxWidth - insets.left - insets.right, fallback: 1, minimum: 1)
+                let childLayout = layout(
                     nodes: node.children,
-                    in: nestedContainer.sceneContentStackView,
+                    in: nestedContainer.sceneContentContainerView,
+                    originY: 0,
                     maxWidth: childMaxWidth,
                     managedViews: &managedViews
                 )
-                sync(stack: nestedContainer.sceneContentStackView, entries: nestedEntries)
-            } else if !node.children.isEmpty {
-                let passthrough = apply(nodes: node.children, in: container, maxWidth: maxWidth, managedViews: &managedViews)
-                entries.append(ArrangedEntry(view: view, spacingAfter: node.spacingAfter))
-                entries.append(contentsOf: passthrough)
+                syncSubviewOrder(in: nestedContainer.sceneContentContainerView, orderedViews: childLayout.orderedViews)
+
+                let childEndY = sanitize(childLayout.endY, fallback: 0, minimum: 0)
+                let ownHeight = sanitize(max(baseHeight, insets.top + childEndY + insets.bottom), fallback: baseHeight, minimum: 1)
+                view.frame = CGRect(x: 0, y: y, width: resolvedMaxWidth, height: ownHeight)
+                nestedContainer.sceneContentContainerView.frame = CGRect(
+                    x: insets.left,
+                    y: insets.top,
+                    width: childMaxWidth,
+                    height: childEndY
+                )
+
+                orderedViews.append(view)
+                y = sanitize(y + ownHeight + spacingAfter, fallback: y + ownHeight, minimum: 0)
                 continue
             }
 
-            entries.append(ArrangedEntry(view: view, spacingAfter: node.spacingAfter))
+            view.frame = CGRect(x: 0, y: y, width: resolvedMaxWidth, height: baseHeight)
+            orderedViews.append(view)
+            y = sanitize(y + baseHeight + spacingAfter, fallback: y + baseHeight, minimum: 0)
+
+            if !node.children.isEmpty {
+                let passthrough = layout(
+                    nodes: node.children,
+                    in: parent,
+                    originY: y,
+                    maxWidth: resolvedMaxWidth,
+                    managedViews: &managedViews
+                )
+                y = sanitize(passthrough.endY, fallback: y, minimum: 0)
+                orderedViews.append(contentsOf: passthrough.orderedViews)
+            }
         }
 
-        return entries
+        return LayoutResult(endY: y, orderedViews: orderedViews)
     }
 
     private func resolveView(
         for node: RenderScene.Node,
         component: any SceneComponent,
+        parent: UIView,
         managedViews: inout [String: UIView]
     ) -> UIView {
         if let existing = managedViews[node.id] {
             let prototype = component.makeView()
             if type(of: existing) == type(of: prototype) {
+                if existing.superview !== parent {
+                    existing.removeFromSuperview()
+                    parent.addSubview(existing)
+                }
                 return existing
             }
 
-            if let parent = existing.superview as? UIStackView {
-                parent.removeArrangedSubview(existing)
-            }
             existing.removeFromSuperview()
         }
 
         let view = component.makeView()
+        if view.superview !== parent {
+            parent.addSubview(view)
+        }
         managedViews[node.id] = view
         return view
     }
 
-    private func sync(stack: UIStackView, entries: [ArrangedEntry]) {
-        let targetViews = entries.map(\.view)
-        let targetSet = Set(targetViews.map(ObjectIdentifier.init))
+    private func measuredHeight(for view: UIView, width: CGFloat) -> CGFloat {
+        let clampedWidth = sanitize(width, fallback: 1, minimum: 1)
+        let target = CGSize(width: clampedWidth, height: CGFloat.greatestFiniteMagnitude)
 
-        for view in stack.arrangedSubviews where !targetSet.contains(ObjectIdentifier(view)) {
-            stack.removeArrangedSubview(view)
-            view.removeFromSuperview()
+        var measured = view.sizeThatFits(target).height
+        if !measured.isFinite || measured <= 0 {
+            let fitted = view.systemLayoutSizeFitting(
+                CGSize(width: clampedWidth, height: UIView.layoutFittingCompressedSize.height),
+                withHorizontalFittingPriority: .required,
+                verticalFittingPriority: .fittingSizeLevel
+            )
+            measured = fitted.height
         }
 
-        for (index, entry) in entries.enumerated() {
-            let view = entry.view
+        if !measured.isFinite || measured <= 0 {
+            measured = view.intrinsicContentSize.height
+        }
 
-            if view.superview !== stack {
-                if let oldParent = view.superview as? UIStackView {
-                    oldParent.removeArrangedSubview(view)
-                }
+        if !measured.isFinite || measured <= 0 {
+            measured = 1
+        }
+        return max(1, ceil(measured))
+    }
+
+    private func syncSubviewOrder(in container: UIView, orderedViews: [UIView]) {
+        let targetIDs = Set(orderedViews.map(ObjectIdentifier.init))
+
+        for subview in container.subviews where !targetIDs.contains(ObjectIdentifier(subview)) {
+            subview.removeFromSuperview()
+        }
+
+        for (index, view) in orderedViews.enumerated() {
+            if view.superview !== container {
                 view.removeFromSuperview()
-                let insertion = min(index, stack.arrangedSubviews.count)
-                stack.insertArrangedSubview(view, at: insertion)
-            } else if let currentIndex = stack.arrangedSubviews.firstIndex(of: view), currentIndex != index {
-                stack.removeArrangedSubview(view)
-                view.removeFromSuperview()
-                let insertion = min(index, stack.arrangedSubviews.count)
-                stack.insertArrangedSubview(view, at: insertion)
+                container.addSubview(view)
             }
-
-            stack.setCustomSpacing(entry.spacingAfter, after: view)
+            if index == 0 {
+                container.sendSubviewToBack(view)
+            } else {
+                container.bringSubviewToFront(view)
+            }
         }
+    }
+}
+
+private struct LayoutResult {
+    let endY: CGFloat
+    let orderedViews: [UIView]
+}
+
+private extension SceneApplier {
+    func sanitize(_ value: CGFloat, fallback: CGFloat, minimum: CGFloat) -> CGFloat {
+        let resolved = value.isFinite ? value : fallback
+        return max(minimum, resolved)
+    }
+
+    func sanitize(_ insets: UIEdgeInsets) -> UIEdgeInsets {
+        UIEdgeInsets(
+            top: max(0, insets.top.isFinite ? insets.top : 0),
+            left: max(0, insets.left.isFinite ? insets.left : 0),
+            bottom: max(0, insets.bottom.isFinite ? insets.bottom : 0),
+            right: max(0, insets.right.isFinite ? insets.right : 0)
+        )
     }
 }

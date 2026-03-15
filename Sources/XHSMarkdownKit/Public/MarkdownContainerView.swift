@@ -7,48 +7,57 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
 
     // MARK: - Animation
 
-    public var animationEngine: AnimationEngine = MainThreadAnimationEngine() {
+    public var animationMode: RenderAnimationMode = .instant
+
+    public var animationConcurrencyPolicy: AnimationConcurrencyPolicy = .fullyOrdered {
         didSet {
-            bindAnimationEngine()
-            registerConfigurableEffects(charactersPerSecond: typingCharactersPerSecond)
+            renderCommitCoordinator.concurrencyPolicy = animationConcurrencyPolicy
         }
     }
 
-    public var contractAnimationPlanMapper: any ContractAnimationPlanMapping = DefaultContractAnimationPlanMapper()
-    public var contractRenderModelDiffer: any MarkdownContract.RenderModelDiffer = MarkdownContract.DefaultRenderModelDiffer()
-    public var contractAnimationCompiler: any MarkdownContract.RenderModelAnimationCompiler = MarkdownContract.DefaultRenderModelAnimationCompiler()
-    public var sceneDiffer: any SceneDiffering = DefaultSceneDiffer()
-
-    public var conflictPolicy: ConflictPolicy = .default
-    public var animationEffectKey: AnimationEffectKey = .instant
-
-    public var animationSchedulingMode: AnimationSchedulingMode {
-        get { conflictPolicy.schedulingMode }
-        set { conflictPolicy.schedulingMode = newValue }
+    public var animationEffectKey: AnimationEffectKey = .instant {
+        didSet {
+            animationMode = animationEffectKey == .instant ? .instant : .dualPhase
+        }
     }
 
+    // Kept for source compatibility; scheduling now belongs to runtime internals.
+    public var animationSchedulingMode: AnimationSchedulingMode = .groupedByPhase
+
     public var animationSubmissionMode: AnimationSubmitMode {
-        get { conflictPolicy.submissionMode }
-        set { conflictPolicy.submissionMode = newValue }
+        get {
+            animationConcurrencyPolicy == .latestWins ? .interruptCurrent : .queueLatest
+        }
+        set {
+            switch newValue {
+            case .interruptCurrent:
+                animationConcurrencyPolicy = .latestWins
+            case .queueLatest:
+                animationConcurrencyPolicy = .fullyOrdered
+            }
+        }
     }
 
     public var typingCharactersPerSecond: Int = 30 {
-        didSet { registerConfigurableEffects(charactersPerSecond: typingCharactersPerSecond) }
+        didSet {
+            typingCharactersPerSecond = max(1, typingCharactersPerSecond)
+        }
     }
 
-    public var typingEntityAppearanceMode: TypingEffect.EntityAppearanceMode = .sequential {
-        didSet { registerConfigurableEffects(charactersPerSecond: typingCharactersPerSecond) }
-    }
+    public var typingEntityAppearanceMode: TypingEffect.EntityAppearanceMode = .sequential
+
+    public var sceneDiffer: any SceneDiffering = DefaultSceneDiffer()
+    public var sceneDeltaBuilder: any SceneDeltaBuilding = DefaultSceneDeltaBuilder()
 
     // MARK: - Contract
 
     public var theme: MarkdownTheme {
-        didSet { rerender() }
+        didSet { rerender(isFinal: true) }
     }
 
     public var contractKit: MarkdownContract.UniversalMarkdownKit
     public var contractStreamingEngine: MarkdownContractEngine?
-    public var contractRenderAdapter = MarkdownContract.RenderModelUIKitAdapter()
+    public var contractRenderAdapter: MarkdownContract.RenderModelUIKitAdapter
 
     // MARK: - Delegate
 
@@ -62,37 +71,55 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
 
     // MARK: - State
 
-    private let stackView = UIStackView()
-    private lazy var sceneApplier = SceneApplier(stackView: stackView)
+    private let contentView = UIView()
+    private lazy var viewGraphCoordinator = ViewGraphCoordinator(containerView: contentView)
 
-    private var managedViews: [String: UIView] = [:]
+    private lazy var renderCommitCoordinator = RenderCommitCoordinator(
+        applyScene: { [weak self] scene in
+            self?.applySceneSnapshot(scene)
+        },
+        viewForEntity: { [weak self] entityID in
+            self?.viewGraphCoordinator.view(for: entityID)
+        },
+        measureHeight: { [weak self] in
+            self?.contentHeight ?? 0
+        },
+        animateStructuralChanges: { [weak self] changes in
+            self?.viewGraphCoordinator.animateStructuralChanges(changes)
+        }
+    )
+
     private var currentScene: RenderScene
     private var lastWidth: CGFloat = 0
     private var transactionVersion: Int = 0
+    private var measuredContentHeight: CGFloat = 0
 
     private var currentContractModel: MarkdownContract.RenderModel?
     private var contractStreamingSession: MarkdownContract.StreamingMarkdownSession?
-    private var pendingContractAnimationPlan: MarkdownContract.CompiledAnimationPlan?
 
     // MARK: - Init
 
     public init(
         theme: MarkdownTheme = .default,
         contractKit: MarkdownContract.UniversalMarkdownKit = MarkdownContract.UniversalMarkdownKit(),
-        contractStreamingEngine: MarkdownContractEngine? = nil
+        contractStreamingEngine: MarkdownContractEngine? = nil,
+        contractRenderAdapter: MarkdownContract.RenderModelUIKitAdapter? = nil
     ) {
         self.theme = theme
         self.contractKit = contractKit
         self.contractStreamingEngine = contractStreamingEngine
-
+        self.contractRenderAdapter = contractRenderAdapter ?? MarkdownContract.RenderModelUIKitAdapter(
+            mergePolicy: MarkdownContract.FirstBlockAnchoredMergePolicy(),
+            blockMapperChain: MarkdownContract.RenderModelUIKitAdapter.makeDefaultBlockMapperChain()
+        )
         self.currentScene = RenderScene.empty(documentId: "document")
 
         super.init(frame: .zero)
         clipsToBounds = true
 
         setupStackView()
-        bindAnimationEngine()
-        registerConfigurableEffects(charactersPerSecond: typingCharactersPerSecond)
+        bindRenderCommitCoordinator()
+        renderCommitCoordinator.concurrencyPolicy = animationConcurrencyPolicy
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
@@ -100,22 +127,11 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
     // MARK: - Public API
 
     public func setContractRenderModel(
-        _ model: MarkdownContract.RenderModel,
-        animationPlan: MarkdownContract.CompiledAnimationPlan? = nil
+        _ model: MarkdownContract.RenderModel
     ) {
-        let resolvedPlan: MarkdownContract.CompiledAnimationPlan?
-        if let animationPlan {
-            resolvedPlan = animationPlan
-        } else {
-            let oldModel = currentContractModel ?? Self.emptyRenderModel(documentId: model.documentId)
-            let diff = contractRenderModelDiffer.diff(old: oldModel, new: model)
-            resolvedPlan = diff.isEmpty ? nil : contractAnimationCompiler.compile(old: oldModel, new: model, diff: diff)
-        }
-
         currentContractModel = model
         contractStreamingSession = nil
-        pendingContractAnimationPlan = resolvedPlan
-        rerender()
+        rerender(isFinal: true)
     }
 
     public func setContractMarkdown(
@@ -134,13 +150,12 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
             rewritePipeline: rewritePipeline,
             renderOptions: renderOptions
         )
-        setContractRenderModel(model, animationPlan: nil)
+        setContractRenderModel(model)
     }
 
     public func resetContractStreamingSession(
         engine: MarkdownContractEngine? = nil,
         differ: any MarkdownContract.RenderModelDiffer = MarkdownContract.DefaultRenderModelDiffer(),
-        animationCompiler: any MarkdownContract.RenderModelAnimationCompiler = MarkdownContract.DefaultRenderModelAnimationCompiler(),
         parseOptions: MarkdownContractParserOptions = MarkdownContractParserOptions(),
         renderOptions: MarkdownContract.CanonicalRenderOptions = MarkdownContract.CanonicalRenderOptions()
     ) {
@@ -154,7 +169,6 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
         contractStreamingSession = MarkdownContract.StreamingMarkdownSession(
             engine: resolvedEngine,
             differ: differ,
-            animationCompiler: animationCompiler,
             parseOptions: parseOptions,
             renderOptions: renderOptions
         )
@@ -183,8 +197,7 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
 
         let update = try session.appendChunk(chunk)
         currentContractModel = update.model
-        pendingContractAnimationPlan = update.animationPlan
-        rerender()
+        rerender(isFinal: update.isFinal)
         return update
     }
 
@@ -211,36 +224,27 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
 
         let update = try session.finish()
         currentContractModel = update.model
-        pendingContractAnimationPlan = update.animationPlan
-        rerender()
-        animationEngine.streamDidFinish(in: self)
+        rerender(isFinal: true)
         contractStreamingSession = nil
         return update
     }
 
     public func skipAnimation() {
-        animationEngine.finishAll(in: self)
+        renderCommitCoordinator.finishAll()
     }
 
     public var contentHeight: CGFloat {
-        let fitting = stackView.systemLayoutSizeFitting(
-            CGSize(width: bounds.width, height: UIView.layoutFittingCompressedSize.height),
-            withHorizontalFittingPriority: .required,
-            verticalFittingPriority: .fittingSizeLevel
-        )
-        return ceil(max(0, fitting.height))
+        ceil(max(0, measuredContentHeight))
     }
 
     public override func layoutSubviews() {
         super.layoutSubviews()
 
         let widthChanged = abs(bounds.width - lastWidth) > 1
+        contentView.frame = bounds
         if widthChanged {
             lastWidth = bounds.width
-            stackView.frame = bounds
-            rerender()
-        } else {
-            stackView.frame = bounds
+            rerender(isFinal: true, forceInstant: true)
         }
     }
 
@@ -252,67 +256,34 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
 
     public func applySceneSnapshot(_ scene: RenderScene) {
         currentScene = scene
-        _ = sceneApplier.apply(
-            scene: scene,
-            maxWidth: max(bounds.width, 1),
-            managedViews: &managedViews
-        )
+        measuredContentHeight = viewGraphCoordinator.apply(scene: scene, maxWidth: max(bounds.width, 1))
         notifyHeightChange()
     }
 
     // MARK: - Internal
 
     private func setupStackView() {
-        stackView.axis = .vertical
-        stackView.spacing = 0
-        stackView.alignment = .fill
-        stackView.distribution = .fill
-        addSubview(stackView)
+        addSubview(contentView)
     }
 
-    private func bindAnimationEngine() {
-        animationEngine.onAnimationComplete = { [weak self] in
+    private func bindRenderCommitCoordinator() {
+        renderCommitCoordinator.onAnimationComplete = { [weak self] in
             guard let self else { return }
             self.delegate?.containerViewDidCompleteAnimation(self)
         }
 
-        animationEngine.onLayoutChange = { [weak self] in
+        renderCommitCoordinator.onHeightChange = { [weak self] _ in
             guard let self else { return }
             self.notifyHeightChange()
         }
 
-        animationEngine.onProgress = { [weak self] progress in
+        renderCommitCoordinator.onProgress = { [weak self] progress in
             guard let self else { return }
             self.delegate?.containerView(self, didUpdateAnimationProgress: progress)
-            if let anchorY = progress.revealedHeight {
-                self.delegate?.containerView(self, didUpdateRevealAnchor: anchorY)
-            }
         }
     }
 
-    private func registerConfigurableEffects(charactersPerSecond: Int) {
-        let appearanceMode = typingEntityAppearanceMode
-
-        animationEngine.registerEffect(.typing) {
-            TypingEffect(
-                charactersPerSecond: charactersPerSecond,
-                entityAppearanceMode: appearanceMode
-            )
-        }
-
-        animationEngine.registerEffect(.streamingMask) {
-            CompositeEffect(effects: [
-                TypingEffect(
-                    charactersPerSecond: charactersPerSecond,
-                    entityAppearanceMode: appearanceMode
-                ),
-                SegmentFadeInEffect(),
-                GradientMaskRevealEffect()
-            ])
-        }
-    }
-
-    private func rerender() {
+    private func rerender(isFinal: Bool, forceInstant: Bool = false) {
         guard bounds.width > 0 else { return }
 
         guard let contractModel = currentContractModel else {
@@ -320,101 +291,49 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
             return
         }
 
-        let newScene = contractRenderAdapter.render(
-            model: contractModel,
-            theme: theme,
-            maxWidth: bounds.width
-        )
-
-        let sceneDiff = sceneDiffer.diff(old: currentScene, new: newScene)
-        let contractAnimationPlan = pendingContractAnimationPlan
-        pendingContractAnimationPlan = nil
-
-        guard !sceneDiff.isEmpty else {
-            applySceneSnapshot(newScene)
+        let targetScene: RenderScene
+        do {
+            targetScene = try contractRenderAdapter.render(
+                model: contractModel,
+                theme: theme,
+                maxWidth: bounds.width
+            )
+        } catch {
+            applySceneSnapshot(RenderScene.empty(documentId: contractModel.documentId))
             return
         }
 
+        let diff = sceneDiffer.diff(old: currentScene, new: targetScene)
+        guard !diff.isEmpty else {
+            applySceneSnapshot(targetScene)
+            return
+        }
+
+        let delta = sceneDeltaBuilder.makeDelta(old: currentScene, new: targetScene, diff: diff)
+
         transactionVersion += 1
-        var policy = conflictPolicy
-        policy.defaultEffectKey = animationEffectKey
-
-        let transaction = AnimationTransaction(
+        let renderFrame = RenderFrame(
             version: transactionVersion,
-            sourceSceneHint: currentScene,
-            targetScene: newScene,
-            submissionMode: policy.submissionMode,
-            planBuilder: { [contractAnimationPlanMapper, policy, contractAnimationPlan] oldScene, targetScene in
-                let rebuilt = self.sceneDiffer.diff(old: oldScene, new: targetScene)
-                let mapped: AnimationPlan
-                if let contractAnimationPlan {
-                    mapped = contractAnimationPlanMapper.makePlan(
-                        contractPlan: contractAnimationPlan,
-                        oldScene: oldScene,
-                        newScene: targetScene,
-                        diff: rebuilt,
-                        defaultEffectKey: policy.defaultEffectKey
-                    )
-                } else {
-                    mapped = AnimationPlan(steps: [AnimationStep(
-                        id: "scene.apply",
-                        effectKey: policy.defaultEffectKey,
-                        entityIDs: targetScene.entityIDs,
-                        fromScene: oldScene,
-                        toScene: targetScene
-                    )])
-                }
-
-                return Self.schedule(mapped, mode: policy.schedulingMode)
-            }
+            previousScene: currentScene,
+            targetScene: targetScene,
+            diff: diff,
+            delta: delta,
+            isFinal: isFinal,
+            animationMode: resolvedAnimationMode(forceInstant: forceInstant),
+            unitsPerSecond: typingCharactersPerSecond
         )
+        renderCommitCoordinator.submit(renderFrame)
+    }
 
-        animationEngine.submit(transaction, to: self)
+    private func resolvedAnimationMode(forceInstant: Bool) -> RenderAnimationMode {
+        if forceInstant {
+            return .instant
+        }
+        return animationMode
     }
 
     private func notifyHeightChange() {
         invalidateIntrinsicContentSize()
         delegate?.containerView(self, didChangeContentHeight: contentHeight)
-    }
-
-    private static func emptyRenderModel(documentId: String) -> MarkdownContract.RenderModel {
-        MarkdownContract.RenderModel(documentId: documentId, blocks: [])
-    }
-
-    private static func schedule(_ plan: AnimationPlan, mode: AnimationSchedulingMode) -> AnimationPlan {
-        switch mode {
-        case .groupedByPhase:
-            return plan
-
-        case .serialByChange:
-            var previous: AnimationStep.StepID?
-            let steps = plan.steps.map { step -> AnimationStep in
-                let dependencies = previous.map { Set([$0]) } ?? []
-                let rewritten = AnimationStep(
-                    id: step.id,
-                    dependencies: dependencies,
-                    effectKey: step.effectKey,
-                    entityIDs: step.entityIDs,
-                    fromScene: step.fromScene,
-                    toScene: step.toScene
-                )
-                previous = step.id
-                return rewritten
-            }
-            return AnimationPlan(steps: steps)
-
-        case .parallelByChange:
-            let steps = plan.steps.map { step in
-                AnimationStep(
-                    id: step.id,
-                    dependencies: [],
-                    effectKey: step.effectKey,
-                    entityIDs: step.entityIDs,
-                    fromScene: step.fromScene,
-                    toScene: step.toScene
-                )
-            }
-            return AnimationPlan(steps: steps)
-        }
     }
 }

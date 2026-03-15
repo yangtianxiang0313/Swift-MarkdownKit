@@ -30,6 +30,21 @@ class CustomRendererDemoViewController: UIViewController {
         return label
     }()
 
+    private lazy var statusLabel: UILabel = {
+        let label = UILabel()
+        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        label.textColor = .systemRed
+        label.numberOfLines = 0
+        label.backgroundColor = UIColor.systemRed.withAlphaComponent(0.08)
+        label.layer.cornerRadius = 8
+        label.layer.masksToBounds = true
+        label.isHidden = true
+        label.isUserInteractionEnabled = true
+        let tap = UITapGestureRecognizer(target: self, action: #selector(copyLatestError))
+        label.addGestureRecognizer(tap)
+        return label
+    }()
+
     private lazy var containerView: MarkdownContainerView = {
         ExampleMarkdownRuntime.makeConfiguredContainer(theme: .default)
     }()
@@ -86,6 +101,7 @@ class CustomRendererDemoViewController: UIViewController {
     <mention userId="new-user" />
     ~~已删除~~ 文本和 <spoiler text="剧透内容" /> 都能走 Contract 渲染。
     """
+    private var latestRenderErrorPayload: String?
 
     // MARK: - Lifecycle
 
@@ -104,6 +120,7 @@ class CustomRendererDemoViewController: UIViewController {
 
         stackView.addArrangedSubview(demoSelector)
         stackView.addArrangedSubview(descriptionLabel)
+        stackView.addArrangedSubview(statusLabel)
         stackView.addArrangedSubview(containerView)
 
         scrollView.frame = view.bounds
@@ -125,6 +142,12 @@ class CustomRendererDemoViewController: UIViewController {
         renderDemo(index: demoSelector.selectedSegmentIndex)
     }
 
+    @objc private func copyLatestError() {
+        guard let payload = latestRenderErrorPayload, !payload.isEmpty else { return }
+        UIPasteboard.general.string = payload
+        statusLabel.text = "已复制错误信息到剪贴板。"
+    }
+
     private func renderDemo(index: Int) {
         descriptionLabel.text = descriptions[index]
         switch index {
@@ -140,24 +163,25 @@ class CustomRendererDemoViewController: UIViewController {
     }
 
     private func renderDefaultDemo() {
-        containerView.contractRenderAdapter = MarkdownContract.RenderModelUIKitAdapter()
+        containerView.contractRenderAdapter = makeAdapter()
         do {
             try containerView.setContractMarkdown(
                 demoMarkdown,
                 rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
             )
+            clearRenderErrorStatus()
         } catch {
-            descriptionLabel.text = "Contract 渲染失败：\(error.localizedDescription)"
+            reportRenderError(error, markdown: demoMarkdown, source: "CustomRendererDemo.default")
         }
     }
 
     private func renderCustomCodeBlockDemo() {
-        let adapter = MarkdownContract.RenderModelUIKitAdapter()
-        adapter.registerBlockRenderer(for: .codeBlock) { block, _, adapter in
+        let adapter = makeAdapter()
+        adapter.registerBlockMapper(for: .codeBlock) { block, _, adapter in
             let code = block.contractAttrString(for: "code") ?? ""
             let language = block.contractAttrString(for: "language") ?? "text"
 
-            return [adapter.makeCustomViewNode(
+            let node = adapter.makeCustomStandaloneNode(
                 id: block.id,
                 kind: "codeBlock",
                 reuseIdentifier: "contract.customCodeBlock",
@@ -173,7 +197,8 @@ class CustomRendererDemoViewController: UIViewController {
                     guard let codeView = view as? CustomCodeBlockView else { return }
                     codeView.reveal(upTo: state.displayedUnits)
                 }
-            )]
+            )
+            return [.standalone(node)]
         }
 
         containerView.contractRenderAdapter = adapter
@@ -182,30 +207,34 @@ class CustomRendererDemoViewController: UIViewController {
                 demoMarkdown,
                 rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
             )
+            clearRenderErrorStatus()
         } catch {
-            descriptionLabel.text = "Contract 渲染失败：\(error.localizedDescription)"
+            reportRenderError(error, markdown: demoMarkdown, source: "CustomRendererDemo.customCodeBlock")
         }
     }
 
     private func renderContractCustomElementDemo() {
-        let adapter = MarkdownContract.RenderModelUIKitAdapter()
-        adapter.registerBlockRenderer(forExtension: ExampleMarkdownRuntime.calloutKind.rawValue) { block, _, _ in
+        let adapter = makeAdapter()
+        adapter.registerBlockMapper(forExtension: ExampleMarkdownRuntime.calloutKind.rawValue) { block, _, adapter in
             let title = block.contractAttrString(for: "title") ?? "Callout"
             let text = "Block Leaf: \(title)"
-            return [Self.makeCalloutNode(
-                nodeID: block.id,
+            let segment = Self.makeCalloutSegment(
+                adapter: adapter,
+                blockID: block.id,
                 text: text,
                 color: .systemBlue
-            )]
+            )
+            return [.mergeSegment(segment)]
         }
-        adapter.registerBlockRenderer(forExtension: ExampleMarkdownRuntime.tabsKind.rawValue) { block, context, adapter in
-            let header = Self.makeCalloutNode(
-                nodeID: "\(block.id).tabs.header",
+        adapter.registerBlockMapper(forExtension: ExampleMarkdownRuntime.tabsKind.rawValue) { block, context, adapter in
+            let header = Self.makeCalloutSegment(
+                adapter: adapter,
+                blockID: "\(block.id).tabs.header",
                 text: "Block Container: Tabs",
                 color: .systemOrange
             )
-            let children = adapter.renderBlockAsDefault(block, context: context)
-            return [header] + children
+            let children = try block.children.flatMap { try adapter.renderBlockAsDefault($0, context: context) }
+            return [.mergeSegment(header)] + children
         }
         adapter.registerInlineRenderer(forExtension: ExampleMarkdownRuntime.mentionKind.rawValue) { span, _, _, _ in
             let text = span.contractAttrString(for: "userId").map { "@\($0)" } ?? span.text
@@ -232,16 +261,60 @@ class CustomRendererDemoViewController: UIViewController {
                 contractCustomMarkdown,
                 rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
             )
+            clearRenderErrorStatus()
         } catch {
-            descriptionLabel.text = "Contract 渲染失败：\(error.localizedDescription)"
+            reportRenderError(error, markdown: contractCustomMarkdown, source: "CustomRendererDemo.contractNodes")
         }
     }
 
-    private static func makeCalloutNode(
-        nodeID: String,
+    private func makeAdapter() -> MarkdownContract.RenderModelUIKitAdapter {
+        MarkdownContract.RenderModelUIKitAdapter(
+            mergePolicy: MarkdownContract.FirstBlockAnchoredMergePolicy(),
+            blockMapperChain: MarkdownContract.RenderModelUIKitAdapter.makeDefaultBlockMapperChain()
+        )
+    }
+
+    private func reportRenderError(_ error: Error, markdown: String, source: String) {
+        latestRenderErrorPayload = buildErrorPayload(error: error, markdown: markdown, source: source)
+        statusLabel.text = "渲染失败，点此复制错误信息"
+        statusLabel.isHidden = false
+        if let payload = latestRenderErrorPayload {
+            print(payload)
+        }
+    }
+
+    private func clearRenderErrorStatus() {
+        latestRenderErrorPayload = nil
+        statusLabel.isHidden = true
+        statusLabel.text = nil
+    }
+
+    private func buildErrorPayload(error: Error, markdown: String, source: String) -> String {
+        var lines: [String] = []
+        lines.append("=== XHSMarkdownKit Example Render Error ===")
+        lines.append("source: \(source)")
+        lines.append("time: \(ISO8601DateFormatter().string(from: Date()))")
+        if let modelError = error as? MarkdownContract.ModelError {
+            lines.append("code: \(modelError.code)")
+            if let path = modelError.path {
+                lines.append("path: \(path)")
+            }
+            lines.append("message: \(modelError.message)")
+        } else {
+            lines.append("error: \(String(reflecting: error))")
+        }
+        lines.append("--- markdown begin ---")
+        lines.append(markdown)
+        lines.append("--- markdown end ---")
+        return lines.joined(separator: "\n")
+    }
+
+    private static func makeCalloutSegment(
+        adapter: MarkdownContract.RenderModelUIKitAdapter,
+        blockID: String,
         text: String,
         color: UIColor
-    ) -> RenderScene.Node {
+    ) -> MarkdownContract.MergeTextSegment {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = 4
         let attributed = NSAttributedString(
@@ -252,11 +325,10 @@ class CustomRendererDemoViewController: UIViewController {
                 .paragraphStyle: paragraph
             ]
         )
-
-        return RenderScene.Node(
-            id: nodeID,
+        return adapter.makeMergeTextSegment(
+            sourceBlockID: blockID,
             kind: "paragraph",
-            component: TextSceneComponent(attributedText: attributed),
+            attributedText: attributed,
             spacingAfter: 12
         )
     }

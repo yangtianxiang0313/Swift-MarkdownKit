@@ -129,4 +129,55 @@ final class CanonicalRendererTests: XCTestCase {
             XCTAssertEqual(modelError.code, MarkdownContract.ModelError.Code.unknownNodeKind.rawValue)
         }
     }
+
+    func testStrikethroughProducesStrikethroughMark() throws {
+        let model = try MarkdownnAdapter.makeEngine().render("before ~~gone~~ after")
+        let spans = model.blocks.flatMap(\.inlines)
+
+        XCTAssertTrue(
+            spans.contains(where: { span in
+                span.text.contains("gone") && span.marks.contains(where: { $0.name == "strikethrough" })
+            })
+        )
+    }
+
+    func testEngineAcceptsEmptyBlockQuoteAndEmptyListItem() throws {
+        let markdown = """
+        > 
+        
+        -
+        """
+
+        XCTAssertNoThrow(try MarkdownnAdapter.makeEngine().render(markdown))
+    }
+
+    func testTableModelPreservesStructuredCellsAndInlineMarks() throws {
+        let model = try MarkdownnAdapter.makeEngine().render(
+            """
+            | 功能 | 描述 |
+            | --- | --- |
+            | **加粗标题** | 支持 `代码` 和 [链接](https://example.com) |
+            """
+        )
+
+        guard let table = model.blocks.first(where: { $0.kind == .table }) else {
+            XCTFail("table block missing")
+            return
+        }
+        let head = table.children.first(where: { $0.kind == .tableHead })
+        let body = table.children.first(where: { $0.kind == .tableBody })
+        XCTAssertNotNil(head)
+        XCTAssertNotNil(body)
+
+        guard let firstBodyRow = body?.children.first(where: { $0.kind == .tableRow }),
+              let secondCell = firstBodyRow.children.dropFirst().first(where: { $0.kind == .tableCell }) else {
+            XCTFail("table row/cell structure missing")
+            return
+        }
+
+        XCTAssertTrue(secondCell.inlines.contains(where: { $0.kind == .inlineCode && $0.text.contains("代码") }))
+        XCTAssertTrue(secondCell.inlines.contains(where: { span in
+            span.text.contains("链接") && span.marks.contains(where: { $0.name == "link" })
+        }))
+    }
 }

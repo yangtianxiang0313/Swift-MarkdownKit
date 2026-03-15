@@ -48,6 +48,7 @@ extension MarkdownContract {
         case link
         case emphasis
         case strong
+        case strikethrough
         case inlineCode
         case softBreak
         case hardBreak
@@ -101,6 +102,7 @@ extension MarkdownContract {
         public static var link: NodeKind { .core(.link) }
         public static var emphasis: NodeKind { .core(.emphasis) }
         public static var strong: NodeKind { .core(.strong) }
+        public static var strikethrough: NodeKind { .core(.strikethrough) }
         public static var inlineCode: NodeKind { .core(.inlineCode) }
         public static var softBreak: NodeKind { .core(.softBreak) }
         public static var hardBreak: NodeKind { .core(.hardBreak) }

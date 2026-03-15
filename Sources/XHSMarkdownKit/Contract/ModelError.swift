@@ -50,3 +50,12 @@ extension MarkdownContract.ModelError {
         )
     }
 }
+
+extension MarkdownContract.ModelError: LocalizedError {
+    public var errorDescription: String? {
+        if let path, !path.isEmpty {
+            return "\(code): \(message) [path: \(path)]"
+        }
+        return "\(code): \(message)"
+    }
+}

@@ -62,7 +62,15 @@ public final class MainThreadAnimationEngine: AnimationEngine {
         let plan = transaction.makePlan(from: source)
         let total = max(1, plan.steps.count)
 
-        onProgress?(AnimationProgress(version: activeVersion, completedSteps: 0, totalSteps: total, isRunning: true))
+        onProgress?(AnimationProgress(
+            version: activeVersion,
+            phase: .structure,
+            displayedUnits: 0,
+            totalUnits: total,
+            elapsedMilliseconds: 0,
+            currentContentHeight: 0,
+            isRunning: true
+        ))
 
         let orderedSteps = topologicalSteps(plan.steps)
         var completed = 0
@@ -73,7 +81,15 @@ public final class MainThreadAnimationEngine: AnimationEngine {
             _ = effect.apply(step: step, host: host)
             completed += 1
             onLayoutChange?()
-            onProgress?(AnimationProgress(version: activeVersion, completedSteps: completed, totalSteps: total, isRunning: completed < total))
+            onProgress?(AnimationProgress(
+                version: activeVersion,
+                phase: completed < total ? .structure : .completed,
+                displayedUnits: completed,
+                totalUnits: total,
+                elapsedMilliseconds: 0,
+                currentContentHeight: 0,
+                isRunning: completed < total
+            ))
         }
 
         if plan.steps.isEmpty {
