@@ -14,8 +14,12 @@ public struct XYMarkdownContractParser: MarkdownContractParser {
     }
 
     public func parse(_ text: String, options: MarkdownContractParserOptions = MarkdownContractParserOptions()) throws -> MarkdownContract.CanonicalDocument {
-        let document = Document(parsing: text, source: options.sourceURL, options: options.toXYParseOptions())
-        let root = Converter(nodeSpecRegistry: nodeSpecRegistry).convert(markup: document, path: [])
+        let parseOptions = options.toXYParseOptions()
+        let document = Document(parsing: text, source: options.sourceURL, options: parseOptions)
+        let root = Converter(
+            nodeSpecRegistry: nodeSpecRegistry,
+            parseOptions: parseOptions
+        ).convert(markup: document, path: [])
 
         let canonical = MarkdownContract.CanonicalDocument(
             schemaVersion: MarkdownContract.schemaVersion,
@@ -55,6 +59,7 @@ private extension MarkdownContractParserOptions {
 
 private struct Converter {
     let nodeSpecRegistry: MarkdownContract.NodeSpecRegistry
+    let parseOptions: ParseOptions
 
     func convert(markup: Markup, path: [Int]) -> MarkdownContract.CanonicalNode {
         guard let node = convertOptional(markup: markup, path: path) else {
@@ -70,10 +75,20 @@ private struct Converter {
             return nil
         }
         let kind = nodeKind(for: markup, sourceKind: sourceKind, attrs: attrs)
-
-        let children = markup.children.enumerated().compactMap { index, child in
-            convertOptional(markup: child, path: path + [index])
+        var children = convertChildren(Array(markup.children), parentPath: path)
+        if children.isEmpty,
+           let embeddedChildren = extractEmbeddedPairedHTMLChildrenIfNeeded(
+                sourceKind: sourceKind,
+                attrs: attrs,
+                path: path
+           ) {
+            children = embeddedChildren
         }
+        children = normalizeInlineChildrenIfNeeded(
+            forParentKind: kind,
+            children: children,
+            parentPath: path
+        )
 
         return MarkdownContract.CanonicalNode(
             id: nodeId(from: path),
@@ -88,11 +103,260 @@ private struct Converter {
         )
     }
 
+    private func convertChildren(
+        _ children: [Markup],
+        parentPath: [Int]
+    ) -> [MarkdownContract.CanonicalNode] {
+        var converted: [MarkdownContract.CanonicalNode] = []
+        var index = 0
+
+        while index < children.count {
+            let child = children[index]
+            let childPath = parentPath + [index]
+            let sourceKind = sourceKind(for: child)
+            let attrs = attrs(for: child)
+
+            if let paired = makePairedHTMLTagNodeIfNeeded(
+                child: child,
+                childAttrs: attrs,
+                sourceKind: sourceKind,
+                path: childPath,
+                siblingMarkup: children,
+                siblingIndex: index
+            ) {
+                converted.append(paired.node)
+                index = paired.nextIndex
+                continue
+            }
+
+            if let node = convertOptional(markup: child, path: childPath) {
+                converted.append(node)
+            }
+            index += 1
+        }
+
+        return converted
+    }
+
+    private func normalizeInlineChildrenIfNeeded(
+        forParentKind parentKind: MarkdownContract.NodeKind,
+        children: [MarkdownContract.CanonicalNode],
+        parentPath: [Int]
+    ) -> [MarkdownContract.CanonicalNode] {
+        guard !children.isEmpty,
+              let parentSpec = nodeSpecRegistry.spec(for: parentKind) else {
+            return children
+        }
+
+        let allowedRoles = parentSpec.childPolicy.allowedChildRoles
+        let allowsInline = allowedRoles.contains(.inlineLeaf) || allowedRoles.contains(.inlineContainer)
+        guard !allowsInline else {
+            return children
+        }
+
+        let allowsBlock = allowedRoles.contains(.blockLeaf) || allowedRoles.contains(.blockContainer)
+        guard allowsBlock else {
+            return children
+        }
+
+        let hasInlineChildren = children.contains { child in
+            guard let role = nodeSpecRegistry.spec(for: child.kind)?.role else { return false }
+            return role.isInline
+        }
+        guard hasInlineChildren else {
+            return children
+        }
+
+        var normalized: [MarkdownContract.CanonicalNode] = []
+        var inlineBuffer: [MarkdownContract.CanonicalNode] = []
+        var paragraphSeed = 0
+
+        func flushInlineBuffer() {
+            guard !inlineBuffer.isEmpty else { return }
+            let paragraph = MarkdownContract.CanonicalNode(
+                id: "\(nodeId(from: parentPath)).autoParagraph.\(paragraphSeed)",
+                kind: .paragraph,
+                attrs: [:],
+                children: inlineBuffer,
+                source: inlineBuffer.first?.source ?? MarkdownContract.SourceInfo(sourceKind: .markdown, raw: nil, position: nil)
+            )
+            normalized.append(paragraph)
+            inlineBuffer.removeAll(keepingCapacity: true)
+            paragraphSeed += 1
+        }
+
+        for child in children {
+            guard let role = nodeSpecRegistry.spec(for: child.kind)?.role else {
+                flushInlineBuffer()
+                normalized.append(child)
+                continue
+            }
+
+            if role.isInline {
+                inlineBuffer.append(child)
+            } else {
+                flushInlineBuffer()
+                normalized.append(child)
+            }
+        }
+        flushInlineBuffer()
+
+        return normalized
+    }
+
+    private func makePairedHTMLTagNodeIfNeeded(
+        child: Markup,
+        childAttrs: [String: MarkdownContract.Value],
+        sourceKind: MarkdownContract.SourceKind,
+        path: [Int],
+        siblingMarkup: [Markup],
+        siblingIndex: Int
+    ) -> (node: MarkdownContract.CanonicalNode, nextIndex: Int)? {
+        guard sourceKind == .htmlTag else { return nil }
+        guard !isClosingHTMLTag(attrs: childAttrs) else { return nil }
+        guard !isSelfClosingHTMLTag(attrs: childAttrs) else { return nil }
+
+        guard let tagName = htmlTagName(from: childAttrs),
+              let pairingMode = nodeSpecRegistry.tagPairingMode(forHTMLTagName: tagName),
+              pairingMode.supportsPaired
+        else {
+            return nil
+        }
+
+        guard let closingIndex = findMatchingClosingTagIndex(
+            for: tagName,
+            in: siblingMarkup,
+            start: siblingIndex + 1
+        ) else {
+            return nil
+        }
+
+        let innerMarkup = Array(siblingMarkup[(siblingIndex + 1)..<closingIndex])
+        let children = convertChildren(innerMarkup, parentPath: path)
+        let kind = nodeKind(for: child, sourceKind: sourceKind, attrs: childAttrs)
+
+        let node = MarkdownContract.CanonicalNode(
+            id: nodeId(from: path),
+            kind: kind,
+            attrs: childAttrs,
+            children: children,
+            source: MarkdownContract.SourceInfo(
+                sourceKind: sourceKind,
+                raw: rawSource(for: child),
+                position: sourcePosition(for: child)
+            )
+        )
+        return (node, closingIndex + 1)
+    }
+
+    private func extractEmbeddedPairedHTMLChildrenIfNeeded(
+        sourceKind: MarkdownContract.SourceKind,
+        attrs: [String: MarkdownContract.Value],
+        path: [Int]
+    ) -> [MarkdownContract.CanonicalNode]? {
+        guard sourceKind == .htmlTag else { return nil }
+        guard !isClosingHTMLTag(attrs: attrs) else { return nil }
+        guard !isSelfClosingHTMLTag(attrs: attrs) else { return nil }
+        guard let tagName = htmlTagName(from: attrs),
+              let pairingMode = nodeSpecRegistry.tagPairingMode(forHTMLTagName: tagName),
+              pairingMode.supportsPaired else {
+            return nil
+        }
+        guard let raw = rawHTML(from: attrs),
+              let innerMarkdown = extractInnerMarkdown(rawHTML: raw, tagName: tagName),
+              !innerMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        let innerDocument = Document(parsing: innerMarkdown, options: parseOptions)
+        return convertChildren(Array(innerDocument.children), parentPath: path)
+    }
+
+    private func findMatchingClosingTagIndex(
+        for tagName: String,
+        in siblings: [Markup],
+        start: Int
+    ) -> Int? {
+        guard start < siblings.count else { return nil }
+
+        var depth = 0
+        var index = start
+        while index < siblings.count {
+            let candidate = siblings[index]
+            let sourceKind = sourceKind(for: candidate)
+            if sourceKind != .htmlTag {
+                index += 1
+                continue
+            }
+
+            let candidateAttrs = attrs(for: candidate)
+            guard let candidateName = htmlTagName(from: candidateAttrs),
+                  candidateName == tagName
+            else {
+                index += 1
+                continue
+            }
+
+            if isClosingHTMLTag(attrs: candidateAttrs) {
+                if depth == 0 {
+                    return index
+                }
+                depth -= 1
+                index += 1
+                continue
+            }
+
+            if let pairingMode = nodeSpecRegistry.tagPairingMode(forHTMLTagName: candidateName),
+               pairingMode.supportsPaired,
+               !isSelfClosingHTMLTag(attrs: candidateAttrs) {
+                depth += 1
+            }
+            index += 1
+        }
+
+        return nil
+    }
+
     private func isClosingHTMLTag(attrs: [String: MarkdownContract.Value]) -> Bool {
         if case let .bool(value)? = attrs["isClosing"] {
             return value
         }
         return false
+    }
+
+    private func isSelfClosingHTMLTag(attrs: [String: MarkdownContract.Value]) -> Bool {
+        if case let .bool(value)? = attrs["isSelfClosing"] {
+            return value
+        }
+        if case let .string(raw)? = attrs["raw"] {
+            return raw.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("/>")
+        }
+        return false
+    }
+
+    private func htmlTagName(from attrs: [String: MarkdownContract.Value]) -> String? {
+        guard case let .string(raw)? = attrs["name"] else { return nil }
+        return raw.lowercased()
+    }
+
+    private func rawHTML(from attrs: [String: MarkdownContract.Value]) -> String? {
+        guard case let .string(raw)? = attrs["raw"] else { return nil }
+        return raw
+    }
+
+    private func extractInnerMarkdown(rawHTML: String, tagName: String) -> String? {
+        let escapedTagName = NSRegularExpression.escapedPattern(for: tagName)
+        let pattern = #"(?is)^\s*<\s*"# + escapedTagName + #"\b[^>]*>(.*)</\s*"# + escapedTagName + #"\s*>\s*$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+        let range = NSRange(rawHTML.startIndex..<rawHTML.endIndex, in: rawHTML)
+        guard let match = regex.firstMatch(in: rawHTML, options: [], range: range),
+              match.numberOfRanges > 1,
+              let contentRange = Range(match.range(at: 1), in: rawHTML) else {
+            return nil
+        }
+        return String(rawHTML[contentRange])
     }
 
     private func nodeId(from path: [Int]) -> String {
@@ -352,7 +616,8 @@ private struct Converter {
         var result: [String: MarkdownContract.Value] = [
             "customType": .string("htmlTag"),
             "raw": .string(raw),
-            "isClosing": .bool(parsed.isClosing)
+            "isClosing": .bool(parsed.isClosing),
+            "isSelfClosing": .bool(parsed.isSelfClosing)
         ]
 
         if let tagName = parsed.name {
@@ -378,6 +643,7 @@ private enum HTMLTagExtractor {
         let name: String?
         let attributes: [String: String]
         let isClosing: Bool
+        let isSelfClosing: Bool
     }
 
     static func parse(_ raw: String) -> Result {
@@ -386,16 +652,16 @@ private enum HTMLTagExtractor {
             pattern: #"<\s*(/)?\s*([A-Za-z][A-Za-z0-9:_-]*)\b([^>]*)>"#,
             options: []
         ) else {
-            return Result(name: nil, attributes: [:], isClosing: false)
+            return Result(name: nil, attributes: [:], isClosing: false, isSelfClosing: false)
         }
         let nsRange = NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)
         guard let match = regex.firstMatch(in: trimmed, options: [], range: nsRange) else {
-            return Result(name: nil, attributes: [:], isClosing: false)
+            return Result(name: nil, attributes: [:], isClosing: false, isSelfClosing: false)
         }
 
         let isClosing = match.range(at: 1).location != NSNotFound
         guard let nameRange = Range(match.range(at: 2), in: trimmed) else {
-            return Result(name: nil, attributes: [:], isClosing: isClosing)
+            return Result(name: nil, attributes: [:], isClosing: isClosing, isSelfClosing: false)
         }
         let name = String(trimmed[nameRange])
 
@@ -405,8 +671,9 @@ private enum HTMLTagExtractor {
         } else {
             openingTag = trimmed
         }
+        let isSelfClosing = !isClosing && openingTag.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("/>")
         let attributes = isClosing ? [:] : extractAttributes(from: openingTag)
-        return Result(name: name, attributes: attributes, isClosing: isClosing)
+        return Result(name: name, attributes: attributes, isClosing: isClosing, isSelfClosing: isSelfClosing)
     }
 
     private static func extractAttributes(from openingTag: String) -> [String: String] {

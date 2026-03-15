@@ -73,6 +73,11 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
 
     private let contentView = UIView()
     private lazy var viewGraphCoordinator = ViewGraphCoordinator(containerView: contentView)
+    var sceneInteractionHandler: ((RenderScene.Node, SceneInteractionPayload) -> Bool)? {
+        didSet {
+            viewGraphCoordinator.interactionHandler = sceneInteractionHandler
+        }
+    }
 
     private lazy var renderCommitCoordinator = RenderCommitCoordinator(
         applyScene: { [weak self] scene in
@@ -93,6 +98,7 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
     private var lastWidth: CGFloat = 0
     private var transactionVersion: Int = 0
     private var measuredContentHeight: CGFloat = 0
+    private var lastNotifiedContentHeight: CGFloat = -1
 
     private var currentContractModel: MarkdownContract.RenderModel?
     private var contractStreamingSession: MarkdownContract.StreamingMarkdownSession?
@@ -118,6 +124,7 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
         clipsToBounds = true
 
         setupStackView()
+        viewGraphCoordinator.interactionHandler = sceneInteractionHandler
         bindRenderCommitCoordinator()
         renderCommitCoordinator.concurrencyPolicy = animationConcurrencyPolicy
     }
@@ -334,6 +341,12 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
 
     private func notifyHeightChange() {
         invalidateIntrinsicContentSize()
+        let resolvedHeight = contentHeight
+        if abs(lastNotifiedContentHeight - resolvedHeight) < 0.5 {
+            return
+        }
+        lastNotifiedContentHeight = resolvedHeight
+        SceneDebugLogger.log("Container height document=\(currentScene.documentId) version=\(transactionVersion) height=\(resolvedHeight)")
         delegate?.containerView(self, didChangeContentHeight: contentHeight)
     }
 }

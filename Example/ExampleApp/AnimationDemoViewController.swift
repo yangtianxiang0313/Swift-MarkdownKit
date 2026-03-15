@@ -254,15 +254,32 @@ final class AnimationDemoViewController: UIViewController {
         return container
     }()
 
+    private lazy var runtime: MarkdownRuntime = {
+        let runtime = ExampleMarkdownRuntime.makeRuntime()
+        runtime.eventHandler = { event in
+            if event.action == "activate",
+               case let .string(url)? = event.payload["url"],
+               (url.hasPrefix("xhs-think://") || url.hasPrefix("xhs-cite://")) {
+                return .handled
+            }
+            return .continueDefault
+        }
+        return runtime
+    }()
+
     private var streamingTimer: Timer?
-    private var streamCharacters: [Character] = []
-    private var streamCursor = 0
+    private var streamingSession: MarkdownContract.StreamingMarkdownSession?
+    private var streamTokens: [String] = []
+    private var streamTokenCursor = 0
+    private var streamTotalCharacterCount = 0
+    private var streamedCharacterCount = 0
 
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "动画 Demo"
         view.backgroundColor = .systemBackground
         setupUI()
+        runtime.attach(to: containerView)
         updateControlLabels()
         effectChanged()
         streamModeChanged()
@@ -448,9 +465,12 @@ final class AnimationDemoViewController: UIViewController {
         }
 
         do {
-            try containerView.setContractMarkdown(
-                markdown,
-                rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+            try runtime.setInput(
+                .markdown(
+                    text: markdown,
+                    documentID: "animation.demo",
+                    rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                )
             )
             statusLabel.text = "模式: 一次性渲染"
         } catch {
@@ -459,49 +479,92 @@ final class AnimationDemoViewController: UIViewController {
     }
 
     private func startStreaming(_ markdown: String) {
-        streamCharacters = Array(markdown)
-        streamCursor = 0
-        containerView.resetContractStreamingSession()
+        streamTokens = MarkdownStreamingChunker.tokenize(markdown)
+        streamTokenCursor = 0
+        streamTotalCharacterCount = markdown.count
+        streamedCharacterCount = 0
+
+        if let engine = containerView.contractStreamingEngine {
+            streamingSession = MarkdownContract.StreamingMarkdownSession(
+                engine: engine,
+                parseOptions: .init(documentId: "animation.demo.stream")
+            )
+        } else {
+            streamingSession = nil
+        }
+
         statusLabel.text = "模式: 流式输入（进行中）"
 
         let interval = TimeInterval(Double(resolvedStreamIntervalMS) / 1000.0)
         streamingTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            self?.emitNextChunk()
+            Task { @MainActor [weak self] in
+                self?.emitNextChunk()
+            }
         }
     }
 
     private func emitNextChunk() {
-        guard streamCursor < streamCharacters.count else {
+        guard streamTokenCursor < streamTokens.count else {
             finishStreaming()
             return
         }
 
-        let next = min(streamCursor + resolvedStreamChunkSize, streamCharacters.count)
-        let chunk = String(streamCharacters[streamCursor..<next])
-        streamCursor = next
+        let next = MarkdownStreamingChunker.nextChunk(
+            from: streamTokens,
+            cursor: streamTokenCursor,
+            preferredCharacterCount: resolvedStreamChunkSize
+        )
+        let chunk = next.chunk
+        streamTokenCursor = next.nextCursor
+        streamedCharacterCount += chunk.count
 
         do {
-            _ = try containerView.appendContractStreamChunk(chunk)
+            if let session = streamingSession {
+                let update = try session.appendChunk(chunk)
+                try runtime.setRenderModel(update.model, isFinal: update.isFinal)
+            } else {
+                try runtime.setInput(
+                    .markdown(
+                        text: String(streamTokens.prefix(streamTokenCursor).joined()),
+                        documentID: "animation.demo.stream",
+                        rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                    )
+                )
+            }
         } catch {
             // Intermediate chunks can be invalid markdown; keep session alive.
         }
 
-        statusLabel.text = "模式: 流式输入（\(streamCursor)/\(streamCharacters.count)）"
+        statusLabel.text = "模式: 流式输入（\(streamedCharacterCount)/\(streamTotalCharacterCount)）"
 
-        if streamCursor >= streamCharacters.count {
+        if streamTokenCursor >= streamTokens.count {
             finishStreaming()
         }
     }
 
     private func finishStreaming() {
         do {
-            _ = try containerView.finishContractStreaming()
+            if let session = streamingSession {
+                let update = try session.finish()
+                try runtime.setRenderModel(update.model, isFinal: true)
+            } else {
+                try runtime.setInput(
+                    .markdown(
+                        text: contentTextView.text ?? "",
+                        documentID: "animation.demo.stream",
+                        rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                    )
+                )
+            }
             statusLabel.text = "模式: 流式输入（完成）"
         } catch {
             let markdown = contentTextView.text ?? ""
-            try? containerView.setContractMarkdown(
-                markdown,
-                rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+            try? runtime.setInput(
+                .markdown(
+                    text: markdown,
+                    documentID: "animation.demo.stream",
+                    rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                )
             )
             statusLabel.text = "流式完成失败，已回退整段渲染"
         }
@@ -512,6 +575,11 @@ final class AnimationDemoViewController: UIViewController {
     private func stopStreaming() {
         streamingTimer?.invalidate()
         streamingTimer = nil
+        streamingSession = nil
+        streamTokens = []
+        streamTokenCursor = 0
+        streamTotalCharacterCount = 0
+        streamedCharacterCount = 0
     }
 
     private func updatePreviewContainerFrame() {
@@ -574,9 +642,12 @@ final class AnimationDemoViewController: UIViewController {
         if streamingTimer != nil {
             stopStreaming()
             do {
-                try containerView.setContractMarkdown(
-                    contentTextView.text ?? "",
-                    rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                try runtime.setInput(
+                    .markdown(
+                        text: contentTextView.text ?? "",
+                        documentID: "animation.demo.stream",
+                        rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                    )
                 )
             } catch {
                 statusLabel.text = "停止流式后回填失败: \(error.localizedDescription)"

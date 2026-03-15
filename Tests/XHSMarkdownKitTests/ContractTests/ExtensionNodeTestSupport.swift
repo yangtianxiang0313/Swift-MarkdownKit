@@ -7,6 +7,8 @@ enum ExtensionNodeTestSupport {
     static let tabsKind: MarkdownContract.NodeKind = .ext(.init(namespace: "demo", name: "tabs"))
     static let mentionKind: MarkdownContract.NodeKind = .ext(.init(namespace: "demo", name: "mention"))
     static let spoilerKind: MarkdownContract.NodeKind = .ext(.init(namespace: "demo", name: "spoiler"))
+    static let citeKind: MarkdownContract.NodeKind = .ext(.init(namespace: "demo", name: "cite"))
+    static let thinkKind: MarkdownContract.NodeKind = .ext(.init(namespace: "demo", name: "think"))
 
     static func makeNodeSpecRegistry() -> MarkdownContract.NodeSpecRegistry {
         let registry = MarkdownContract.NodeSpecRegistry.core()
@@ -24,22 +26,44 @@ enum ExtensionNodeTestSupport {
             childPolicy: .blockOnly(minChildren: 1),
             parseAliases: [.init(sourceKind: .directive, name: "Tabs")]
         ))
-
-        registry.register(.init(
-            kind: mentionKind,
-            role: .inlineLeaf,
-            childPolicy: .none,
-            parseAliases: [.init(sourceKind: .htmlTag, name: "mention")]
-        ))
-
-        registry.register(.init(
-            kind: spoilerKind,
-            role: .inlineContainer,
-            childPolicy: .inlineOnly(minChildren: 0),
-            parseAliases: [.init(sourceKind: .htmlTag, name: "spoiler")]
-        ))
+        makeTagSchemaRegistry().install(into: registry)
 
         return registry
+    }
+
+    static func makeTagSchemaRegistry() -> MarkdownContract.TagSchemaRegistry {
+        MarkdownContract.TagSchemaRegistry(
+            schemas: [
+                .init(
+                    tagName: "mention",
+                    nodeKind: mentionKind,
+                    role: .inlineLeaf,
+                    childPolicy: .none,
+                    pairingMode: .selfClosing
+                ),
+                .init(
+                    tagName: "spoiler",
+                    nodeKind: spoilerKind,
+                    role: .inlineContainer,
+                    childPolicy: .inlineOnly(minChildren: 0),
+                    pairingMode: .both
+                ),
+                .init(
+                    tagName: "cite",
+                    nodeKind: citeKind,
+                    role: .inlineContainer,
+                    childPolicy: .inlineOnly(minChildren: 0),
+                    pairingMode: .paired
+                ),
+                .init(
+                    tagName: "think",
+                    nodeKind: thinkKind,
+                    role: .blockContainer,
+                    childPolicy: .blockOnly(minChildren: 0),
+                    pairingMode: .paired
+                )
+            ]
+        )
     }
 
     static func makeRendererRegistry() -> MarkdownContract.CanonicalRendererRegistry {

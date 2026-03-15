@@ -17,7 +17,7 @@ extension MarkdownContract {
         }
     }
 
-    public struct ChildPolicy: Sendable, Equatable {
+    public struct ChildPolicy: Sendable, Equatable, Codable {
         public var allowedChildRoles: Set<NodeRole>
         public var minChildren: Int
         public var maxChildren: Int?
@@ -100,10 +100,12 @@ extension MarkdownContract {
     public final class NodeSpecRegistry: @unchecked Sendable {
         private var specsByKind: [NodeKind: NodeSpec]
         private var kindByAlias: [ParseAlias: NodeKind]
+        private var tagPairingModeByHTMLTagName: [String: TagPairingMode]
 
         public init(registerCoreSpecs: Bool = true) {
             self.specsByKind = [:]
             self.kindByAlias = [:]
+            self.tagPairingModeByHTMLTagName = [:]
 
             if registerCoreSpecs {
                 for spec in Self.coreSpecs {
@@ -126,6 +128,15 @@ extension MarkdownContract {
         public func resolveKind(sourceKind: SourceKind, name: String) -> NodeKind? {
             let key = ParseAlias(sourceKind: sourceKind, name: name)
             return kindByAlias[key]
+        }
+
+        public func registerTagSchema(_ schema: TagSchema) {
+            register(schema.makeNodeSpec())
+            tagPairingModeByHTMLTagName[schema.tagName] = schema.pairingMode
+        }
+
+        public func tagPairingMode(forHTMLTagName tagName: String) -> TagPairingMode? {
+            tagPairingModeByHTMLTagName[tagName.lowercased()]
         }
 
         public static func core() -> NodeSpecRegistry {

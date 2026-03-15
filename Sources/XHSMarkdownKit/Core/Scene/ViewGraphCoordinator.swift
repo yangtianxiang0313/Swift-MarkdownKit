@@ -3,9 +3,15 @@ import UIKit
 public final class ViewGraphCoordinator {
     private let sceneApplier: SceneApplier
     private var managedViews: [String: UIView] = [:]
+    var interactionHandler: ((RenderScene.Node, SceneInteractionPayload) -> Bool)? {
+        didSet {
+            sceneApplier.interactionHandler = interactionHandler
+        }
+    }
 
     public init(containerView: UIView) {
         self.sceneApplier = SceneApplier(containerView: containerView)
+        self.sceneApplier.interactionHandler = interactionHandler
     }
 
     @discardableResult

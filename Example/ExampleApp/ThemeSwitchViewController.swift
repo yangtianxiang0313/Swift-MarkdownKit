@@ -32,6 +32,16 @@ class ThemeSwitchViewController: UIViewController, MarkdownContainerViewDelegate
         return view
     }()
 
+    @MainActor
+    private lazy var runtime: MarkdownRuntime = {
+        let runtime = ExampleMarkdownRuntime.makeRuntime()
+        runtime.eventHandler = { event in
+            print("[ThemeSwitch runtime]", event.action, event.nodeKind.rawValue, event.payload)
+            return .continueDefault
+        }
+        return runtime
+    }()
+
     private var containerHeightConstraint: NSLayoutConstraint?
 
     private lazy var customizeButton: UIButton = {
@@ -117,6 +127,22 @@ class ThemeSwitchViewController: UIViewController, MarkdownContainerViewDelegate
 
     访问 [XHSMarkdownKit](https://example.com) 了解更多。
 
+    ## Contract 节点
+
+    @Callout(title: "Theme Callout")
+
+    @Panel(style: "neutral") {
+    - mention: <mention userId="theme-user" />
+    - badge: <badge text="THEME" />
+    - chip: <chip text="palette" />
+    - cite: <Cite id="theme-cite-001">theme-ref</Cite>
+    }
+
+    <Think id="theme-think-001">
+    - 当前主题是否影响自定义节点
+    - 是否影响 ~~删除线~~ 与 `inline code`
+    </Think>
+
     ---
 
     *切换上方的主题选项查看不同效果*
@@ -127,6 +153,7 @@ class ThemeSwitchViewController: UIViewController, MarkdownContainerViewDelegate
     override func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
+        runtime.attach(to: containerView)
     }
 
     override func viewDidLayoutSubviews() {
@@ -262,12 +289,15 @@ class ThemeSwitchViewController: UIViewController, MarkdownContainerViewDelegate
     private func renderWithCurrentTheme() {
         containerView.theme = currentTheme
         do {
-            try containerView.setContractMarkdown(
-                sampleMarkdown,
-                rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+            try runtime.setInput(
+                .markdown(
+                    text: sampleMarkdown,
+                    documentID: "example.theme",
+                    rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                )
             )
         } catch {
-            assertionFailure("Contract render failed: \(error)")
+            print("ThemeSwitch render failed: \(error)")
         }
     }
 

@@ -1,5 +1,7 @@
 # Contract Rendering Guide
 
+See also: `CAPABILITY_PLAYBOOK.md` for the full capability matrix and example map.
+
 ## 0. CocoaPods Quickstart
 
 ```ruby
@@ -97,6 +99,28 @@ let view = MarkdownContainerView(
 view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
 try view.setContractMarkdown("# Hello")
 ```
+
+## 3.1 Runtime-Managed State and Unified Event Bus
+
+```swift
+let runtime = MarkdownRuntime()
+runtime.attach(to: view)
+
+runtime.eventHandler = { event in
+    print(event.action, event.payload)
+    return .continueDefault
+}
+
+runtime.persistenceAdapter = yourPersistenceAdapter
+runtime.dataBindingAdapter = yourDataBindingAdapter
+
+try runtime.setInput(
+    .markdown(text: "hello [link](https://example.com)", documentID: "doc.runtime")
+)
+```
+
+Runtime keeps `StateSnapshot` internally and emits unified events (`activate/toggle/copy/reset/custom.*`).
+External layer only handles data binding and persistence adapters.
 
 ## 4. Extension Rendering
 

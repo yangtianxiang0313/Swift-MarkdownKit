@@ -103,5 +103,55 @@ extension MarkdownContract {
                 throw MarkdownContract.ModelError.schemaInvalid(from: error)
             }
         }
+
+        public static func decodeNodeExtensionDescriptor(from data: Data) throws -> NodeExtensionDescriptor {
+            do {
+                let descriptor = try decoder().decode(NodeExtensionDescriptor.self, from: data)
+                try descriptor.validate()
+                return descriptor
+            } catch let error as MarkdownContract.ModelError {
+                throw error
+            } catch {
+                throw MarkdownContract.ModelError.schemaInvalid(from: error)
+            }
+        }
+
+        public static func encodeNodeExtensionDescriptor(_ descriptor: NodeExtensionDescriptor) throws -> Data {
+            do {
+                try descriptor.validate()
+                return try encoder().encode(descriptor)
+            } catch let error as MarkdownContract.ModelError {
+                throw error
+            } catch {
+                throw MarkdownContract.ModelError.schemaInvalid(from: error)
+            }
+        }
+
+        public static func decodeNodeExtensionDescriptors(from data: Data) throws -> [NodeExtensionDescriptor] {
+            do {
+                let descriptors = try decoder().decode([NodeExtensionDescriptor].self, from: data)
+                for descriptor in descriptors {
+                    try descriptor.validate()
+                }
+                return descriptors
+            } catch let error as MarkdownContract.ModelError {
+                throw error
+            } catch {
+                throw MarkdownContract.ModelError.schemaInvalid(from: error)
+            }
+        }
+
+        public static func encodeNodeExtensionDescriptors(_ descriptors: [NodeExtensionDescriptor]) throws -> Data {
+            do {
+                for descriptor in descriptors {
+                    try descriptor.validate()
+                }
+                return try encoder().encode(descriptors)
+            } catch let error as MarkdownContract.ModelError {
+                throw error
+            } catch {
+                throw MarkdownContract.ModelError.schemaInvalid(from: error)
+            }
+        }
     }
 }

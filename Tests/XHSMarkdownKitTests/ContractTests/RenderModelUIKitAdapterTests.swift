@@ -301,6 +301,131 @@ final class RenderModelUIKitAdapterTests: XCTestCase {
         XCTAssertEqual(font?.isBold, true)
     }
 
+    func testLinkInlineCarriesInteractionAnchorAttributes() throws {
+        let engine = MarkdownnAdapter.makeEngine()
+        let model = try engine.render("[OpenAI](https://openai.com)")
+
+        let adapter = makeAdapter()
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
+
+        guard let mergedNode = scene.flattenRenderableNodes().first(where: { $0.component is MergedTextSceneComponent }),
+              let component = mergedNode.component as? MergedTextSceneComponent else {
+            XCTFail("merged text node missing")
+            return
+        }
+
+        let text = component.attributedText.string as NSString
+        let linkRange = text.range(of: "OpenAI")
+        XCTAssertNotEqual(linkRange.location, NSNotFound)
+
+        let nodeID = component.attributedText.attribute(
+            .xhsInteractionNodeID,
+            at: linkRange.location,
+            effectiveRange: nil
+        ) as? String
+        let nodeKind = component.attributedText.attribute(
+            .xhsInteractionNodeKind,
+            at: linkRange.location,
+            effectiveRange: nil
+        ) as? String
+        let url = component.attributedText.attribute(
+            .link,
+            at: linkRange.location,
+            effectiveRange: nil
+        ) as? String
+
+        XCTAssertNotNil(nodeID)
+        XCTAssertEqual(nodeKind, MarkdownContract.InlineKind.link.rawValue)
+        XCTAssertEqual(url, "https://openai.com")
+    }
+
+    func testThematicBreakViewHasBoundedHeight() throws {
+        let engine = MarkdownnAdapter.makeEngine()
+        let model = try engine.render("---")
+
+        let adapter = makeAdapter()
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
+
+        guard let ruleNode = scene.flattenRenderableNodes().first(where: { $0.kind == "thematicBreak" }),
+              let ruleComponent = ruleNode.component as? RuleSceneComponent else {
+            XCTFail("thematicBreak scene component missing")
+            return
+        }
+
+        let view = ruleComponent.makeView()
+        ruleComponent.configure(view: view, maxWidth: 320)
+        let fitted = view.sizeThatFits(CGSize(width: 320, height: CGFloat.greatestFiniteMagnitude))
+        let expected = ruleComponent.height + ruleComponent.verticalPadding * 2
+
+        XCTAssertTrue(fitted.height.isFinite)
+        XCTAssertEqual(fitted.height, expected, accuracy: 0.001)
+        XCTAssertLessThan(fitted.height, 200)
+    }
+
+    func testBlockQuoteThematicBreakAppliesLeadingInset() throws {
+        let engine = MarkdownnAdapter.makeEngine()
+        let model = try engine.render("> ---")
+
+        let adapter = makeAdapter()
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
+
+        guard let ruleNode = scene.flattenRenderableNodes().first(where: { $0.kind == "thematicBreak" }),
+              let ruleComponent = ruleNode.component as? RuleSceneComponent else {
+            XCTFail("thematicBreak scene component missing")
+            return
+        }
+
+        XCTAssertGreaterThan(ruleComponent.leadingInset, 0)
+    }
+
+    func testListItemChildThematicBreakUsesMarkerContentIndent() throws {
+        let model = MarkdownContract.RenderModel(
+            documentId: "doc-list-rule",
+            blocks: [
+                MarkdownContract.RenderBlock(
+                    id: "list-1",
+                    kind: .list,
+                    children: [
+                        MarkdownContract.RenderBlock(
+                            id: "item-1",
+                            kind: .listItem,
+                            children: [
+                                MarkdownContract.RenderBlock(
+                                    id: "p-1",
+                                    kind: .paragraph,
+                                    inlines: [
+                                        MarkdownContract.InlineSpan(id: "t-1", kind: .text, text: "item")
+                                    ]
+                                ),
+                                MarkdownContract.RenderBlock(
+                                    id: "hr-1",
+                                    kind: .thematicBreak
+                                )
+                            ]
+                        )
+                    ],
+                    metadata: [
+                        "attrs": .object([
+                            "ordered": .bool(false),
+                            "startIndex": .int(1)
+                        ])
+                    ]
+                )
+            ]
+        )
+
+        let adapter = makeAdapter()
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
+
+        guard let ruleNode = scene.flattenRenderableNodes().first(where: { $0.id == "hr-1" }),
+              let ruleComponent = ruleNode.component as? RuleSceneComponent else {
+            XCTFail("list item thematicBreak scene component missing")
+            return
+        }
+
+        XCTAssertGreaterThan(ruleComponent.leadingInset, 0)
+    }
+
     func testCodeBlockViewProvidesPositiveIntrinsicHeight() throws {
         let engine = MarkdownnAdapter.makeEngine()
         let model = try engine.render(
@@ -332,19 +457,39 @@ final class RenderModelUIKitAdapterTests: XCTestCase {
         XCTAssertTrue(height > 0, "expected positive intrinsic height, got \(height)")
     }
 
-    func testAdapterFailsWithoutMapperForExtensionNode() throws {
+    func testCodeBlockReadsCopyStatusFromProjectedUIState() throws {
+        let model = MarkdownContract.RenderModel(
+            documentId: "doc-code-status",
+            blocks: [
+                MarkdownContract.RenderBlock(
+                    id: "code-1",
+                    kind: .codeBlock,
+                    metadata: [
+                        "code": .string("print(1)"),
+                        "uiState": .object(["copyStatus": .string("copied")])
+                    ]
+                )
+            ]
+        )
+
+        let adapter = makeAdapter()
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
+        guard let codeNode = scene.flattenRenderableNodes().first(where: { $0.id == "code-1" }),
+              let component = codeNode.component as? CodeBlockSceneComponent else {
+            XCTFail("codeBlock component missing")
+            return
+        }
+
+        XCTAssertEqual(component.copyStatus, "copied")
+    }
+
+    func testAdapterUsesDefaultFallbackForExtensionBlockWithoutCustomMapper() throws {
         let engine = ExtensionNodeTestSupport.makeEngine()
         let model = try engine.render("@Callout")
 
         let adapter = makeAdapter()
-
-        XCTAssertThrowsError(try adapter.render(model: model, theme: .default, maxWidth: 320)) { error in
-            guard let modelError = error as? MarkdownContract.ModelError else {
-                XCTFail("Expected ModelError")
-                return
-            }
-            XCTAssertEqual(modelError.code, MarkdownContract.ModelError.Code.unknownNodeKind.rawValue)
-        }
+        let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
+        XCTAssertTrue(mergedText(from: scene).contains("[CALLOUT]"))
     }
 
     private func makeAdapter() -> MarkdownContract.RenderModelUIKitAdapter {

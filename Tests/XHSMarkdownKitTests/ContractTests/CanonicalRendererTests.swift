@@ -109,7 +109,7 @@ final class CanonicalRendererTests: XCTestCase {
         XCTAssertTrue(mergedInlines.contains(where: { $0.marks.contains(where: { $0.name == "spoiler" }) }))
     }
 
-    func testUnregisteredExtensionRendererFails() throws {
+    func testUnregisteredExtensionRendererUsesRoleBasedFallback() throws {
         let specs = ExtensionNodeTestSupport.makeNodeSpecRegistry()
         let parser = XYMarkdownContractParser(nodeSpecRegistry: specs)
         let renderer = MarkdownContract.DefaultCanonicalRenderer(
@@ -122,12 +122,48 @@ final class CanonicalRendererTests: XCTestCase {
             renderer: renderer
         )
 
-        XCTAssertThrowsError(try engine.render("before <mention userId=\"u1\" />")) { error in
-            guard let modelError = error as? MarkdownContract.ModelError else {
-                return XCTFail("Expected ModelError")
-            }
-            XCTAssertEqual(modelError.code, MarkdownContract.ModelError.Code.unknownNodeKind.rawValue)
-        }
+        let model = try engine.render("before <mention userId=\"u1\" />")
+        let spans = model.blocks.flatMap(\.inlines)
+        XCTAssertTrue(spans.contains(where: { $0.kind == ExtensionNodeTestSupport.mentionKind }))
+        XCTAssertTrue(spans.contains(where: { span in
+            span.kind == ExtensionNodeTestSupport.mentionKind
+                && span.metadata["sourceKind"] == .string("htmlTag")
+        }))
+    }
+
+    func testRoleBasedFallbackKeepsExtensionKindForBlockNodes() throws {
+        let specs = ExtensionNodeTestSupport.makeNodeSpecRegistry()
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: specs)
+        let renderer = MarkdownContract.DefaultCanonicalRenderer(
+            registry: .makeDefault(),
+            nodeSpecRegistry: specs
+        )
+        let engine = MarkdownContractEngine(
+            parser: parser,
+            rewritePipeline: .init(nodeSpecRegistry: specs),
+            renderer: renderer
+        )
+
+        let model = try engine.render("@Callout", parseOptions: .init(parseBlockDirectives: true))
+        XCTAssertTrue(model.blocks.contains(where: { $0.kind == ExtensionNodeTestSupport.calloutKind }))
+    }
+
+    func testRoleBasedFallbackRendersInlineContainerChildren() throws {
+        let specs = ExtensionNodeTestSupport.makeNodeSpecRegistry()
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: specs)
+        let renderer = MarkdownContract.DefaultCanonicalRenderer(
+            registry: .makeDefault(),
+            nodeSpecRegistry: specs
+        )
+        let engine = MarkdownContractEngine(
+            parser: parser,
+            rewritePipeline: .init(nodeSpecRegistry: specs),
+            renderer: renderer
+        )
+
+        let model = try engine.render("before <Cite id=\"r1\">abcdfe</Cite> after")
+        let spans = model.blocks.flatMap(\.inlines)
+        XCTAssertTrue(spans.contains(where: { $0.text == "abcdfe" }))
     }
 
     func testStrikethroughProducesStrikethroughMark() throws {

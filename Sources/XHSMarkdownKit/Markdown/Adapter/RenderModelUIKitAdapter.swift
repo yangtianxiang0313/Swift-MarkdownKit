@@ -239,6 +239,13 @@ extension MarkdownContract {
                 return next
             }
 
+            func withAdditionalIndent(_ delta: CGFloat) -> Context {
+                guard delta.isFinite, delta > 0 else { return self }
+                var next = self
+                next.indent += delta
+                return next
+            }
+
             func enteringBlockQuote() -> Context {
                 var next = self
                 next.blockQuoteDepth += 1
@@ -287,6 +294,9 @@ extension MarkdownContract {
             let chain = BlockMapperChain()
             chain.append { block, context, adapter in
                 try adapter.mapCoreBlock(block, context: context)
+            }
+            chain.append { block, context, adapter in
+                try adapter.mapExtensionBlock(block, context: context)
             }
             return chain
         }
@@ -419,6 +429,9 @@ extension MarkdownContract {
             if let mapped = try mapCoreBlock(block, context: context) {
                 return mapped
             }
+            if let mapped = try mapExtensionBlock(block, context: context) {
+                return mapped
+            }
             throw MarkdownContract.ModelError(
                 code: .unknownNodeKind,
                 message: "No default mapper handled \(block.kind.rawValue)",
@@ -504,6 +517,13 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
             }
         }
         return nil
+    }
+
+    func mapExtensionBlock(_ block: MarkdownContract.RenderBlock, context: Context) throws -> [MarkdownContract.BlockMappingResult]? {
+        guard block.kind.isExtension else {
+            return nil
+        }
+        return try mapCustomBlock(block, context: context)
     }
 
     func mapDocumentBlock(_ block: MarkdownContract.RenderBlock, context: Context) throws -> [MarkdownContract.BlockMappingResult] {
@@ -649,7 +669,8 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
         }
 
         if !remainingChildren.isEmpty {
-            results.append(contentsOf: try mapBlocks(remainingChildren, context: context))
+            let childContext = context.withAdditionalIndent(markerWidth)
+            results.append(contentsOf: try mapBlocks(remainingChildren, context: childContext))
         }
 
         return results
@@ -669,10 +690,13 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
     func mapCodeBlock(_ block: MarkdownContract.RenderBlock, context: Context) throws -> [MarkdownContract.BlockMappingResult] {
         let code = block.contractAttrString(for: "code") ?? block.inlines.map(\.text).joined()
         let language = block.contractAttrString(for: "language")
+        let copyStatus = block.contractUIStateString(for: "copyStatus") ?? "idle"
 
         let component = CodeBlockSceneComponent(
             code: code,
             language: language,
+            copyStatus: copyStatus,
+            debugNodeID: block.id,
             font: context.theme.code.font,
             textColor: context.theme.code.block.textColor,
             backgroundColor: context.theme.code.block.backgroundColor,
@@ -708,13 +732,15 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
     }
 
     func mapThematicBreakBlock(_ block: MarkdownContract.RenderBlock, context: Context) throws -> [MarkdownContract.BlockMappingResult] {
+        let leadingInset = context.indent + quoteTextIndent(for: context)
         let node = makeStandaloneNode(
             id: block.id,
             kind: "thematicBreak",
             component: RuleSceneComponent(
                 color: context.theme.thematicBreak.color,
                 height: context.theme.thematicBreak.height,
-                verticalPadding: context.theme.thematicBreak.verticalPadding
+                verticalPadding: context.theme.thematicBreak.verticalPadding,
+                leadingInset: leadingInset
             ),
             spacingAfter: blockSpacing(for: .thematicBreak, theme: context.theme, layoutHints: block.layoutHints),
             metadata: block.metadata
@@ -992,10 +1018,25 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
             if context.theme.link.underlineStyle != [] {
                 attributes[.underlineStyle] = context.theme.link.underlineStyle.rawValue
             }
+            annotateInteractionAnchor(
+                attributes: &attributes,
+                nodeID: span.id,
+                nodeKind: MarkdownContract.InlineKind.link.rawValue,
+                stateKey: span.contractAttrString(for: "stateKey")
+            )
         }
 
         for mark in span.marks {
             apply(mark: mark, to: &attributes, block: block, context: context)
+        }
+
+        if span.marks.contains(where: { $0.name == "link" }) {
+            annotateInteractionAnchor(
+                attributes: &attributes,
+                nodeID: span.id,
+                nodeKind: MarkdownContract.InlineKind.link.rawValue,
+                stateKey: span.contractAttrString(for: "stateKey")
+            )
         }
 
         return NSAttributedString(string: text, attributes: attributes)
@@ -1064,6 +1105,19 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
             return 0
         }
         return theme.spacing.paragraph
+    }
+
+    func annotateInteractionAnchor(
+        attributes: inout [NSAttributedString.Key: Any],
+        nodeID: String,
+        nodeKind: String,
+        stateKey: String?
+    ) {
+        attributes[.xhsInteractionNodeID] = nodeID
+        attributes[.xhsInteractionNodeKind] = nodeKind
+        if let stateKey, !stateKey.isEmpty {
+            attributes[.xhsInteractionStateKey] = stateKey
+        }
     }
 
     func applyingTextLayout(
@@ -1331,6 +1385,12 @@ public extension MarkdownContract.RenderBlock {
             return value
         }
 
+        if case let .object(attrs)? = metadata["attrs"],
+           case let .object(htmlAttributes)? = attrs["attributes"],
+           case let .string(value)? = htmlAttributes[key] {
+            return value
+        }
+
         if case let .string(value)? = additionalFields[key] {
             return value
         }
@@ -1368,6 +1428,16 @@ public extension MarkdownContract.RenderBlock {
         }
 
         return nil
+    }
+
+    func contractUIStateString(for key: String) -> String? {
+        guard case let .object(uiState)? = metadata["uiState"] else {
+            return nil
+        }
+        guard case let .string(value)? = uiState[key] else {
+            return nil
+        }
+        return value
     }
 }
 
@@ -1425,6 +1495,12 @@ public extension MarkdownContract.InlineSpan {
         }
 
         if case let .object(attrs)? = metadata["attrs"], case let .string(value)? = attrs[key] {
+            return value
+        }
+
+        if case let .object(attrs)? = metadata["attrs"],
+           case let .object(htmlAttributes)? = attrs["attributes"],
+           case let .string(value)? = htmlAttributes[key] {
             return value
         }
 

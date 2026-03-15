@@ -60,6 +60,7 @@ extension MarkdownContract {
         private var inlineRenderers: [NodeKind: InlineRenderer] = [:]
         private var blockFallbackRenderer: BlockRenderer?
         private var inlineFallbackRenderer: InlineRenderer?
+        private var extensionRoleResolver: ((NodeKind) -> NodeRole?)?
 
         public init() {}
 
@@ -83,17 +84,17 @@ extension MarkdownContract {
             plugin.register(into: self)
         }
 
+        public func setExtensionRoleResolver(_ resolver: @escaping (NodeKind) -> NodeRole?) {
+            extensionRoleResolver = resolver
+        }
+
         public func renderBlocks(node: CanonicalNode, context: CanonicalRenderContext) throws -> [RenderBlock] {
             if let renderer = blockRenderers[node.kind] {
                 return try renderer(node, context, self)
             }
 
-            if node.kind.isExtension {
-                throw MarkdownContract.ModelError(
-                    code: .unknownNodeKind,
-                    message: "Renderer not registered for extension block node kind: \(node.kind.rawValue)",
-                    path: "kind"
-                )
+            if node.kind.isExtension, let resolveRole = extensionRoleResolver, let role = resolveRole(node.kind) {
+                return try defaultExtensionBlockFallback(node: node, role: role, context: context)
             }
 
             if let fallback = blockFallbackRenderer {
@@ -108,12 +109,8 @@ extension MarkdownContract {
                 return try renderer(node, context, self)
             }
 
-            if node.kind.isExtension {
-                throw MarkdownContract.ModelError(
-                    code: .unknownNodeKind,
-                    message: "Renderer not registered for extension inline node kind: \(node.kind.rawValue)",
-                    path: "kind"
-                )
+            if node.kind.isExtension, let resolveRole = extensionRoleResolver, let role = resolveRole(node.kind) {
+                return try defaultExtensionInlineFallback(node: node, role: role, context: context)
             }
 
             if let fallback = inlineFallbackRenderer {
@@ -174,6 +171,9 @@ extension MarkdownContract {
             self.registry = registry
             self.nodeSpecRegistry = nodeSpecRegistry
             self.treeValidator = TreeValidator(registry: nodeSpecRegistry)
+            self.registry.setExtensionRoleResolver { kind in
+                nodeSpecRegistry.spec(for: kind)?.role
+            }
         }
 
         public func render(document: CanonicalDocument, options: CanonicalRenderOptions = CanonicalRenderOptions()) throws -> RenderModel {
@@ -387,6 +387,72 @@ extension MarkdownContract {
 // MARK: - Registry Helpers
 
 private extension MarkdownContract.CanonicalRendererRegistry {
+    func defaultExtensionBlockFallback(
+        node: MarkdownContract.CanonicalNode,
+        role: MarkdownContract.NodeRole,
+        context: MarkdownContract.CanonicalRenderContext
+    ) throws -> [MarkdownContract.RenderBlock] {
+        if role == .blockContainer {
+            return [
+                makeBlock(
+                    node: node,
+                    kind: node.kind,
+                    context: context,
+                    children: try renderBlockChildren(of: node, context: context)
+                )
+            ]
+        }
+
+        if role == .blockLeaf {
+            return [
+                makeBlock(
+                    node: node,
+                    kind: node.kind,
+                    context: context
+                )
+            ]
+        }
+
+        return try defaultBlockFallback(node: node, context: context)
+    }
+
+    func defaultExtensionInlineFallback(
+        node: MarkdownContract.CanonicalNode,
+        role: MarkdownContract.NodeRole,
+        context: MarkdownContract.CanonicalRenderContext
+    ) throws -> [MarkdownContract.InlineSpan] {
+        if role == .inlineLeaf {
+            return [
+                MarkdownContract.InlineSpan(
+                    id: node.id,
+                    kind: node.kind,
+                    text: inlineText(for: node),
+                    marks: [],
+                    metadata: baseMetadata(for: node)
+                )
+            ]
+        }
+
+        if role == .inlineContainer {
+            let children = try renderInlineChildren(of: node, context: context)
+            if !children.isEmpty {
+                return children
+            }
+
+            return [
+                MarkdownContract.InlineSpan(
+                    id: node.id,
+                    kind: node.kind,
+                    text: inlineText(for: node),
+                    marks: [],
+                    metadata: baseMetadata(for: node)
+                )
+            ]
+        }
+
+        return defaultInlineFallback(node: node, context: context)
+    }
+
     func defaultBlockFallback(node: MarkdownContract.CanonicalNode, context: MarkdownContract.CanonicalRenderContext) throws -> [MarkdownContract.RenderBlock] {
         let childBlocks = try renderBlockChildren(of: node, context: context)
 

@@ -57,6 +57,16 @@ class MarkdownPreviewViewController: UIViewController {
         markdownPluginInstalled = true
         return view
     }()
+
+    @MainActor
+    private lazy var runtime: MarkdownRuntime = {
+        let runtime = ExampleMarkdownRuntime.makeRuntime()
+        runtime.eventHandler = { event in
+            print("[MarkdownPreview runtime]", event.action, event.nodeKind.rawValue, event.payload)
+            return .continueDefault
+        }
+        return runtime
+    }()
     
     private lazy var sampleButton: UIBarButtonItem = {
         return UIBarButtonItem(
@@ -80,6 +90,7 @@ class MarkdownPreviewViewController: UIViewController {
         ("表格", tableSample),
         ("混合内容", mixedSample),
         ("Contract自定义节点", contractCustomSample),
+        ("Contract全量覆盖", contractFullCoverageSample),
         ("边界测试", edgeCaseSample)
     ]
     
@@ -94,6 +105,7 @@ class MarkdownPreviewViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
+        runtime.attach(to: containerView)
         loadDefaultSample()
     }
     
@@ -243,9 +255,12 @@ class MarkdownPreviewViewController: UIViewController {
         updateContainerFrame()
 
         do {
-            try containerView.setContractMarkdown(
-                markdown,
-                rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+            try runtime.setInput(
+                .markdown(
+                    text: markdown,
+                    documentID: "example.preview",
+                    rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                )
             )
             clearRenderErrorStatus()
             navigationItem.prompt = markdownPluginInstalled
@@ -485,8 +500,46 @@ class MarkdownPreviewViewController: UIViewController {
     }
 
     正文中支持 inline HTML：欢迎体验 <mention userId="preview-user" /> 与 <spoiler text="剧透文本" />。
+    也支持成对标签：<Cite id="cite-preview-001">abcdfe</Cite>。
 
     同时支持核心删除线：~~旧内容~~ -> 新内容。
+    """
+
+    static let contractFullCoverageSample = """
+    # Contract 全量覆盖样例
+
+    @Hero(title: "Preview Full Coverage", subtitle: "custom nodes + runtime-friendly metadata")
+
+    @Callout(title: "Block Leaf")
+
+    @Panel(style: "warning") {
+    ### Panel Content
+    - mention: <mention userId="preview-full-user" />
+    - badge: <badge text="FULL" />
+    - chip: <chip text="Regression" />
+    - cite: <Cite id="preview-cite-001">citation-a</Cite>
+    }
+
+    <Think id="preview-think-001">
+    ### Thinking
+    - validate parser/schema
+    - validate canonical/render model
+    - validate runtime event + state
+    </Think>
+
+    正文特殊格式：
+    ~~old~~ -> **new**，`inline code`，[link](https://example.com/preview?mode=full)。
+
+    ```swift
+    let runtime = MarkdownRuntime()
+    runtime.attach(to: view)
+    ```
+
+    | item | status | note |
+    | --- | :---: | --- |
+    | custom nodes | ✅ | callout/panel/think/cite |
+    | special formats | ✅ | strike/code/link |
+    | render chain | ✅ | parse -> canonical -> render |
     """
     
     // MARK: - 边界测试用例

@@ -66,6 +66,61 @@ final class XYMarkdownContractParserTests: XCTestCase {
         XCTAssertNotNil(spoiler)
     }
 
+    func testParsesPairedHTMLTagAsInlineContainerWithChildren() throws {
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: ExtensionNodeTestSupport.makeNodeSpecRegistry())
+        let markdown = "prefix <Cite id=\"ref-1\">abcdfe</Cite> suffix"
+
+        let document = try parser.parse(markdown, options: .init(documentId: "doc-cite-paired"))
+        let nodes = flatten(document.root)
+        guard let cite = nodes.first(where: { $0.kind == ExtensionNodeTestSupport.citeKind }) else {
+            XCTFail("Expected cite extension node")
+            return
+        }
+
+        XCTAssertEqual(cite.source.sourceKind, .htmlTag)
+        XCTAssertFalse(cite.children.isEmpty)
+        XCTAssertTrue(cite.children.contains(where: { node in
+            node.kind == .text && node.attrs["text"] == .string("abcdfe")
+        }))
+    }
+
+    func testParsesPairedHTMLTagAsBlockContainerWithChildren() throws {
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: ExtensionNodeTestSupport.makeNodeSpecRegistry())
+        let markdown = """
+        <Think id="think-1">
+        - step 1
+        - step 2
+        </Think>
+        """
+
+        let document = try parser.parse(markdown, options: .init(documentId: "doc-think-paired"))
+        let nodes = flatten(document.root)
+        guard let think = nodes.first(where: { $0.kind == ExtensionNodeTestSupport.thinkKind }) else {
+            XCTFail("Expected think extension node")
+            return
+        }
+
+        XCTAssertEqual(think.source.sourceKind, .htmlTag)
+        XCTAssertFalse(think.children.isEmpty)
+        XCTAssertTrue(flatten(think).contains(where: { node in
+            node.kind == .text && node.attrs["text"] == .string("step 1")
+        }))
+    }
+
+    func testSelfClosingOnlyTagDoesNotConsumePairedBody() throws {
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: ExtensionNodeTestSupport.makeNodeSpecRegistry())
+        let markdown = "start <mention userId=\"bob\">hello</mention> end"
+
+        let document = try parser.parse(markdown, options: .init(documentId: "doc-self-closing-only"))
+        let nodes = flatten(document.root)
+
+        let mentionNodes = nodes.filter { $0.kind == ExtensionNodeTestSupport.mentionKind }
+        XCTAssertEqual(mentionNodes.count, 1)
+        XCTAssertTrue(nodes.contains(where: { node in
+            node.kind == .text && node.attrs["text"] == .string("hello")
+        }))
+    }
+
     func testClosingHTMLTagsAreIgnoredForExtensionResolution() throws {
         let spotlightKind: MarkdownContract.NodeKind = .ext(.init(namespace: "demo", name: "spotlight"))
         let specs = MarkdownContract.NodeSpecRegistry.core()
@@ -188,6 +243,22 @@ final class XYMarkdownContractParserTests: XCTestCase {
 
         let strike = nodes.first { $0.kind == .strikethrough }
         XCTAssertNotNil(strike)
+    }
+
+    func testListItemWithLeadingInlineExtensionParsesSuccessfully() throws {
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: ExtensionNodeTestSupport.makeNodeSpecRegistry())
+        let markdown = """
+        - <mention userId="alice" />
+        - <Cite id="ref-list-1">ref-list-1</Cite>
+        """
+
+        let document = try parser.parse(markdown, options: .init(documentId: "doc-list-leading-inline-ext"))
+        let nodes = flatten(document.root)
+
+        XCTAssertTrue(nodes.contains(where: { $0.kind == .list }))
+        XCTAssertTrue(nodes.contains(where: { $0.kind == .listItem }))
+        XCTAssertTrue(nodes.contains(where: { $0.kind == ExtensionNodeTestSupport.mentionKind }))
+        XCTAssertTrue(nodes.contains(where: { $0.kind == ExtensionNodeTestSupport.citeKind }))
     }
 
     private func flatten(_ root: MarkdownContract.CanonicalNode) -> [MarkdownContract.CanonicalNode] {
