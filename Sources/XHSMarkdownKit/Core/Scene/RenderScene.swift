@@ -11,8 +11,10 @@ enum SceneDebugLogger {
 
     private static let envKey = "XHS_SCENE_DEBUG"
     private static let verboseEnvKey = "XHS_SCENE_DEBUG_VERBOSE"
+    private static let frameEnvKey = "XHS_SCENE_FRAME_DEBUG"
     private static let defaultsKey = "xhs.scene.debug"
     private static let verboseDefaultsKey = "xhs.scene.debug.verbose"
+    private static let frameDefaultsKey = "xhs.scene.debug.frame"
 
     static var isEnabled: Bool {
 #if DEBUG
@@ -40,6 +42,22 @@ enum SceneDebugLogger {
         guard isEnabled else { return }
         guard level == .compact || isVerboseEnabled else { return }
         print("[XHSSceneDebug] \(message())")
+    }
+
+    static var isFrameEnabled: Bool {
+#if DEBUG
+        if let envValue = ProcessInfo.processInfo.environment[frameEnvKey], envValue == "1" {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: frameDefaultsKey)
+#else
+        return false
+#endif
+    }
+
+    static func logFrame(_ message: @autoclosure () -> String) {
+        guard isFrameEnabled else { return }
+        print("[XHSSceneFrame] \(message())")
     }
 }
 

@@ -15,6 +15,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         if UserDefaults.standard.object(forKey: "xhs.scene.debug") == nil {
             UserDefaults.standard.set(true, forKey: "xhs.scene.debug")
         }
+        if UserDefaults.standard.object(forKey: "xhs.scene.debug.frame") == nil {
+            UserDefaults.standard.set(true, forKey: "xhs.scene.debug.frame")
+        }
 #endif
         
         let tabBarController = UITabBarController()

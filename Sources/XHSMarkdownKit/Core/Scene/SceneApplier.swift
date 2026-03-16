@@ -3,6 +3,7 @@ import UIKit
 public final class SceneApplier {
     private let containerView: UIView
     var interactionHandler: ((RenderScene.Node, SceneInteractionPayload) -> Bool)?
+    private var applyPass: Int = 0
 
     public init(containerView: UIView) {
         self.containerView = containerView
@@ -15,15 +16,23 @@ public final class SceneApplier {
         maxWidth: CGFloat,
         managedViews: inout [String: UIView]
     ) -> CGFloat {
+        applyPass += 1
         let targetIDs = scene.componentNodeIDs()
 
         for (id, view) in managedViews where !targetIDs.contains(id) {
+            if SceneDebugLogger.isFrameEnabled {
+                let frame = view.frame
+                SceneDebugLogger.logFrame(
+                    "doc=\(scene.documentId) pass=\(applyPass) node=\(id) remove y=\(Int(frame.minY.rounded())) h=\(Int(frame.height.rounded()))"
+                )
+            }
             view.removeFromSuperview()
             managedViews.removeValue(forKey: id)
         }
 
         let result = layout(
             nodes: scene.nodes,
+            documentId: scene.documentId,
             in: containerView,
             originY: 0,
             maxWidth: max(1, maxWidth),
@@ -36,6 +45,7 @@ public final class SceneApplier {
 
     private func layout(
         nodes: [RenderScene.Node],
+        documentId: String,
         in parent: UIView,
         originY: CGFloat,
         maxWidth: CGFloat,
@@ -49,6 +59,7 @@ public final class SceneApplier {
             guard let component = node.component else {
                 let passthrough = layout(
                     nodes: node.children,
+                    documentId: documentId,
                     in: parent,
                     originY: y,
                     maxWidth: resolvedMaxWidth,
@@ -81,6 +92,7 @@ public final class SceneApplier {
                 let childMaxWidth = sanitize(resolvedMaxWidth - insets.left - insets.right, fallback: 1, minimum: 1)
                 let childLayout = layout(
                     nodes: node.children,
+                    documentId: documentId,
                     in: nestedContainer.sceneContentContainerView,
                     originY: 0,
                     maxWidth: childMaxWidth,
@@ -90,12 +102,23 @@ public final class SceneApplier {
 
                 let childEndY = sanitize(childLayout.endY, fallback: 0, minimum: 0)
                 let ownHeight = sanitize(max(baseHeight, insets.top + childEndY + insets.bottom), fallback: baseHeight, minimum: 1)
-                view.frame = CGRect(x: 0, y: y, width: resolvedMaxWidth, height: ownHeight)
-                nestedContainer.sceneContentContainerView.frame = CGRect(
+                applyFrame(
+                    to: view,
+                    node: node,
+                    frame: CGRect(x: 0, y: y, width: resolvedMaxWidth, height: ownHeight),
+                    documentId: documentId,
+                    role: "node"
+                )
+                applyChildContainerFrame(
+                    to: nestedContainer.sceneContentContainerView,
+                    node: node,
+                    frame: CGRect(
                     x: insets.left,
                     y: insets.top,
                     width: childMaxWidth,
                     height: childEndY
+                    ),
+                    documentId: documentId
                 )
 
                 orderedViews.append(view)
@@ -103,13 +126,20 @@ public final class SceneApplier {
                 continue
             }
 
-            view.frame = CGRect(x: 0, y: y, width: resolvedMaxWidth, height: baseHeight)
+            applyFrame(
+                to: view,
+                node: node,
+                frame: CGRect(x: 0, y: y, width: resolvedMaxWidth, height: baseHeight),
+                documentId: documentId,
+                role: "node"
+            )
             orderedViews.append(view)
             y = sanitize(y + baseHeight + spacingAfter, fallback: y + baseHeight, minimum: 0)
 
             if !node.children.isEmpty {
                 let passthrough = layout(
                     nodes: node.children,
+                    documentId: documentId,
                     in: parent,
                     originY: y,
                     maxWidth: resolvedMaxWidth,
@@ -199,6 +229,76 @@ public final class SceneApplier {
                 container.bringSubviewToFront(view)
             }
         }
+    }
+
+    private func applyFrame(
+        to view: UIView,
+        node: RenderScene.Node,
+        frame: CGRect,
+        documentId: String,
+        role: String
+    ) {
+        let oldFrame = view.frame
+        view.frame = frame
+        logFrameChange(
+            oldFrame: oldFrame,
+            newFrame: view.frame,
+            documentId: documentId,
+            nodeID: node.id,
+            kind: node.kind,
+            role: role,
+            view: view
+        )
+    }
+
+    private func applyChildContainerFrame(
+        to view: UIView,
+        node: RenderScene.Node,
+        frame: CGRect,
+        documentId: String
+    ) {
+        let oldFrame = view.frame
+        view.frame = frame
+        logFrameChange(
+            oldFrame: oldFrame,
+            newFrame: view.frame,
+            documentId: documentId,
+            nodeID: node.id,
+            kind: node.kind,
+            role: "childContainer",
+            view: view
+        )
+    }
+
+    private func logFrameChange(
+        oldFrame: CGRect,
+        newFrame: CGRect,
+        documentId: String,
+        nodeID: String,
+        kind: String,
+        role: String,
+        view: UIView
+    ) {
+        guard SceneDebugLogger.isFrameEnabled else { return }
+
+        let dy = newFrame.minY - oldFrame.minY
+        let dh = newFrame.height - oldFrame.height
+        let dw = newFrame.width - oldFrame.width
+        let moved = abs(dy) >= 0.5
+        let resized = abs(dh) >= 0.5 || abs(dw) >= 0.5
+        guard moved || resized else { return }
+
+        let positionAction = view.layer.action(forKey: "position")
+        let boundsAction = view.layer.action(forKey: "bounds")
+        let maybeLayerAnimated = hasLayerAnimationAction(positionAction) || hasLayerAnimationAction(boundsAction)
+        SceneDebugLogger.logFrame(
+            "doc=\(documentId) pass=\(applyPass) node=\(nodeID) kind=\(kind) role=\(role) y=\(Int(oldFrame.minY.rounded()))->\(Int(newFrame.minY.rounded())) h=\(Int(oldFrame.height.rounded()))->\(Int(newFrame.height.rounded())) dy=\(Int(dy.rounded())) dh=\(Int(dh.rounded())) uiAnim=\(UIView.areAnimationsEnabled ? 1 : 0) layerAnim=\(maybeLayerAnimated ? 1 : 0)"
+        )
+    }
+
+    private func hasLayerAnimationAction(_ action: CAAction?) -> Bool {
+        guard let action else { return false }
+        return !(action is NSNull)
     }
 }
 

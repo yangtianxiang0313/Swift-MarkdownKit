@@ -44,8 +44,8 @@
 5. Canonical renderer outputs `RenderModel`.
 6. UIKit adapter converts `RenderModel` to `RenderScene` (stable node IDs).
 7. Scene differ computes `SceneDiff` (`insert/remove/update/move`).
-8. Contract timeline compiles/mapping -> `AnimationPlan` (scene steps).
-9. Animation engine applies step effects and commits snapshots to container.
+8. Contract timeline compiles and maps to `RenderExecutionPlan` (staged structure/content execution).
+9. `RenderCommitCoordinator` executes staged updates with runtime sidecar progress state and commits snapshots to container.
 
 ## Node Kind Model
 
@@ -88,13 +88,10 @@
 
 ## Animation Strategy
 
-- Execution unit is scene step driven by `SceneDiff`.
-- Step payload: `entityIDs + fromScene + toScene + effectKey + dependencies`.
-- Scheduling modes:
-  - `groupedByPhase`
-  - `serialByChange`
-  - `parallel`
-- Streaming updates continuously append text, generate model diff/plan, and animate incremental scene states.
+- Execution unit is staged (`structure` / `content`) and derived from contract timeline + `SceneDelta`.
+- Runtime progress is tracked as sidecar state keyed by `documentId + entityId`; it is not stored on views or in scene model DTOs.
+- `RenderCommitCoordinator` is the single execution entry for instant and animated commits.
+- Streaming updates continuously append text, generate diff + compiled plan, and animate incremental scene states.
 
 ## Validation Gates
 

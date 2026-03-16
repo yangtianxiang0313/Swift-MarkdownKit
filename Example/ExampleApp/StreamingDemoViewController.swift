@@ -178,6 +178,10 @@ final class StreamingDemoViewController: UIViewController {
         let applied: Bool?
     }
 
+    private struct HeightState {
+        var reported: CGFloat
+    }
+
     private final class ContainerDelegateProxy: NSObject, MarkdownContainerViewDelegate {
         var onHeightChange: ((CGFloat) -> Void)?
 
@@ -207,7 +211,7 @@ final class StreamingDemoViewController: UIViewController {
             animationConcurrencyPolicy: AnimationConcurrencyPolicy,
             animationEffectKey: AnimationEffectKey,
             typingCharactersPerSecond: Int,
-            typingEntityAppearanceMode: TypingEffect.EntityAppearanceMode,
+            contentEntityAppearanceMode: ContentEntityAppearanceMode,
             onHeightChange: ((CGFloat) -> Void)?
         ) {
             self.id = id
@@ -223,7 +227,7 @@ final class StreamingDemoViewController: UIViewController {
             container.animationEffectKey = animationEffectKey
             container.animationMode = animationEffectKey == .instant ? .instant : .dualPhase
             container.typingCharactersPerSecond = max(1, typingCharactersPerSecond)
-            container.typingEntityAppearanceMode = typingEntityAppearanceMode
+            container.contentEntityAppearanceMode = contentEntityAppearanceMode
 
             delegateProxy = ContainerDelegateProxy()
             delegateProxy.onHeightChange = onHeightChange
@@ -424,7 +428,7 @@ final class StreamingDemoViewController: UIViewController {
         table.separatorStyle = .none
         table.keyboardDismissMode = .interactive
         table.rowHeight = UITableView.automaticDimension
-        table.estimatedRowHeight = 110
+        table.estimatedRowHeight = defaultEstimatedRowHeight
         table.dataSource = self
         table.delegate = self
         table.register(BubbleMarkdownCell.self, forCellReuseIdentifier: BubbleMarkdownCell.reuseID)
@@ -669,20 +673,25 @@ final class StreamingDemoViewController: UIViewController {
     private var streamTokenCursor = 0
     private var activeStreamingMessageID: String?
     private var shouldFollowBottom = true
-    private var isApplyingHeightUpdate = false
-    private var hasPendingHeightRelayout = false
+    private var isRelayoutScheduled = false
+    private var isRelayoutRunning = false
+    private var needsAnotherRelayoutPass = false
     private var currentConcurrencyPolicy: AnimationConcurrencyPolicy = .fullyOrdered
-    private var latestHeightsByMessageID: [String: CGFloat] = [:]
+    private var heightStateByMessageID: [String: HeightState] = [:]
 
     private var currentContentPreset: ReplyContentPreset = .taskPlan
     private var currentEffectMode: EffectMode = .typing
-    private var currentEntityAppearanceMode: TypingEffect.EntityAppearanceMode = .sequential
+    private var currentContentEntityAppearanceMode: ContentEntityAppearanceMode = .sequential
     private var currentTypingCharactersPerSecond: Int = 32
     private var currentStreamChunkSize: Int = 4
     private var currentStreamInterval: TimeInterval = 0.06
     private var lastScrollDebugSnapshot: ScrollDebugSnapshot?
     private var lastScrollDebugTimestamp: TimeInterval = 0
     private var lastUserScrollLoggedOffsetY: CGFloat = .nan
+    private var lastKnownTableWidth: CGFloat = 0
+
+    private let defaultEstimatedRowHeight: CGFloat = 110
+    private let rowChromeHeight: CGFloat = 28
 
     private static let scrollDebugEnvKey = "XHS_SCROLL_DEBUG"
     private static let scrollDebugDefaultsKey = "xhs.stream.scroll.debug"
@@ -703,6 +712,17 @@ final class StreamingDemoViewController: UIViewController {
 
     deinit {
         streamingTimer?.invalidate()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        let width = tableView.bounds.width
+        guard width > 0 else { return }
+        if abs(width - lastKnownTableWidth) < 1 {
+            return
+        }
+        lastKnownTableWidth = width
+        resetEffectiveHeightsForWidthChange()
     }
 
     private func setupUI() {
@@ -750,12 +770,12 @@ final class StreamingDemoViewController: UIViewController {
             animationConcurrencyPolicy: currentConcurrencyPolicy,
             animationEffectKey: currentEffectMode.effectKey,
             typingCharactersPerSecond: currentTypingCharactersPerSecond,
-            typingEntityAppearanceMode: currentEntityAppearanceMode
+            contentEntityAppearanceMode: currentContentEntityAppearanceMode
         ) { [weak self] newHeight in
-            self?.handleContentHeightChange(messageID: messageID, newHeight: newHeight)
+            self?.handleReportedHeightChange(messageID: messageID, newHeight: newHeight)
         }
 
-        latestHeightsByMessageID[messageID] = 0
+        heightStateByMessageID[messageID] = HeightState(reported: 0)
         if !isStreaming {
             item.renderStatic()
         }
@@ -767,7 +787,7 @@ final class StreamingDemoViewController: UIViewController {
         container.animationEffectKey = currentEffectMode.effectKey
         container.animationMode = currentEffectMode == .instant ? .instant : .dualPhase
         container.typingCharactersPerSecond = currentTypingCharactersPerSecond
-        container.typingEntityAppearanceMode = currentEntityAppearanceMode
+        container.contentEntityAppearanceMode = currentContentEntityAppearanceMode
     }
 
     private func applyAnimationConfigurationToAllMessages() {
@@ -867,56 +887,91 @@ final class StreamingDemoViewController: UIViewController {
         activeStreamingMessageID = nil
         streamTokens = []
         streamTokenCursor = 0
-        handleContentHeightChange(messageID: nil, newHeight: nil)
+        requestHeightRelayout(reason: "stream.stop")
     }
 
-    private func handleContentHeightChange(messageID: String?, newHeight: CGFloat?) {
-        if let messageID, let newHeight {
-            let previous = latestHeightsByMessageID[messageID] ?? 0
-            if abs(previous - newHeight) < 0.5 {
-                return
-            }
-            latestHeightsByMessageID[messageID] = newHeight
-            logScrollState(
-                reason: "height.msg",
-                note: "mid=\(messageID.prefix(6)) h=\(toDebugInt(previous))->\(toDebugInt(newHeight))"
-            )
+    private func handleReportedHeightChange(messageID: String, newHeight: CGFloat) {
+        let resolvedHeight = max(0, ceil(newHeight))
+        let previous = heightStateByMessageID[messageID] ?? HeightState(reported: 0)
+        if abs(previous.reported - resolvedHeight) < 0.5 {
+            return
         }
 
-        requestHeightRelayout()
+        let next = HeightState(reported: resolvedHeight)
+        heightStateByMessageID[messageID] = next
+
+        logScrollState(
+            reason: "height.msg",
+            note: "mid=\(messageID.prefix(6)) h=\(toDebugInt(previous.reported))->\(toDebugInt(resolvedHeight))"
+        )
+
+        requestHeightRelayout(reason: "height.msg")
     }
 
-    private func requestHeightRelayout() {
+    private func resetEffectiveHeightsForWidthChange() {
+        guard !heightStateByMessageID.isEmpty else { return }
+        // Width changes invalidate previous fixed row heights; let rows re-measure.
+        for messageID in heightStateByMessageID.keys {
+            heightStateByMessageID[messageID] = HeightState(reported: 0)
+        }
+        requestHeightRelayout(reason: "width.change")
+    }
+
+    private func requestHeightRelayout(reason: String) {
         if !Thread.isMainThread {
             DispatchQueue.main.async { [weak self] in
-                self?.requestHeightRelayout()
+                self?.requestHeightRelayout(reason: reason)
             }
             return
         }
 
-        if isApplyingHeightUpdate {
-            hasPendingHeightRelayout = true
+        needsAnotherRelayoutPass = true
+        guard !isRelayoutScheduled else {
             logScrollState(reason: "relayout.defer")
             return
         }
 
-        isApplyingHeightUpdate = true
-        applyHeightRelayoutPass()
-        isApplyingHeightUpdate = false
-
-        if hasPendingHeightRelayout {
-            hasPendingHeightRelayout = false
-            requestHeightRelayout()
+        isRelayoutScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            self?.drainHeightRelayoutQueue(triggerReason: reason)
         }
     }
 
-    private func applyHeightRelayoutPass() {
+    private func drainHeightRelayoutQueue(triggerReason: String) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.drainHeightRelayoutQueue(triggerReason: triggerReason)
+            }
+            return
+        }
+
+        guard !isRelayoutRunning else {
+            needsAnotherRelayoutPass = true
+            return
+        }
+
+        isRelayoutRunning = true
+        defer {
+            isRelayoutRunning = false
+            isRelayoutScheduled = false
+            if needsAnotherRelayoutPass {
+                requestHeightRelayout(reason: "relayout.requeue")
+            }
+        }
+
+        while needsAnotherRelayoutPass {
+            needsAnotherRelayoutPass = false
+            applyHeightRelayoutPass(triggerReason: triggerReason)
+        }
+    }
+
+    private func applyHeightRelayoutPass(triggerReason: String) {
         let previousContentHeight = tableView.contentSize.height
         let previousOffsetY = tableView.contentOffset.y
         let minOffsetY = minimumOffsetY()
         var targetY: CGFloat?
         var appliedOffset = false
-        var reason = "relayout.anchor"
+        var reason = shouldFollowBottom ? "relayout.follow" : "relayout.anchor"
 
         UIView.performWithoutAnimation {
             tableView.beginUpdates()
@@ -924,7 +979,6 @@ final class StreamingDemoViewController: UIViewController {
             tableView.layoutIfNeeded()
 
             if shouldFollowBottom {
-                reason = "relayout.follow"
                 let pinResult = pinBottomWithoutAnimation()
                 targetY = pinResult.targetY
                 appliedOffset = pinResult.applied
@@ -948,13 +1002,14 @@ final class StreamingDemoViewController: UIViewController {
             previousContentHeight: previousContentHeight,
             previousOffsetY: previousOffsetY,
             targetY: targetY,
-            applied: appliedOffset
+            applied: appliedOffset,
+            note: "src=\(triggerReason)"
         )
     }
 
     @objc private func resetConversation() {
         stopStreaming()
-        latestHeightsByMessageID.removeAll()
+        heightStateByMessageID.removeAll()
         seedConversation()
     }
 
@@ -968,7 +1023,7 @@ final class StreamingDemoViewController: UIViewController {
         for message in messages {
             message.container.skipAnimation()
         }
-        requestHeightRelayout()
+        requestHeightRelayout(reason: "skip.animation")
     }
 
     @objc private func followSwitchChanged() {
@@ -995,7 +1050,7 @@ final class StreamingDemoViewController: UIViewController {
     }
 
     @objc private func entityModeChanged() {
-        currentEntityAppearanceMode = entitySegmentedControl.selectedSegmentIndex == 0 ? .sequential : .simultaneous
+        currentContentEntityAppearanceMode = entitySegmentedControl.selectedSegmentIndex == 0 ? .sequential : .simultaneous
         applyAnimationConfigurationToAllMessages()
     }
 
@@ -1026,6 +1081,13 @@ final class StreamingDemoViewController: UIViewController {
             note: "animated=\(animated ? 1 : 0)"
         )
         tableView.scrollToRow(at: bottom, at: .bottom, animated: animated)
+    }
+
+    private func resolvedRowHeight(for messageID: String) -> CGFloat? {
+        guard let state = heightStateByMessageID[messageID], state.reported > 0 else {
+            return nil
+        }
+        return ceil(state.reported + rowChromeHeight)
     }
 
     private func minimumOffsetY() -> CGFloat {
@@ -1150,6 +1212,16 @@ private extension Dictionary where Key == String, Value == MarkdownContract.Valu
 extension StreamingDemoViewController: UITableViewDataSource, UITableViewDelegate {
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         messages.count
+    }
+
+    func tableView(_ tableView: UITableView, estimatedHeightForRowAt indexPath: IndexPath) -> CGFloat {
+        let message = messages[indexPath.row]
+        return resolvedRowHeight(for: message.id) ?? defaultEstimatedRowHeight
+    }
+
+    func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
+        let message = messages[indexPath.row]
+        return resolvedRowHeight(for: message.id) ?? UITableView.automaticDimension
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
