@@ -6,11 +6,9 @@ import XHSMarkdownCore
 public protocol ContractAnimationPlanMapping {
     func makePlan(
         contractPlan: MarkdownContract.CompiledAnimationPlan,
-        oldScene: RenderScene,
-        newScene: RenderScene,
-        diff: SceneDiff,
+        delta: SceneDelta,
         defaultEffectKey: AnimationEffectKey
-    ) -> AnimationPlan
+    ) -> RenderExecutionPlan
 }
 
 public struct DefaultContractAnimationPlanMapper: ContractAnimationPlanMapping {
@@ -18,77 +16,58 @@ public struct DefaultContractAnimationPlanMapper: ContractAnimationPlanMapping {
 
     public func makePlan(
         contractPlan: MarkdownContract.CompiledAnimationPlan,
-        oldScene: RenderScene,
-        newScene: RenderScene,
-        diff: SceneDiff,
+        delta: SceneDelta,
         defaultEffectKey: AnimationEffectKey
-    ) -> AnimationPlan {
-        guard !diff.isEmpty else { return .empty }
+    ) -> RenderExecutionPlan {
+        guard !delta.isEmpty else { return .empty }
 
         let phases = orderedPhases(from: contractPlan.timeline)
         let tracksByID = Dictionary(uniqueKeysWithValues: contractPlan.timeline.tracks.map { ($0.id, $0) })
 
-        var remaining = diff.changes
-        var steps: [AnimationStep] = []
-        var previousStepID: AnimationStep.StepID?
+        var remainingStructural = delta.structuralChanges
+        var remainingContent = delta.contentChanges
+        var stages: [RenderExecutionPlan.Stage] = []
 
         for (index, phase) in phases.enumerated() {
             let supportedKinds = changeKinds(for: phase, tracksByID: tracksByID)
             guard !supportedKinds.isEmpty else { continue }
 
-            let phaseChanges = takeChanges(from: &remaining, matching: supportedKinds)
-            guard !phaseChanges.isEmpty else { continue }
+            let phaseStructural = takeStructuralChanges(from: &remainingStructural, matching: supportedKinds)
+            let phaseContent = takeContentChanges(from: &remainingContent, matching: supportedKinds)
+            guard !phaseStructural.isEmpty || !phaseContent.isEmpty else { continue }
 
-            let stepID = "contract.\(sanitized(phase.id)).\(index)"
-            let entityIDs = phaseChanges.map(\.entityId)
-
-            steps.append(AnimationStep(
-                id: stepID,
-                dependencies: previousStepID.map { [$0] } ?? [],
+            stages.append(RenderExecutionPlan.Stage(
+                id: "contract.\(sanitized(phase.id)).\(index)",
+                phase: phaseType(for: phase, kinds: supportedKinds, hasContent: !phaseContent.isEmpty),
                 effectKey: effectKey(for: phase, fallback: defaultEffectKey),
-                entityIDs: entityIDs,
-                fromScene: oldScene,
-                toScene: newScene
+                structuralChanges: phaseStructural,
+                contentChanges: phaseContent
             ))
-
-            previousStepID = stepID
         }
 
-        if !remaining.isEmpty {
-            steps.append(AnimationStep(
+        if !remainingStructural.isEmpty || !remainingContent.isEmpty {
+            stages.append(RenderExecutionPlan.Stage(
                 id: "contract.remainder",
-                dependencies: previousStepID.map { [$0] } ?? [],
+                phase: !remainingContent.isEmpty ? .content : .structure,
                 effectKey: defaultEffectKey,
-                entityIDs: remaining.map(\.entityId),
-                fromScene: oldScene,
-                toScene: newScene
+                structuralChanges: remainingStructural,
+                contentChanges: remainingContent
             ))
-            previousStepID = "contract.remainder"
         }
 
-        if steps.isEmpty {
-            steps = [AnimationStep(
+        if stages.isEmpty {
+            return RenderExecutionPlan(stages: [
+                RenderExecutionPlan.Stage(
                 id: "contract.fallback",
+                phase: !delta.contentChanges.isEmpty ? .content : .structure,
                 effectKey: defaultEffectKey,
-                entityIDs: diff.changes.map(\.entityId),
-                fromScene: oldScene,
-                toScene: newScene
-            )]
-            previousStepID = "contract.fallback"
+                structuralChanges: delta.structuralChanges,
+                contentChanges: delta.contentChanges
+                )
+            ])
         }
 
-        if steps.last?.toScene != newScene {
-            steps.append(AnimationStep(
-                id: "contract.finalize",
-                dependencies: previousStepID.map { [$0] } ?? [],
-                effectKey: .instant,
-                entityIDs: newScene.entityIDs,
-                fromScene: oldScene,
-                toScene: newScene
-            ))
-        }
-
-        return AnimationPlan(steps: steps)
+        return RenderExecutionPlan(stages: stages)
     }
 }
 
@@ -124,6 +103,24 @@ private extension DefaultContractAnimationPlanMapper {
             result.insert(.move)
         }
         return result
+    }
+
+    func phaseType(
+        for phase: MarkdownContract.TimelinePhase,
+        kinds: Set<SceneChangeKind>,
+        hasContent: Bool
+    ) -> AnimationPhase {
+        let lowerName = phase.name.lowercased()
+        if lowerName.contains("content") || lowerName.contains("update") {
+            return .content
+        }
+        if lowerName.contains("structure") {
+            return .structure
+        }
+        if kinds.contains(.update) || hasContent {
+            return .content
+        }
+        return .structure
     }
 
     func orderedPhases(from timeline: MarkdownContract.TimelineGraph) -> [MarkdownContract.TimelinePhase] {
@@ -170,14 +167,39 @@ private extension DefaultContractAnimationPlanMapper {
         return orderedIDs.compactMap { phaseByID[$0] }
     }
 
-    func takeChanges(from changes: inout [SceneChange], matching kinds: Set<SceneChangeKind>) -> [SceneChange] {
+    func takeStructuralChanges(
+        from changes: inout [StructuralSceneChange],
+        matching kinds: Set<SceneChangeKind>
+    ) -> [StructuralSceneChange] {
         guard !kinds.isEmpty else { return [] }
 
-        var matched: [SceneChange] = []
-        var remained: [SceneChange] = []
+        var matched: [StructuralSceneChange] = []
+        var remained: [StructuralSceneChange] = []
 
         for change in changes {
             if kinds.contains(change.kind) {
+                matched.append(change)
+            } else {
+                remained.append(change)
+            }
+        }
+
+        changes = remained
+        return matched
+    }
+
+    func takeContentChanges(
+        from changes: inout [ContentSceneChange],
+        matching kinds: Set<SceneChangeKind>
+    ) -> [ContentSceneChange] {
+        guard !kinds.isEmpty else { return [] }
+
+        var matched: [ContentSceneChange] = []
+        var remained: [ContentSceneChange] = []
+
+        for change in changes {
+            let kind: SceneChangeKind = change.inserted ? .insert : .update
+            if kinds.contains(kind) {
                 matched.append(change)
             } else {
                 remained.append(change)

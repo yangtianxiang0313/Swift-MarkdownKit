@@ -13,21 +13,21 @@ public extension MarkdownContainerView {
             animationEffectKey = .instant
             animationConcurrencyPolicy = .fullyOrdered
             animationMode = .instant
-            typingEntityAppearanceMode = .simultaneous
+            contentEntityAppearanceMode = .simultaneous
 
         case .typing(let cps):
             animationEffectKey = .typing
             animationConcurrencyPolicy = .fullyOrdered
             animationMode = .dualPhase
             typingCharactersPerSecond = max(1, cps)
-            typingEntityAppearanceMode = .sequential
+            contentEntityAppearanceMode = .sequential
 
         case .streamingMask(let cps):
             animationEffectKey = .streamingMask
             animationConcurrencyPolicy = .fullyOrdered
             animationMode = .dualPhase
             typingCharactersPerSecond = max(1, cps)
-            typingEntityAppearanceMode = .sequential
+            contentEntityAppearanceMode = .sequential
         }
     }
 }

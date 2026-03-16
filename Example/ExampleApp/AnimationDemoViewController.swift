@@ -68,7 +68,7 @@ final class AnimationDemoViewController: UIViewController {
                 container.animationEffectKey = .typing
                 container.animationConcurrencyPolicy = .latestWins
                 container.typingCharactersPerSecond = 42
-                container.typingEntityAppearanceMode = .sequential
+                container.contentEntityAppearanceMode = .sequential
                 try? container.setContractMarkdown(markdown)
                 ```
 
@@ -433,7 +433,7 @@ final class AnimationDemoViewController: UIViewController {
 
     private func applyAnimationConfiguration() {
         containerView.typingCharactersPerSecond = resolvedTypingSpeed
-        containerView.typingEntityAppearanceMode = entityAppearanceSegmentedControl.selectedSegmentIndex == 0
+        containerView.contentEntityAppearanceMode = entityAppearanceSegmentedControl.selectedSegmentIndex == 0
             ? .sequential
             : .simultaneous
         containerView.animationConcurrencyPolicy = concurrencySegmentedControl.selectedSegmentIndex == 0

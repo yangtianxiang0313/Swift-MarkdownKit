@@ -14,11 +14,13 @@ final class StreamingMarkdownSessionTests: XCTestCase {
         XCTAssertEqual(first.sequence, 1)
         XCTAssertFalse(first.isFinal)
         XCTAssertFalse(first.diff.isEmpty)
+        XCTAssertFalse(first.compiledAnimationPlan.timeline.phases.isEmpty)
 
         let second = try session.appendChunk(" world")
         XCTAssertEqual(second.sequence, 2)
         XCTAssertEqual(second.currentText, "Hello world")
         XCTAssertTrue(second.model.blocks.contains(where: { $0.kind == .paragraph }))
+        XCTAssertGreaterThanOrEqual(second.compiledAnimationPlan.intents.count, second.diff.flattenedChanges.count)
     }
 
     func testFinishMarksFinalUpdate() throws {

@@ -8,6 +8,11 @@ public struct AnimationEffectKey: Hashable, RawRepresentable {
     }
 }
 
+public enum ContentEntityAppearanceMode {
+    case sequential
+    case simultaneous
+}
+
 public extension AnimationEffectKey {
     static let instant = AnimationEffectKey(rawValue: "instant")
     static let typing = AnimationEffectKey(rawValue: "typing")

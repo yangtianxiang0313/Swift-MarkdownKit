@@ -53,6 +53,8 @@ final class MarkdownContainerViewTests: XCTestCase {
         XCTAssertEqual(update2.sequence, 2)
         XCTAssertEqual(finalUpdate.sequence, 3)
         XCTAssertTrue(finalUpdate.isFinal)
+        XCTAssertFalse(update1.compiledAnimationPlan.timeline.tracks.isEmpty)
+        XCTAssertEqual(finalUpdate.compiledAnimationPlan.timeline.schemaVersion, MarkdownContract.schemaVersion)
         XCTAssertGreaterThan(view.contentHeight, 0)
     }
 
@@ -167,13 +169,9 @@ final class MarkdownContainerViewTests: XCTestCase {
         XCTAssertEqual(view.animationConcurrencyPolicy, .fullyOrdered)
     }
 
-    func testContainerViewSubmissionModeMapsToConcurrencyPolicy() {
+    func testContainerViewDefaultAppearanceModeIsSequential() {
         let view = makeConfiguredContainerView()
-        view.animationSubmissionMode = .queueLatest
-        XCTAssertEqual(view.animationConcurrencyPolicy, .fullyOrdered)
-
-        view.animationSubmissionMode = .interruptCurrent
-        XCTAssertEqual(view.animationConcurrencyPolicy, .latestWins)
+        XCTAssertEqual(view.contentEntityAppearanceMode, .sequential)
     }
 
     private func makeConfiguredContainerView() -> MarkdownContainerView {

@@ -87,6 +87,113 @@ final class RenderCommitCoordinatorTests: XCTestCase {
         }
     }
 
+    func testSimultaneousAppearanceModeRevealsMultipleEntitiesTogether() {
+        let sequentialHost = SceneHost()
+        let sequentialCoordinator = sequentialHost.makeCoordinator()
+        sequentialCoordinator.concurrencyPolicy = .fullyOrdered
+
+        let simultaneousHost = SceneHost()
+        let simultaneousCoordinator = simultaneousHost.makeCoordinator()
+        simultaneousCoordinator.concurrencyPolicy = .fullyOrdered
+
+        let target = RenderScene(
+            documentId: "doc",
+            nodes: [
+                .init(
+                    id: "a",
+                    kind: "paragraph",
+                    component: MergedTextSceneComponent(attributedText: NSAttributedString(string: "abcdefghij"))
+                ),
+                .init(
+                    id: "b",
+                    kind: "paragraph",
+                    component: MergedTextSceneComponent(attributedText: NSAttributedString(string: "abcdefghij"))
+                )
+            ]
+        )
+
+        let contentChanges = [
+            ContentSceneChange(entityId: "a", stableUnits: 0, targetUnits: 10, inserted: true),
+            ContentSceneChange(entityId: "b", stableUnits: 0, targetUnits: 10, inserted: true)
+        ]
+
+        sequentialCoordinator.submit(makeFrame(
+            version: 1,
+            previousScene: .empty(documentId: "doc"),
+            targetScene: target,
+            diffChanges: [
+                SceneChange(kind: .insert, entityId: "a", toIndex: 0),
+                SceneChange(kind: .insert, entityId: "b", toIndex: 1)
+            ],
+            contentChanges: contentChanges,
+            unitsPerSecond: 24,
+            entityAppearanceMode: .sequential
+        ))
+
+        simultaneousCoordinator.submit(makeFrame(
+            version: 1,
+            previousScene: .empty(documentId: "doc"),
+            targetScene: target,
+            diffChanges: [
+                SceneChange(kind: .insert, entityId: "a", toIndex: 0),
+                SceneChange(kind: .insert, entityId: "b", toIndex: 1)
+            ],
+            contentChanges: contentChanges,
+            unitsPerSecond: 24,
+            entityAppearanceMode: .simultaneous
+        ))
+
+        runMainLoop(for: 0.14)
+
+        let seqA = sequentialHost.displayedUnits(for: "a")
+        let seqB = sequentialHost.displayedUnits(for: "b")
+        XCTAssertGreaterThan(seqA, 0)
+        XCTAssertEqual(seqB, 0)
+
+        let simA = simultaneousHost.displayedUnits(for: "a")
+        let simB = simultaneousHost.displayedUnits(for: "b")
+        XCTAssertGreaterThan(simA, 0)
+        XCTAssertGreaterThan(simB, 0)
+    }
+
+    func testSwitchingDocumentResetsSidecarProgressForSameEntityID() {
+        let host = SceneHost()
+        let coordinator = host.makeCoordinator()
+        coordinator.concurrencyPolicy = .fullyOrdered
+
+        let completion = expectation(description: "first animation completed")
+        coordinator.onAnimationComplete = {
+            completion.fulfill()
+        }
+
+        let firstTarget = makeScene(documentID: "doc-A", text: "abcdefghij", entityID: "text")
+        coordinator.submit(makeFrame(
+            version: 1,
+            previousScene: .empty(documentId: "doc-A"),
+            targetScene: firstTarget,
+            diffChanges: [SceneChange(kind: .insert, entityId: "text", toIndex: 0)],
+            contentChanges: [ContentSceneChange(entityId: "text", stableUnits: 0, targetUnits: 10, inserted: true)],
+            unitsPerSecond: 120
+        ))
+
+        wait(for: [completion], timeout: 1.0)
+        let displayedInDocA = host.displayedUnits(for: "text")
+        XCTAssertEqual(displayedInDocA, 10)
+
+        let secondTarget = makeScene(documentID: "doc-B", text: "abcdefghij", entityID: "text")
+        coordinator.submit(makeFrame(
+            version: 2,
+            previousScene: .empty(documentId: "doc-B"),
+            targetScene: secondTarget,
+            diffChanges: [SceneChange(kind: .insert, entityId: "text", toIndex: 0)],
+            contentChanges: [ContentSceneChange(entityId: "text", stableUnits: 0, targetUnits: 10, inserted: true)],
+            unitsPerSecond: 24
+        ))
+
+        let displayedAfterSwitch = host.displayedUnits(for: "text")
+        XCTAssertLessThan(displayedAfterSwitch, 5)
+    }
+
     private func runMainLoop(for seconds: TimeInterval) {
         RunLoop.main.run(until: Date().addingTimeInterval(seconds))
     }
@@ -110,7 +217,9 @@ final class RenderCommitCoordinatorTests: XCTestCase {
         targetScene: RenderScene,
         diffChanges: [SceneChange],
         contentChanges: [ContentSceneChange],
-        unitsPerSecond: Int
+        unitsPerSecond: Int,
+        effectKey: AnimationEffectKey = .typing,
+        entityAppearanceMode: ContentEntityAppearanceMode = .sequential
     ) -> RenderFrame {
         RenderFrame(
             version: version,
@@ -118,8 +227,11 @@ final class RenderCommitCoordinatorTests: XCTestCase {
             targetScene: targetScene,
             diff: SceneDiff(changes: diffChanges),
             delta: SceneDelta(structuralChanges: [], contentChanges: contentChanges),
+            executionPlan: nil,
             isFinal: false,
             animationMode: .dualPhase,
+            defaultEffectKey: effectKey,
+            entityAppearanceMode: entityAppearanceMode,
             unitsPerSecond: unitsPerSecond
         )
     }

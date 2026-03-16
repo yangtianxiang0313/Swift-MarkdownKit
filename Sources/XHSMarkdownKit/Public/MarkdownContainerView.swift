@@ -21,30 +21,13 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
         }
     }
 
-    // Kept for source compatibility; scheduling now belongs to runtime internals.
-    public var animationSchedulingMode: AnimationSchedulingMode = .groupedByPhase
-
-    public var animationSubmissionMode: AnimationSubmitMode {
-        get {
-            animationConcurrencyPolicy == .latestWins ? .interruptCurrent : .queueLatest
-        }
-        set {
-            switch newValue {
-            case .interruptCurrent:
-                animationConcurrencyPolicy = .latestWins
-            case .queueLatest:
-                animationConcurrencyPolicy = .fullyOrdered
-            }
-        }
-    }
-
     public var typingCharactersPerSecond: Int = 30 {
         didSet {
             typingCharactersPerSecond = max(1, typingCharactersPerSecond)
         }
     }
 
-    public var typingEntityAppearanceMode: TypingEffect.EntityAppearanceMode = .sequential
+    public var contentEntityAppearanceMode: ContentEntityAppearanceMode = .sequential
 
     public var sceneDiffer: any SceneDiffering = DefaultSceneDiffer()
     public var sceneDeltaBuilder: any SceneDeltaBuilding = DefaultSceneDeltaBuilder()
@@ -102,6 +85,9 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
 
     private var currentContractModel: MarkdownContract.RenderModel?
     private var contractStreamingSession: MarkdownContract.StreamingMarkdownSession?
+    private let contractModelDiffer: any MarkdownContract.RenderModelDiffer = MarkdownContract.DefaultRenderModelDiffer()
+    private let contractAnimationCompiler: any MarkdownContract.RenderModelAnimationCompiler = MarkdownContract.DefaultRenderModelAnimationCompiler()
+    private let contractAnimationPlanMapper: any ContractAnimationPlanMapping = DefaultContractAnimationPlanMapper()
 
     // MARK: - Init
 
@@ -136,9 +122,10 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
     public func setContractRenderModel(
         _ model: MarkdownContract.RenderModel
     ) {
+        let oldModel = currentContractModel
         currentContractModel = model
         contractStreamingSession = nil
-        rerender(isFinal: true)
+        rerender(isFinal: true, oldContractModel: oldModel, compiledAnimationPlan: nil)
     }
 
     public func setContractMarkdown(
@@ -203,8 +190,13 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
         }
 
         let update = try session.appendChunk(chunk)
+        let oldModel = currentContractModel
         currentContractModel = update.model
-        rerender(isFinal: update.isFinal)
+        rerender(
+            isFinal: update.isFinal,
+            oldContractModel: oldModel,
+            compiledAnimationPlan: update.compiledAnimationPlan
+        )
         return update
     }
 
@@ -230,8 +222,13 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
         }
 
         let update = try session.finish()
+        let oldModel = currentContractModel
         currentContractModel = update.model
-        rerender(isFinal: true)
+        rerender(
+            isFinal: true,
+            oldContractModel: oldModel,
+            compiledAnimationPlan: update.compiledAnimationPlan
+        )
         contractStreamingSession = nil
         return update
     }
@@ -290,7 +287,12 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
         }
     }
 
-    private func rerender(isFinal: Bool, forceInstant: Bool = false) {
+    private func rerender(
+        isFinal: Bool,
+        forceInstant: Bool = false,
+        oldContractModel: MarkdownContract.RenderModel? = nil,
+        compiledAnimationPlan: MarkdownContract.CompiledAnimationPlan? = nil
+    ) {
         guard bounds.width > 0 else { return }
 
         guard let contractModel = currentContractModel else {
@@ -317,6 +319,12 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
         }
 
         let delta = sceneDeltaBuilder.makeDelta(old: currentScene, new: targetScene, diff: diff)
+        let resolvedExecutionPlan = makeExecutionPlan(
+            oldContractModel: oldContractModel,
+            newContractModel: contractModel,
+            delta: delta,
+            compiledAnimationPlan: compiledAnimationPlan
+        )
 
         transactionVersion += 1
         let renderFrame = RenderFrame(
@@ -325,8 +333,11 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
             targetScene: targetScene,
             diff: diff,
             delta: delta,
+            executionPlan: resolvedExecutionPlan,
             isFinal: isFinal,
             animationMode: resolvedAnimationMode(forceInstant: forceInstant),
+            defaultEffectKey: animationEffectKey,
+            entityAppearanceMode: contentEntityAppearanceMode,
             unitsPerSecond: typingCharactersPerSecond
         )
         renderCommitCoordinator.submit(renderFrame)
@@ -348,5 +359,31 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
         lastNotifiedContentHeight = resolvedHeight
         SceneDebugLogger.log("Container height document=\(currentScene.documentId) version=\(transactionVersion) height=\(resolvedHeight)")
         delegate?.containerView(self, didChangeContentHeight: contentHeight)
+    }
+
+    private func makeExecutionPlan(
+        oldContractModel: MarkdownContract.RenderModel?,
+        newContractModel: MarkdownContract.RenderModel,
+        delta: SceneDelta,
+        compiledAnimationPlan: MarkdownContract.CompiledAnimationPlan?
+    ) -> RenderExecutionPlan? {
+        guard !delta.isEmpty else { return nil }
+
+        if let compiledAnimationPlan {
+            return contractAnimationPlanMapper.makePlan(
+                contractPlan: compiledAnimationPlan,
+                delta: delta,
+                defaultEffectKey: animationEffectKey
+            )
+        }
+
+        guard let oldContractModel else { return nil }
+        let modelDiff = contractModelDiffer.diff(old: oldContractModel, new: newContractModel)
+        let compiled = contractAnimationCompiler.compile(old: oldContractModel, new: newContractModel, diff: modelDiff)
+        return contractAnimationPlanMapper.makePlan(
+            contractPlan: compiled,
+            delta: delta,
+            defaultEffectKey: animationEffectKey
+        )
     }
 }

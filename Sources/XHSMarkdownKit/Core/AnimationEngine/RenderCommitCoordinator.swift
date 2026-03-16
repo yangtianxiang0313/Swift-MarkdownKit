@@ -11,8 +11,11 @@ public struct RenderFrame {
     public let targetScene: RenderScene
     public let diff: SceneDiff
     public let delta: SceneDelta
+    public let executionPlan: RenderExecutionPlan?
     public let isFinal: Bool
     public let animationMode: RenderAnimationMode
+    public let defaultEffectKey: AnimationEffectKey
+    public let entityAppearanceMode: ContentEntityAppearanceMode
     public let unitsPerSecond: Int
 
     public init(
@@ -21,8 +24,11 @@ public struct RenderFrame {
         targetScene: RenderScene,
         diff: SceneDiff,
         delta: SceneDelta,
+        executionPlan: RenderExecutionPlan? = nil,
         isFinal: Bool,
         animationMode: RenderAnimationMode,
+        defaultEffectKey: AnimationEffectKey,
+        entityAppearanceMode: ContentEntityAppearanceMode,
         unitsPerSecond: Int
     ) {
         self.version = version
@@ -30,8 +36,11 @@ public struct RenderFrame {
         self.targetScene = targetScene
         self.diff = diff
         self.delta = delta
+        self.executionPlan = executionPlan
         self.isFinal = isFinal
         self.animationMode = animationMode
+        self.defaultEffectKey = defaultEffectKey
+        self.entityAppearanceMode = entityAppearanceMode
         self.unitsPerSecond = max(1, unitsPerSecond)
     }
 }
@@ -42,6 +51,18 @@ public final class RenderCommitCoordinator {
     public var onAnimationComplete: (() -> Void)?
     public var onHeightChange: ((CGFloat) -> Void)?
 
+    private struct AnimationEntityKey: Hashable {
+        let documentId: String
+        let entityId: String
+    }
+
+    private struct ProgressState {
+        var displayedUnits: Int
+        var stableUnits: Int
+        var lastTargetUnits: Int
+        var lastVersion: Int
+    }
+
     private struct ContentTrack {
         let entityId: String
         let revealStartUnits: Int
@@ -50,17 +71,32 @@ public final class RenderCommitCoordinator {
         let deltaUnits: Int
     }
 
-    private final class ActiveTransaction {
-        let frame: RenderFrame
+    private struct StageWork {
+        let stage: RenderExecutionPlan.Stage
         let tracks: [ContentTrack]
         let totalDeltaUnits: Int
+    }
+
+    private final class ActiveTransaction {
+        let frame: RenderFrame
+        let stageWorks: [StageWork]
+        let totalDeltaUnits: Int
+
+        var stageIndex: Int = 0
+        var completedDeltaUnits: Int = 0
+
+        var currentTracks: [ContentTrack] = []
+        var currentStageDeltaUnits: Int = 0
+        var currentStagePhase: AnimationPhase = .content
+        var currentStageEffectKey: AnimationEffectKey = .typing
+
         var displayLink: CADisplayLink?
-        var startTimestamp: CFTimeInterval?
+        var stageStartTimestamp: CFTimeInterval?
         var cancellationToken: Int
 
-        init(frame: RenderFrame, tracks: [ContentTrack], totalDeltaUnits: Int, cancellationToken: Int) {
+        init(frame: RenderFrame, stageWorks: [StageWork], totalDeltaUnits: Int, cancellationToken: Int) {
             self.frame = frame
-            self.tracks = tracks
+            self.stageWorks = stageWorks
             self.totalDeltaUnits = totalDeltaUnits
             self.cancellationToken = cancellationToken
         }
@@ -76,8 +112,8 @@ public final class RenderCommitCoordinator {
     private var pendingQueue: [RenderFrame] = []
     private var cancellationToken: Int = 0
     private var nextExpectedVersion: Int = 1
-    private var displayedUnitsByEntity: [String: Int] = [:]
-    private var opaqueUnitsByEntity: [String: Int] = [:]
+    private var activeDocumentID: String?
+    private var progressByEntity: [AnimationEntityKey: ProgressState] = [:]
 
     public init(
         applyScene: @escaping (RenderScene) -> Void,
@@ -116,39 +152,41 @@ public final class RenderCommitCoordinator {
     public func finishAll() {
         pendingQueue.removeAll()
         guard let active = activeTransaction else { return }
-        complete(transaction: active, elapsedMilliseconds: 0, forceFinal: true)
+        active.displayLink?.invalidate()
+        active.displayLink = nil
+        applyFullyVisibleState(to: active.frame.targetScene, elapsedMilliseconds: 0, version: active.frame.version)
+        layoutCoordinator.publishFrame(
+            version: active.frame.version,
+            phase: .completed,
+            displayedUnits: active.totalDeltaUnits,
+            totalUnits: active.totalDeltaUnits,
+            elapsedMilliseconds: 0,
+            isRunning: false,
+            measureHeight: measureHeight,
+            onProgress: onProgress,
+            onHeightChange: onHeightChange
+        )
+        activeTransaction = nil
+        finalize(version: active.frame.version)
     }
 
     private func start(_ frame: RenderFrame) {
-        syncDisplayedState(to: frame.targetScene)
+        prepareProgressStore(for: frame.targetScene)
 
         if frame.animationMode == .instant || frame.delta.isEmpty {
             applyScene(frame.targetScene)
-            applyFullyVisibleState(to: frame.targetScene, elapsedMilliseconds: 0)
+            applyFullyVisibleState(to: frame.targetScene, elapsedMilliseconds: 0, version: frame.version)
             publishCompletedProgress(for: frame)
             finalize(version: frame.version)
             return
         }
 
         applyScene(frame.targetScene)
-        animateStructuralChanges(frame.delta.structuralChanges)
+        let stageWorks = makeStageWorks(for: frame)
+        let totalDelta = stageWorks.reduce(0) { $0 + $1.totalDeltaUnits }
 
-        let tracks = makeTracks(frame.delta.contentChanges, targetScene: frame.targetScene)
-        let totalDelta = tracks.reduce(0) { $0 + $1.deltaUnits }
-
-        layoutCoordinator.publishFrame(
-            version: frame.version,
-            phase: .structure,
-            displayedUnits: 0,
-            totalUnits: totalDelta,
-            elapsedMilliseconds: 0,
-            isRunning: true,
-            measureHeight: measureHeight,
-            onProgress: onProgress,
-            onHeightChange: onHeightChange
-        )
-
-        guard totalDelta > 0 else {
+        guard !stageWorks.isEmpty else {
+            applyFullyVisibleState(to: frame.targetScene, elapsedMilliseconds: 0, version: frame.version)
             publishCompletedProgress(for: frame)
             finalize(version: frame.version)
             return
@@ -157,17 +195,12 @@ public final class RenderCommitCoordinator {
         cancellationToken += 1
         let transaction = ActiveTransaction(
             frame: frame,
-            tracks: tracks,
+            stageWorks: stageWorks,
             totalDeltaUnits: totalDelta,
             cancellationToken: cancellationToken
         )
         activeTransaction = transaction
-
-        applyTracks(tracks: tracks, progressedUnits: 0, elapsedMilliseconds: 0, targetScene: frame.targetScene)
-
-        let link = CADisplayLink(target: self, selector: #selector(handleDisplayLink(_:)))
-        link.add(to: .main, forMode: .common)
-        transaction.displayLink = link
+        beginCurrentStage(for: transaction, elapsedMilliseconds: 0)
     }
 
     @objc private func handleDisplayLink(_ displayLink: CADisplayLink) {
@@ -182,77 +215,66 @@ public final class RenderCommitCoordinator {
             return
         }
 
+        guard transaction.currentStageDeltaUnits > 0, !transaction.currentTracks.isEmpty else {
+            displayLink.invalidate()
+            transaction.displayLink = nil
+            transaction.stageIndex += 1
+            beginCurrentStage(for: transaction, elapsedMilliseconds: 0)
+            return
+        }
+
         let start: CFTimeInterval
-        if let existing = transaction.startTimestamp {
+        if let existing = transaction.stageStartTimestamp {
             start = existing
         } else {
-            transaction.startTimestamp = displayLink.timestamp
+            transaction.stageStartTimestamp = displayLink.timestamp
             start = displayLink.timestamp
         }
 
         let elapsedSeconds = max(0, displayLink.timestamp - start)
         let elapsedMilliseconds = Int((elapsedSeconds * 1000).rounded(.down))
         let progressedUnits = min(
-            transaction.totalDeltaUnits,
+            transaction.currentStageDeltaUnits,
             Int((elapsedSeconds * Double(transaction.frame.unitsPerSecond)).rounded(.down))
         )
 
         applyTracks(
-            tracks: transaction.tracks,
+            tracks: transaction.currentTracks,
             progressedUnits: progressedUnits,
             elapsedMilliseconds: elapsedMilliseconds,
-            targetScene: transaction.frame.targetScene
+            targetScene: transaction.frame.targetScene,
+            effectKey: transaction.currentStageEffectKey,
+            appearanceMode: transaction.frame.entityAppearanceMode,
+            version: transaction.frame.version
         )
 
         layoutCoordinator.publishFrame(
             version: transaction.frame.version,
-            phase: .content,
-            displayedUnits: progressedUnits,
+            phase: transaction.currentStagePhase,
+            displayedUnits: transaction.completedDeltaUnits + progressedUnits,
             totalUnits: transaction.totalDeltaUnits,
             elapsedMilliseconds: elapsedMilliseconds,
-            isRunning: progressedUnits < transaction.totalDeltaUnits,
+            isRunning: transaction.completedDeltaUnits + progressedUnits < transaction.totalDeltaUnits,
             measureHeight: measureHeight,
             onProgress: onProgress,
             onHeightChange: onHeightChange
         )
 
-        if progressedUnits >= transaction.totalDeltaUnits {
-            complete(transaction: transaction, elapsedMilliseconds: elapsedMilliseconds, forceFinal: false)
-        }
-    }
-
-    private func complete(transaction: ActiveTransaction, elapsedMilliseconds: Int, forceFinal: Bool) {
-        transaction.displayLink?.invalidate()
-        transaction.displayLink = nil
-
-        applyTracks(
-            tracks: transaction.tracks,
-            progressedUnits: transaction.totalDeltaUnits,
-            elapsedMilliseconds: elapsedMilliseconds,
-            targetScene: transaction.frame.targetScene
-        )
-        applyFullyVisibleState(
-            to: transaction.frame.targetScene,
-            elapsedMilliseconds: elapsedMilliseconds
-        )
-
-        layoutCoordinator.publishFrame(
-            version: transaction.frame.version,
-            phase: .completed,
-            displayedUnits: transaction.totalDeltaUnits,
-            totalUnits: transaction.totalDeltaUnits,
-            elapsedMilliseconds: max(0, elapsedMilliseconds),
-            isRunning: false,
-            measureHeight: measureHeight,
-            onProgress: onProgress,
-            onHeightChange: onHeightChange
-        )
-
-        activeTransaction = nil
-        finalize(version: transaction.frame.version)
-
-        if forceFinal {
-            return
+        if progressedUnits >= transaction.currentStageDeltaUnits {
+            displayLink.invalidate()
+            transaction.displayLink = nil
+            applyTracks(
+                tracks: transaction.currentTracks,
+                progressedUnits: transaction.currentStageDeltaUnits,
+                elapsedMilliseconds: elapsedMilliseconds,
+                targetScene: transaction.frame.targetScene,
+                effectKey: transaction.currentStageEffectKey,
+                appearanceMode: transaction.frame.entityAppearanceMode,
+                version: transaction.frame.version
+            )
+            transaction.completedDeltaUnits += transaction.currentStageDeltaUnits
+            transaction.stageIndex += 1
+            beginCurrentStage(for: transaction, elapsedMilliseconds: elapsedMilliseconds)
         }
     }
 
@@ -287,7 +309,11 @@ public final class RenderCommitCoordinator {
         activeTransaction = nil
     }
 
-    private func makeTracks(_ contentChanges: [ContentSceneChange], targetScene: RenderScene) -> [ContentTrack] {
+    private func makeTracks(
+        _ contentChanges: [ContentSceneChange],
+        targetScene: RenderScene,
+        progressSnapshot: inout [AnimationEntityKey: ProgressState]
+    ) -> [ContentTrack] {
         contentChanges.compactMap { change in
             guard let node = targetScene.componentNodeByID(change.entityId),
                   let reveal = node.component as? any RevealAnimatableComponent,
@@ -295,14 +321,16 @@ public final class RenderCommitCoordinator {
                 return nil
             }
 
+            let key = animationEntityKey(documentID: targetScene.documentId, entityID: change.entityId)
             let targetUnits = min(change.targetUnits, reveal.revealUnitCount)
+            let existing = progressSnapshot[key]
             let revealStartUnits = min(
                 targetUnits,
-                max(0, displayedUnitsByEntity[change.entityId] ?? change.stableUnits)
+                max(0, existing?.displayedUnits ?? change.stableUnits)
             )
             let stableStartUnits = min(
                 revealStartUnits,
-                max(0, opaqueUnitsByEntity[change.entityId] ?? min(change.stableUnits, revealStartUnits))
+                max(0, existing?.stableUnits ?? min(change.stableUnits, revealStartUnits))
             )
             let delta = max(0, targetUnits - revealStartUnits)
             guard delta > 0 else { return nil }
@@ -321,14 +349,20 @@ public final class RenderCommitCoordinator {
         tracks: [ContentTrack],
         progressedUnits: Int,
         elapsedMilliseconds: Int,
-        targetScene: RenderScene
+        targetScene: RenderScene,
+        effectKey: AnimationEffectKey,
+        appearanceMode: ContentEntityAppearanceMode,
+        version: Int
     ) {
-        var remaining = max(0, progressedUnits)
+        let allocations = allocatedDeltaUnits(
+            progressedUnits: progressedUnits,
+            tracks: tracks,
+            appearanceMode: appearanceMode
+        )
 
-        for track in tracks {
-            let consumed = min(track.deltaUnits, remaining)
-            remaining -= consumed
-            let displayed = track.revealStartUnits + consumed
+        for (index, track) in tracks.enumerated() {
+            let consumed = allocations[index]
+            let displayed = track.revealStartUnits + min(track.deltaUnits, consumed)
 
             guard let node = targetScene.componentNodeByID(track.entityId),
                   let component = node.component as? any RevealAnimatableComponent,
@@ -338,7 +372,10 @@ public final class RenderCommitCoordinator {
 
             let stableUnits: Int
             if let appearance = component as? any AppearanceAnimatableComponent {
-                let tail = max(1, appearance.appearanceProfile.tailRampUnits)
+                let tail = tailRampUnits(
+                    for: effectKey,
+                    base: appearance.appearanceProfile.tailRampUnits
+                )
                 stableUnits = min(
                     displayed,
                     max(track.stableStartUnits, displayed - tail)
@@ -354,8 +391,12 @@ public final class RenderCommitCoordinator {
                 elapsedMilliseconds: elapsedMilliseconds
             )
             component.reveal(view: view, state: revealState)
-            displayedUnitsByEntity[track.entityId] = displayed
-            opaqueUnitsByEntity[track.entityId] = stableUnits
+            progressByEntity[animationEntityKey(documentID: targetScene.documentId, entityID: track.entityId)] = ProgressState(
+                displayedUnits: displayed,
+                stableUnits: stableUnits,
+                lastTargetUnits: track.targetUnits,
+                lastVersion: version
+            )
 
             if let appearance = component as? any AppearanceAnimatableComponent {
                 appearance.applyAppearance(
@@ -366,30 +407,38 @@ public final class RenderCommitCoordinator {
         }
     }
 
-    private func syncDisplayedState(to targetScene: RenderScene) {
-        var revealUnitsByID: [String: Int] = [:]
-        for node in targetScene.flattenRenderableNodes() {
-            guard let reveal = node.component as? any RevealAnimatableComponent else { continue }
-            revealUnitsByID[node.id] = max(0, reveal.revealUnitCount)
+    private func prepareProgressStore(for targetScene: RenderScene) {
+        if activeDocumentID != targetScene.documentId {
+            activeDocumentID = targetScene.documentId
+            progressByEntity.removeAll()
         }
 
-        displayedUnitsByEntity = displayedUnitsByEntity.filter { revealUnitsByID[$0.key] != nil }
-        opaqueUnitsByEntity = opaqueUnitsByEntity.filter { revealUnitsByID[$0.key] != nil }
-        for (id, maxUnits) in revealUnitsByID {
-            guard let existing = displayedUnitsByEntity[id] else { continue }
-            displayedUnitsByEntity[id] = min(maxUnits, max(0, existing))
-            if let stable = opaqueUnitsByEntity[id] {
-                opaqueUnitsByEntity[id] = min(displayedUnitsByEntity[id] ?? maxUnits, max(0, stable))
-            }
+        var revealUnitsByID: [AnimationEntityKey: Int] = [:]
+        for node in targetScene.flattenRenderableNodes() {
+            guard let reveal = node.component as? any RevealAnimatableComponent else { continue }
+            revealUnitsByID[animationEntityKey(documentID: targetScene.documentId, entityID: node.id)] = max(0, reveal.revealUnitCount)
+        }
+
+        progressByEntity = progressByEntity.filter { revealUnitsByID[$0.key] != nil }
+        for (key, maxUnits) in revealUnitsByID {
+            guard var existing = progressByEntity[key] else { continue }
+            existing.displayedUnits = min(maxUnits, max(0, existing.displayedUnits))
+            existing.stableUnits = min(existing.displayedUnits, max(0, existing.stableUnits))
+            existing.lastTargetUnits = min(maxUnits, max(existing.lastTargetUnits, existing.displayedUnits))
+            progressByEntity[key] = existing
         }
     }
 
-    private func applyFullyVisibleState(to scene: RenderScene, elapsedMilliseconds: Int) {
+    private func applyFullyVisibleState(to scene: RenderScene, elapsedMilliseconds: Int, version: Int) {
         for node in scene.flattenRenderableNodes() {
             guard let component = node.component as? any RevealAnimatableComponent else { continue }
             let totalUnits = max(0, component.revealUnitCount)
-            displayedUnitsByEntity[node.id] = totalUnits
-            opaqueUnitsByEntity[node.id] = totalUnits
+            progressByEntity[animationEntityKey(documentID: scene.documentId, entityID: node.id)] = ProgressState(
+                displayedUnits: totalUnits,
+                stableUnits: totalUnits,
+                lastTargetUnits: totalUnits,
+                lastVersion: version
+            )
 
             guard let view = viewForEntity(node.id) else { continue }
             let revealState = RevealState(
@@ -402,6 +451,234 @@ public final class RenderCommitCoordinator {
             if let appearance = component as? any AppearanceAnimatableComponent {
                 appearance.applyAppearance(view: view, state: AppearanceState(revealState: revealState))
             }
+        }
+    }
+
+    private func makeStageWorks(for frame: RenderFrame) -> [StageWork] {
+        let stages = (frame.executionPlan?.stages ?? makeDefaultStages(delta: frame.delta, defaultEffectKey: frame.defaultEffectKey))
+            .filter { !$0.isEmpty }
+        guard !stages.isEmpty else { return [] }
+
+        var works: [StageWork] = []
+        var progressSnapshot = progressByEntity
+
+        for stage in stages {
+            let tracks = makeTracks(stage.contentChanges, targetScene: frame.targetScene, progressSnapshot: &progressSnapshot)
+            for track in tracks {
+                progressSnapshot[animationEntityKey(documentID: frame.targetScene.documentId, entityID: track.entityId)] = ProgressState(
+                    displayedUnits: track.targetUnits,
+                    stableUnits: track.targetUnits,
+                    lastTargetUnits: track.targetUnits,
+                    lastVersion: frame.version
+                )
+            }
+            works.append(StageWork(
+                stage: stage,
+                tracks: tracks,
+                totalDeltaUnits: tracks.reduce(0) { $0 + $1.deltaUnits }
+            ))
+        }
+
+        return works
+    }
+
+    private func makeDefaultStages(delta: SceneDelta, defaultEffectKey: AnimationEffectKey) -> [RenderExecutionPlan.Stage] {
+        guard !delta.isEmpty else { return [] }
+
+        var stages: [RenderExecutionPlan.Stage] = []
+        if !delta.structuralChanges.isEmpty {
+            stages.append(RenderExecutionPlan.Stage(
+                id: "default.structure",
+                phase: .structure,
+                effectKey: .segmentFade,
+                structuralChanges: delta.structuralChanges
+            ))
+        }
+        if !delta.contentChanges.isEmpty {
+            stages.append(RenderExecutionPlan.Stage(
+                id: "default.content",
+                phase: .content,
+                effectKey: defaultEffectKey,
+                contentChanges: delta.contentChanges
+            ))
+        }
+
+        if stages.isEmpty {
+            stages.append(RenderExecutionPlan.Stage(
+                id: "default.fallback",
+                phase: .content,
+                effectKey: defaultEffectKey,
+                structuralChanges: delta.structuralChanges,
+                contentChanges: delta.contentChanges
+            ))
+        }
+        return stages
+    }
+
+    private func beginCurrentStage(for transaction: ActiveTransaction, elapsedMilliseconds: Int) {
+        guard let active = activeTransaction, active === transaction else { return }
+
+        if transaction.stageIndex >= transaction.stageWorks.count {
+            complete(transaction: transaction, elapsedMilliseconds: elapsedMilliseconds)
+            return
+        }
+
+        let work = transaction.stageWorks[transaction.stageIndex]
+        if !work.stage.structuralChanges.isEmpty {
+            applyStructuralChanges(changes: work.stage.structuralChanges, effectKey: work.stage.effectKey)
+        }
+
+        transaction.currentTracks = work.tracks
+        transaction.currentStageDeltaUnits = work.totalDeltaUnits
+        transaction.currentStagePhase = work.stage.phase
+        transaction.currentStageEffectKey = work.stage.effectKey
+        transaction.stageStartTimestamp = nil
+
+        if work.totalDeltaUnits <= 0 {
+            layoutCoordinator.publishFrame(
+                version: transaction.frame.version,
+                phase: work.stage.phase,
+                displayedUnits: transaction.completedDeltaUnits,
+                totalUnits: transaction.totalDeltaUnits,
+                elapsedMilliseconds: elapsedMilliseconds,
+                isRunning: transaction.completedDeltaUnits < transaction.totalDeltaUnits || transaction.stageIndex < transaction.stageWorks.count - 1,
+                measureHeight: measureHeight,
+                onProgress: onProgress,
+                onHeightChange: onHeightChange
+            )
+            transaction.stageIndex += 1
+            beginCurrentStage(for: transaction, elapsedMilliseconds: elapsedMilliseconds)
+            return
+        }
+
+        applyTracks(
+            tracks: work.tracks,
+            progressedUnits: 0,
+            elapsedMilliseconds: elapsedMilliseconds,
+            targetScene: transaction.frame.targetScene,
+            effectKey: work.stage.effectKey,
+            appearanceMode: transaction.frame.entityAppearanceMode,
+            version: transaction.frame.version
+        )
+
+        layoutCoordinator.publishFrame(
+            version: transaction.frame.version,
+            phase: work.stage.phase,
+            displayedUnits: transaction.completedDeltaUnits,
+            totalUnits: transaction.totalDeltaUnits,
+            elapsedMilliseconds: elapsedMilliseconds,
+            isRunning: true,
+            measureHeight: measureHeight,
+            onProgress: onProgress,
+            onHeightChange: onHeightChange
+        )
+
+        let link = CADisplayLink(target: self, selector: #selector(handleDisplayLink(_:)))
+        link.add(to: .main, forMode: .common)
+        transaction.displayLink = link
+    }
+
+    private func applyStructuralChanges(changes: [StructuralSceneChange], effectKey: AnimationEffectKey) {
+        guard shouldAnimateStructuralChanges(for: effectKey) else { return }
+        animateStructuralChanges(changes)
+    }
+
+    private func shouldAnimateStructuralChanges(for effectKey: AnimationEffectKey) -> Bool {
+        effectKey == .segmentFade || effectKey == .streamingMask || effectKey == .maskReveal
+    }
+
+    private func tailRampUnits(for effectKey: AnimationEffectKey, base: Int) -> Int {
+        let baseline = max(1, base)
+        switch effectKey {
+        case .instant:
+            return 1
+        case .streamingMask, .maskReveal:
+            return max(baseline, 24)
+        case .typing:
+            return max(baseline, 12)
+        case .segmentFade:
+            return max(baseline, 8)
+        default:
+            return baseline
+        }
+    }
+
+    private func complete(transaction: ActiveTransaction, elapsedMilliseconds: Int) {
+        transaction.displayLink?.invalidate()
+        transaction.displayLink = nil
+        applyFullyVisibleState(
+            to: transaction.frame.targetScene,
+            elapsedMilliseconds: elapsedMilliseconds,
+            version: transaction.frame.version
+        )
+        layoutCoordinator.publishFrame(
+            version: transaction.frame.version,
+            phase: .completed,
+            displayedUnits: transaction.totalDeltaUnits,
+            totalUnits: transaction.totalDeltaUnits,
+            elapsedMilliseconds: max(0, elapsedMilliseconds),
+            isRunning: false,
+            measureHeight: measureHeight,
+            onProgress: onProgress,
+            onHeightChange: onHeightChange
+        )
+        activeTransaction = nil
+        finalize(version: transaction.frame.version)
+    }
+
+    private func animationEntityKey(documentID: String, entityID: String) -> AnimationEntityKey {
+        AnimationEntityKey(documentId: documentID, entityId: entityID)
+    }
+
+    private func allocatedDeltaUnits(
+        progressedUnits: Int,
+        tracks: [ContentTrack],
+        appearanceMode: ContentEntityAppearanceMode
+    ) -> [Int] {
+        guard !tracks.isEmpty else { return [] }
+        let target = max(0, progressedUnits)
+
+        switch appearanceMode {
+        case .sequential:
+            var remaining = target
+            return tracks.map { track in
+                let consumed = min(track.deltaUnits, remaining)
+                remaining -= consumed
+                return consumed
+            }
+
+        case .simultaneous:
+            let total = max(1, tracks.reduce(0) { $0 + $1.deltaUnits })
+            var baseAllocations: [Int] = []
+            var fractions: [(index: Int, fraction: Double)] = []
+            baseAllocations.reserveCapacity(tracks.count)
+            fractions.reserveCapacity(tracks.count)
+
+            var allocated = 0
+            for (index, track) in tracks.enumerated() {
+                let raw = Double(target) * Double(track.deltaUnits) / Double(total)
+                let floored = min(track.deltaUnits, Int(raw.rounded(.down)))
+                baseAllocations.append(floored)
+                allocated += floored
+                fractions.append((index: index, fraction: raw - Double(floored)))
+            }
+
+            var remainder = min(target, total) - allocated
+            if remainder > 0 {
+                fractions.sort { lhs, rhs in
+                    if lhs.fraction != rhs.fraction {
+                        return lhs.fraction > rhs.fraction
+                    }
+                    return lhs.index < rhs.index
+                }
+                for item in fractions where remainder > 0 {
+                    let index = item.index
+                    guard baseAllocations[index] < tracks[index].deltaUnits else { continue }
+                    baseAllocations[index] += 1
+                    remainder -= 1
+                }
+            }
+            return baseAllocations
         }
     }
 }

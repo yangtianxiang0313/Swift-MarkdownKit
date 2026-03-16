@@ -175,7 +175,7 @@ let u2 = try view.appendContractStreamChunk(" world")
 let final = try view.finishContractStreaming()
 ```
 
-Each update carries `model`, `diff`, and compiled contract timeline.
+Each update carries `model`, `diff`, and `compiledAnimationPlan` (contract timeline).
 
 ## 6. Error Handling
 
