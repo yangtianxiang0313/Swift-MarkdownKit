@@ -295,7 +295,14 @@ final class StreamingDemoViewController: UIViewController {
                     )
                 }
             } catch {
-                // Keep the streaming session alive. Intermediate chunks can be temporarily invalid.
+                // Keep streaming resilient: fall back to best-effort full-text render for this frame.
+                try? runtime.setInput(
+                    .markdown(
+                        text: markdown,
+                        documentID: id,
+                        rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                    )
+                )
             }
         }
 
@@ -650,6 +657,23 @@ final class StreamingDemoViewController: UIViewController {
         return row
     }()
 
+    private lazy var controlsScrollView: UIScrollView = {
+        let scrollView = UIScrollView()
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.alwaysBounceVertical = true
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.addSubview(bottomBar)
+
+        NSLayoutConstraint.activate([
+            bottomBar.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+            bottomBar.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+            bottomBar.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+            bottomBar.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+            bottomBar.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor)
+        ])
+        return scrollView
+    }()
+
     private lazy var bottomBar: UIStackView = {
         let controls = UIStackView(arrangedSubviews: [
             settingsRow,
@@ -692,6 +716,7 @@ final class StreamingDemoViewController: UIViewController {
 
     private let defaultEstimatedRowHeight: CGFloat = 110
     private let rowChromeHeight: CGFloat = 28
+    private let controlsMaxHeightRatio: CGFloat = 0.45
 
     private static let scrollDebugEnvKey = "XHS_SCROLL_DEBUG"
     private static let scrollDebugDefaultsKey = "xhs.stream.scroll.debug"
@@ -727,17 +752,18 @@ final class StreamingDemoViewController: UIViewController {
 
     private func setupUI() {
         view.addSubview(tableView)
-        view.addSubview(bottomBar)
+        view.addSubview(controlsScrollView)
 
         NSLayoutConstraint.activate([
-            bottomBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            bottomBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            bottomBar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
+            controlsScrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            controlsScrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            controlsScrollView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
+            controlsScrollView.heightAnchor.constraint(lessThanOrEqualTo: view.heightAnchor, multiplier: controlsMaxHeightRatio),
 
             tableView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            tableView.bottomAnchor.constraint(equalTo: bottomBar.topAnchor, constant: -10)
+            tableView.bottomAnchor.constraint(equalTo: controlsScrollView.topAnchor, constant: -10)
         ])
     }
 
@@ -825,17 +851,20 @@ final class StreamingDemoViewController: UIViewController {
             tableView.insertRows(at: [
                 IndexPath(row: startInsert, section: 0),
                 IndexPath(row: startInsert + 1, section: 0)
-            ], with: .automatic)
+            ], with: .none)
         }
 
-        scrollToBottom(animated: true)
+        scrollToBottom(animated: false)
 
         streamTokens = MarkdownStreamingChunker.tokenize(currentContentPreset.markdown)
         streamTokenCursor = 0
 
         applyAnimationConfiguration(to: streaming.container)
         streaming.container.resetContractStreamingSession()
-        scheduleStreamingTimer()
+        emitNextChunk()
+        if streamingTimer == nil, streamTokenCursor < streamTokens.count {
+            scheduleStreamingTimer()
+        }
     }
 
     private func scheduleStreamingTimer() {
@@ -874,6 +903,7 @@ final class StreamingDemoViewController: UIViewController {
         streamTokenCursor = next.nextCursor
 
         message.appendChunk(chunk)
+        requestHeightRelayout(reason: "stream.chunk")
 
         if streamTokenCursor >= streamTokens.count {
             message.finishStreaming()
@@ -894,6 +924,9 @@ final class StreamingDemoViewController: UIViewController {
         let resolvedHeight = max(0, ceil(newHeight))
         let previous = heightStateByMessageID[messageID] ?? HeightState(reported: 0)
         if abs(previous.reported - resolvedHeight) < 0.5 {
+            if shouldFollowBottom {
+                requestHeightRelayout(reason: "height.stable")
+            }
             return
         }
 
