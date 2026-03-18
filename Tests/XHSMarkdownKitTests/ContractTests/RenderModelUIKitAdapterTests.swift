@@ -457,6 +457,52 @@ final class RenderModelUIKitAdapterTests: XCTestCase {
         XCTAssertTrue(height > 0, "expected positive intrinsic height, got \(height)")
     }
 
+    func testCustomStandaloneNodeReceivesRevealStateWithoutRevealClosure() {
+        let adapter = makeAdapter()
+        let descriptor = adapter.makeCustomStandaloneNode(
+            id: "custom.reveal.card",
+            kind: "custom.card",
+            reuseIdentifier: "custom.card",
+            signature: "v1",
+            revealUnitCount: 24,
+            makeView: { RevealHeightProbeView() },
+            configure: { view, maxWidth in
+                (view as? RevealHeightProbeView)?.configure(maxWidth: maxWidth)
+            }
+        )
+
+        guard let component = descriptor.component as? any RevealAnimatableComponent else {
+            XCTFail("Expected reveal animatable component")
+            return
+        }
+
+        let view = component.makeView()
+        component.configure(view: view, maxWidth: 320)
+        component.reveal(
+            view: view,
+            state: RevealState(
+                displayedUnits: 2,
+                totalUnits: 24,
+                stableUnits: 2,
+                elapsedMilliseconds: 10
+            )
+        )
+        let earlyHeight = view.sizeThatFits(CGSize(width: 320, height: CGFloat.greatestFiniteMagnitude)).height
+
+        component.reveal(
+            view: view,
+            state: RevealState(
+                displayedUnits: 20,
+                totalUnits: 24,
+                stableUnits: 20,
+                elapsedMilliseconds: 80
+            )
+        )
+        let laterHeight = view.sizeThatFits(CGSize(width: 320, height: CGFloat.greatestFiniteMagnitude)).height
+
+        XCTAssertGreaterThan(laterHeight, earlyHeight)
+    }
+
     func testCodeBlockReadsCopyStatusFromProjectedUIState() throws {
         let model = MarkdownContract.RenderModel(
             documentId: "doc-code-status",
@@ -507,5 +553,29 @@ final class RenderModelUIKitAdapterTests: XCTestCase {
             result = max(result, depth)
         }
         return result
+    }
+}
+
+private final class RevealHeightProbeView: UIView, RevealLayoutAnimatableView {
+    private var configuredMaxWidth: CGFloat = 0
+    private var revealedUnits: Int = 0
+
+    func configure(maxWidth: CGFloat) {
+        configuredMaxWidth = max(1, maxWidth)
+    }
+
+    func applyRevealState(_ state: RevealState) {
+        revealedUnits = max(0, state.displayedUnits)
+        invalidateRevealLayout()
+    }
+
+    override var intrinsicContentSize: CGSize {
+        sizeThatFits(CGSize(width: configuredMaxWidth, height: CGFloat.greatestFiniteMagnitude))
+    }
+
+    override func sizeThatFits(_ size: CGSize) -> CGSize {
+        let width = max(1, size.width > 0 ? size.width : configuredMaxWidth)
+        let height = CGFloat(max(1, revealedUnits)) * 4 + 8
+        return CGSize(width: width, height: height)
     }
 }

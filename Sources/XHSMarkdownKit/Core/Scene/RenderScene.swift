@@ -121,6 +121,21 @@ public protocol AppearanceAnimatableComponent: RevealAnimatableComponent {
     func applyAppearance(view: UIView, state: AppearanceState)
 }
 
+public protocol RevealLayoutAnimatableView: AnyObject {
+    func applyRevealState(_ state: RevealState)
+}
+
+public extension RevealLayoutAnimatableView where Self: UIView {
+    func applyRevealState(_ state: RevealState) {
+        invalidateRevealLayout()
+    }
+
+    func invalidateRevealLayout() {
+        invalidateIntrinsicContentSize()
+        setNeedsLayout()
+    }
+}
+
 public extension NSAttributedString.Key {
     static let xhsBaseForegroundColor = NSAttributedString.Key("xhs.baseForegroundColor")
     static let xhsBlockQuoteDepth = NSAttributedString.Key("xhs.blockQuoteDepth")
@@ -164,8 +179,8 @@ public struct MergedTextSceneComponent: AppearanceAnimatableComponent {
     }
 
     public func reveal(view: UIView, state: RevealState) {
-        guard let textView = view as? MergedTextSceneView else { return }
-        textView.render(displayedGlyphs: state.displayedUnits, stableGlyphs: state.stableUnits, appearanceProfile: nil)
+        guard let revealView = view as? (UIView & RevealLayoutAnimatableView) else { return }
+        revealView.applyRevealState(state)
     }
 
     public func applyAppearance(view: UIView, state: AppearanceState) {
@@ -243,7 +258,6 @@ public struct CustomViewSceneComponent: AppearanceAnimatableComponent {
     public let appearanceProfile: AppearanceProfile
     private let make: () -> UIView
     private let configureBlock: (UIView, CGFloat) -> Void
-    private let revealBlock: ((UIView, RevealState) -> Void)?
     private let appearanceBlock: ((UIView, AppearanceState) -> Void)?
 
     public init(
@@ -251,18 +265,16 @@ public struct CustomViewSceneComponent: AppearanceAnimatableComponent {
         revealUnitCount: Int = 0,
         signature: String,
         appearanceProfile: AppearanceProfile = AppearanceProfile(),
-        make: @escaping () -> UIView,
+        make: @escaping () -> (UIView & RevealLayoutAnimatableView),
         configure: @escaping (UIView, CGFloat) -> Void,
-        reveal: ((UIView, RevealState) -> Void)? = nil,
         applyAppearance: ((UIView, AppearanceState) -> Void)? = nil
     ) {
         self.reuseIdentifier = reuseIdentifier
         self.revealUnitCount = max(0, revealUnitCount)
         self.signature = signature
         self.appearanceProfile = appearanceProfile
-        self.make = make
+        self.make = { make() }
         self.configureBlock = configure
-        self.revealBlock = reveal
         self.appearanceBlock = applyAppearance
     }
 
@@ -275,7 +287,8 @@ public struct CustomViewSceneComponent: AppearanceAnimatableComponent {
     }
 
     public func reveal(view: UIView, state: RevealState) {
-        revealBlock?(view, state)
+        guard let revealView = view as? (UIView & RevealLayoutAnimatableView) else { return }
+        revealView.applyRevealState(state)
     }
 
     public func applyAppearance(view: UIView, state: AppearanceState) {
@@ -454,7 +467,7 @@ private final class RuleSceneView: UIView {
     }
 }
 
-private final class MergedTextSceneView: UIView, UITextViewDelegate, SceneInteractionEmitting {
+private final class MergedTextSceneView: UIView, UITextViewDelegate, SceneInteractionEmitting, RevealLayoutAnimatableView {
     private let renderTextStorage = NSTextStorage()
     private let renderLayoutManager = QuoteDecoratedLayoutManager()
     private let renderTextContainer = NSTextContainer(size: .zero)
@@ -516,6 +529,15 @@ private final class MergedTextSceneView: UIView, UITextViewDelegate, SceneIntera
 
         textView.attributedText = fullText
         invalidateIntrinsicContentSize()
+    }
+
+    func applyRevealState(_ state: RevealState) {
+        render(
+            displayedGlyphs: state.displayedUnits,
+            stableGlyphs: state.stableUnits,
+            appearanceProfile: nil
+        )
+        invalidateRevealLayout()
     }
 
     func render(displayedGlyphs: Int, stableGlyphs: Int, appearanceProfile: AppearanceProfile?) {

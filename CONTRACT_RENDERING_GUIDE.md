@@ -169,9 +169,8 @@ adapter.registerBlockMapper(forExtension: "ext.demo.card") { block, _, adapter i
         reuseIdentifier: "custom.card",
         signature: "v1",
         revealUnitCount: 1,
-        makeView: { CustomView() },
-        configure: { view, maxWidth in ... },
-        reveal: { view, state in ... }
+        makeView: { CustomView() }, // CustomView: UIView, RevealLayoutAnimatableView
+        configure: { view, maxWidth in ... }
     )
     return [.standalone(node)]
 }

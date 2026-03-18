@@ -365,10 +365,6 @@ class CustomRendererDemoViewController: UIViewController {
                 configure: { view, maxWidth in
                     guard let codeView = view as? CustomCodeBlockView else { return }
                     codeView.configure(code: code, language: language, maxWidth: maxWidth)
-                },
-                reveal: { view, state in
-                    guard let codeView = view as? CustomCodeBlockView else { return }
-                    codeView.reveal(upTo: state.displayedUnits)
                 }
             )
             return [.standalone(node)]
@@ -902,7 +898,7 @@ class CustomRendererDemoViewController: UIViewController {
 
 }
 
-final class CustomCodeBlockView: UIView {
+final class CustomCodeBlockView: UIView, RevealLayoutAnimatableView {
 
     private let languageLabel: UILabel = {
         let label = UILabel()
@@ -960,8 +956,9 @@ final class CustomCodeBlockView: UIView {
         invalidateIntrinsicContentSize()
     }
 
-    func reveal(upTo length: Int) {
-        let clamped = max(0, min(length, fullCode.count))
+    func applyRevealState(_ state: RevealState) {
+        let clamped = max(0, min(state.displayedUnits, fullCode.count))
         codeLabel.text = String(fullCode.prefix(clamped))
+        invalidateRevealLayout()
     }
 }

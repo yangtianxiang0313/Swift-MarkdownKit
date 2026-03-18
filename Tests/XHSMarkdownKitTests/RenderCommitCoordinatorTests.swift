@@ -336,6 +336,138 @@ final class RenderCommitCoordinatorTests: XCTestCase {
         XCTAssertTrue(host.hasView(for: "code"))
     }
 
+    func testCodeBlockRevealStartsBelowFinalHeight() {
+        let host = SceneHost()
+        let coordinator = host.makeCoordinator()
+        coordinator.concurrencyPolicy = .fullyOrdered
+
+        var observedHeights: [CGFloat] = []
+        coordinator.onHeightChange = { observedHeights.append($0) }
+
+        let completion = expectation(description: "code block animation completed")
+        coordinator.onAnimationComplete = {
+            completion.fulfill()
+        }
+
+        let code = (1...14).map { "l\($0)" }.joined(separator: "\n")
+        let target = RenderScene(
+            documentId: "doc.code.height.start",
+            nodes: [
+                .init(
+                    id: "code",
+                    kind: "codeBlock",
+                    component: makeCodeBlockComponent(code: code)
+                )
+            ]
+        )
+
+        coordinator.submit(makeFrame(
+            version: 1,
+            previousScene: .empty(documentId: "doc.code.height.start"),
+            targetScene: target,
+            diffChanges: [SceneChange(kind: .insert, entityId: "code", toIndex: 0)],
+            contentChanges: [ContentSceneChange(entityId: "code", stableUnits: 0, targetUnits: max(1, code.count), inserted: true)],
+            unitsPerSecond: 30
+        ))
+
+        let reachedEarly = waitUntil(timeout: 2.0) {
+            host.displayedUnits(for: "code") > 0 && host.contentHeight() > 0
+        }
+        XCTAssertTrue(reachedEarly)
+        let earlyHeight = host.contentHeight()
+
+        wait(for: [completion], timeout: 3.0)
+        let finalHeight = host.contentHeight()
+
+        XCTAssertLessThan(earlyHeight, finalHeight)
+        XCTAssertGreaterThan(observedHeights.count, 1)
+    }
+
+    func testCodeBlockRevealHeightMonotonicAndReachesFinal() {
+        let host = SceneHost()
+        let coordinator = host.makeCoordinator()
+        coordinator.concurrencyPolicy = .fullyOrdered
+
+        var observedHeights: [CGFloat] = []
+        coordinator.onHeightChange = { observedHeights.append($0) }
+
+        let completion = expectation(description: "code block animation completed")
+        coordinator.onAnimationComplete = {
+            completion.fulfill()
+        }
+
+        let code = (1...16).map { "r\($0)" }.joined(separator: "\n")
+        let target = RenderScene(
+            documentId: "doc.code.height.monotonic",
+            nodes: [
+                .init(
+                    id: "code",
+                    kind: "codeBlock",
+                    component: makeCodeBlockComponent(code: code)
+                )
+            ]
+        )
+
+        coordinator.submit(makeFrame(
+            version: 1,
+            previousScene: .empty(documentId: "doc.code.height.monotonic"),
+            targetScene: target,
+            diffChanges: [SceneChange(kind: .insert, entityId: "code", toIndex: 0)],
+            contentChanges: [ContentSceneChange(entityId: "code", stableUnits: 0, targetUnits: max(1, code.count), inserted: true)],
+            unitsPerSecond: 32
+        ))
+
+        wait(for: [completion], timeout: 3.0)
+
+        XCTAssertGreaterThanOrEqual(observedHeights.count, 2)
+        for (previous, next) in zip(observedHeights, observedHeights.dropFirst()) {
+            XCTAssertGreaterThanOrEqual(next, previous - 0.1)
+        }
+
+        let finalHeight = host.contentHeight()
+        XCTAssertEqual(observedHeights.last ?? 0, finalHeight, accuracy: 1.0)
+    }
+
+    func testSingleFrameCodeBlockInsertPublishesProgressiveHeightSteps() {
+        let host = SceneHost()
+        let coordinator = host.makeCoordinator()
+        coordinator.concurrencyPolicy = .fullyOrdered
+
+        var observedHeights: [CGFloat] = []
+        coordinator.onHeightChange = { observedHeights.append($0) }
+
+        let completion = expectation(description: "code block animation completed")
+        coordinator.onAnimationComplete = {
+            completion.fulfill()
+        }
+
+        let code = (1...18).map { "p\($0)" }.joined(separator: "\n")
+        let target = RenderScene(
+            documentId: "doc.code.height.single-frame",
+            nodes: [
+                .init(
+                    id: "code",
+                    kind: "codeBlock",
+                    component: makeCodeBlockComponent(code: code)
+                )
+            ]
+        )
+
+        coordinator.submit(makeFrame(
+            version: 1,
+            previousScene: .empty(documentId: "doc.code.height.single-frame"),
+            targetScene: target,
+            diffChanges: [SceneChange(kind: .insert, entityId: "code", toIndex: 0)],
+            contentChanges: [ContentSceneChange(entityId: "code", stableUnits: 0, targetUnits: max(1, code.count), inserted: true)],
+            unitsPerSecond: 34
+        ))
+
+        wait(for: [completion], timeout: 3.0)
+
+        let distinctRoundedHeights = Set(observedHeights.map { Int($0.rounded()) })
+        XCTAssertGreaterThanOrEqual(distinctRoundedHeights.count, 3)
+    }
+
     func testInsertedRuleStaysHiddenUntilContentAnimationCompletes() {
         let host = SceneHost()
         let coordinator = host.makeCoordinator()
@@ -523,6 +655,20 @@ final class RenderCommitCoordinatorTests: XCTestCase {
         )
     }
 
+    private func makeCodeBlockComponent(code: String) -> CodeBlockSceneComponent {
+        CodeBlockSceneComponent(
+            code: code,
+            language: "swift",
+            font: .monospacedSystemFont(ofSize: 12, weight: .regular),
+            textColor: .label,
+            backgroundColor: .secondarySystemBackground,
+            cornerRadius: 8,
+            padding: .init(top: 8, left: 8, bottom: 8, right: 8),
+            borderWidth: 0,
+            borderColor: .clear
+        )
+    }
+
     private func makeFrame(
         version: Int,
         previousScene: RenderScene,
@@ -589,6 +735,10 @@ private final class SceneHost {
 
     func displayedUnits(for entityID: String) -> Int {
         renderedText(for: entityID)?.string.count ?? 0
+    }
+
+    func contentHeight() -> CGFloat {
+        containerView.subviews.map { $0.frame.maxY }.max() ?? 0
     }
 
     private func findTextView(in view: UIView) -> UITextView? {

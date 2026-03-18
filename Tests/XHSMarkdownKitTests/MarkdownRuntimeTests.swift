@@ -338,6 +338,46 @@ final class MarkdownRuntimeTests: XCTestCase {
         XCTAssertTrue(mergedText(from: view.currentSceneSnapshot).isEmpty)
         XCTAssertGreaterThanOrEqual(view.contentHeight, 1)
     }
+
+    func testSingleChunkStreamingCodeBlockStillAnimatesHeightProgressively() throws {
+        let view = MarkdownContainerView(theme: .default)
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
+        view.setAnimationPreset(.typing(charactersPerSecond: 10))
+
+        let delegate = RuntimeContainerDelegateSpy()
+        view.delegate = delegate
+
+        let runtime = MarkdownRuntime(streamingEngine: MarkdownnAdapter.makeEngine())
+        runtime.attach(to: view)
+
+        let codeBody = (1...10).map { "p\($0)" }.joined(separator: "\n")
+        let markdown = """
+        ```swift
+        \(codeBody)
+        ```
+        """
+
+        let ref = try runtime.startStream(documentID: "doc.runtime.single-chunk.code")
+        try runtime.appendStreamChunk(ref: ref, chunk: markdown)
+
+        let reachedEarly = waitUntil(timeout: 2.0) {
+            delegate.heightEvents.count > 0 && view.contentHeight > 0
+        }
+        XCTAssertTrue(reachedEarly)
+        let earlyHeight = view.contentHeight
+
+        try runtime.finishStream(ref: ref)
+
+        let completed = waitUntil(timeout: 5.0) {
+            delegate.animationCompletionCount > 0
+        }
+        XCTAssertTrue(completed)
+
+        let finalHeight = view.contentHeight
+        XCTAssertLessThan(earlyHeight, finalHeight)
+        XCTAssertGreaterThan(delegate.heightEvents.count, 2)
+        runtime.cancelStream(ref: ref)
+    }
 }
 
 @MainActor
@@ -390,9 +430,14 @@ private final class RuntimeEffectTestToken: MarkdownEffectToken {
 
 private final class RuntimeContainerDelegateSpy: MarkdownContainerViewDelegate {
     private(set) var heightEvents: [CGFloat] = []
+    private(set) var animationCompletionCount: Int = 0
 
     func containerView(_ view: MarkdownContainerView, didChangeContentHeight height: CGFloat) {
         heightEvents.append(height)
+    }
+
+    func containerViewDidCompleteAnimation(_ view: MarkdownContainerView) {
+        animationCompletionCount += 1
     }
 }
 
@@ -402,4 +447,16 @@ private func codeBlockCopyStatus(in scene: RenderScene, nodeID: String) -> Strin
         return nil
     }
     return component.copyStatus
+}
+
+@MainActor
+private func waitUntil(timeout: TimeInterval, condition: @escaping () -> Bool) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if condition() {
+            return true
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+    }
+    return condition()
 }

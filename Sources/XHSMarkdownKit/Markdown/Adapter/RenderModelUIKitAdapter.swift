@@ -401,9 +401,8 @@ extension MarkdownContract {
             revealUnitCount: Int = 0,
             spacingAfter: CGFloat = 0,
             metadata: [String: Value] = [:],
-            makeView: @escaping () -> UIView,
+            makeView: @escaping () -> (UIView & RevealLayoutAnimatableView),
             configure: @escaping (UIView, CGFloat) -> Void,
-            reveal: ((UIView, RevealState) -> Void)? = nil,
             applyAppearance: ((UIView, AppearanceState) -> Void)? = nil
         ) -> StandaloneNodeDescriptor {
             let component = CustomViewSceneComponent(
@@ -412,7 +411,6 @@ extension MarkdownContract {
                 signature: signature,
                 make: makeView,
                 configure: configure,
-                reveal: reveal,
                 applyAppearance: applyAppearance
             )
 

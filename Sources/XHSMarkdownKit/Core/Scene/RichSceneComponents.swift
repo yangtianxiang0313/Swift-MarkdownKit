@@ -55,8 +55,8 @@ public struct CodeBlockSceneComponent: RevealAnimatableComponent {
     }
 
     public func reveal(view: UIView, state: RevealState) {
-        guard let codeView = view as? CodeBlockSceneView else { return }
-        codeView.reveal(upTo: state.displayedUnits)
+        guard let revealView = view as? (UIView & RevealLayoutAnimatableView) else { return }
+        revealView.applyRevealState(state)
     }
 
     public func isContentEqual(to other: any SceneComponent) -> Bool {
@@ -121,8 +121,8 @@ public struct TableSceneComponent: RevealAnimatableComponent {
     }
 
     public func reveal(view: UIView, state: RevealState) {
-        guard let tableView = view as? TableSceneView else { return }
-        tableView.setVisibleRowCount(min(revealUnitCount, max(0, state.displayedUnits)))
+        guard let revealView = view as? (UIView & RevealLayoutAnimatableView) else { return }
+        revealView.applyRevealState(state)
     }
 
     public func isContentEqual(to other: any SceneComponent) -> Bool {
@@ -238,8 +238,8 @@ public struct BlockQuoteTextSceneComponent: RevealAnimatableComponent {
     }
 
     public func reveal(view: UIView, state: RevealState) {
-        guard let quoteView = view as? BlockQuoteTextSceneView else { return }
-        quoteView.reveal(upTo: state.displayedUnits)
+        guard let revealView = view as? (UIView & RevealLayoutAnimatableView) else { return }
+        revealView.applyRevealState(state)
     }
 
     public func isContentEqual(to other: any SceneComponent) -> Bool {
@@ -296,7 +296,7 @@ public struct BlockQuoteContainerSceneComponent: SceneComponent {
     }
 }
 
-private final class CodeBlockSceneView: UIView, SceneInteractionEmitting {
+private final class CodeBlockSceneView: UIView, SceneInteractionEmitting, RevealLayoutAnimatableView {
     private struct ConfigureSignature: Equatable {
         let code: String
         let language: String?
@@ -388,7 +388,7 @@ private final class CodeBlockSceneView: UIView, SceneInteractionEmitting {
         configuredMaxWidth = signature.maxWidth
         codeFont = signature.font
         codeTextColor = signature.textColor
-        visibleCharacters = fullCode.count
+        visibleCharacters = min(visibleCharacters, fullCode.count)
 
         backgroundColor = signature.backgroundColor
         layer.cornerRadius = signature.cornerRadius
@@ -420,11 +420,13 @@ private final class CodeBlockSceneView: UIView, SceneInteractionEmitting {
         setNeedsLayout()
     }
 
-    func reveal(upTo displayedUnits: Int) {
+    func applyRevealState(_ state: RevealState) {
+        let displayedUnits = state.displayedUnits
         let clamped = max(0, min(displayedUnits, fullCode.count))
         guard clamped != visibleCharacters else { return }
         visibleCharacters = clamped
         renderVisibleCode(upTo: clamped)
+        invalidateRevealLayout()
         if shouldLogReveal(for: clamped) {
             SceneDebugLogger.log(
                 "CodeBlock reveal node=\(debugNodeID) visible=\(clamped)/\(fullCode.count)",
@@ -473,8 +475,10 @@ private final class CodeBlockSceneView: UIView, SceneInteractionEmitting {
             height: max(0, bounds.height - headerHeight - verticalPaddingTop - verticalPaddingBottom)
         )
 
+        let layoutText = visibleCodeText()
+        let textForLayout = layoutText.isEmpty ? " " : layoutText
         let attr = NSAttributedString(
-            string: fullCode,
+            string: textForLayout,
             attributes: [.font: codeTextView.font ?? UIFont.monospacedSystemFont(ofSize: 14, weight: .regular)]
         )
         let codeSize = attr.boundingRect(
@@ -503,7 +507,8 @@ private final class CodeBlockSceneView: UIView, SceneInteractionEmitting {
 
     private func measuredSize(for width: CGFloat) -> CGSize {
         let targetWidth = max(1, width)
-        let text = fullCode
+        let visibleText = visibleCodeText()
+        let text = visibleText.isEmpty ? " " : visibleText
         let attr = NSAttributedString(
             string: text,
             attributes: [.font: codeFont]
@@ -561,27 +566,18 @@ private final class CodeBlockSceneView: UIView, SceneInteractionEmitting {
     private func renderVisibleCode(upTo visibleCount: Int) {
         let clamped = max(0, min(visibleCount, fullCode.count))
         let visiblePrefix = String(fullCode.prefix(clamped))
-        let hiddenSuffix = String(fullCode.dropFirst(clamped))
-
-        let rendered = NSMutableAttributedString(
+        let rendered = NSAttributedString(
             string: visiblePrefix,
             attributes: [
                 .font: codeFont,
                 .foregroundColor: codeTextColor
             ]
         )
-        if !hiddenSuffix.isEmpty {
-            rendered.append(
-                NSAttributedString(
-                    string: hiddenSuffix,
-                    attributes: [
-                        .font: codeFont,
-                        .foregroundColor: UIColor.clear
-                    ]
-                )
-            )
-        }
         codeTextView.attributedText = rendered
+    }
+
+    private func visibleCodeText() -> String {
+        String(fullCode.prefix(max(0, min(visibleCharacters, fullCode.count))))
     }
 
     private func shouldLogReveal(for visibleCount: Int) -> Bool {
@@ -596,7 +592,7 @@ private final class CodeBlockSceneView: UIView, SceneInteractionEmitting {
     }
 }
 
-private final class BlockQuoteTextSceneView: UIView {
+private final class BlockQuoteTextSceneView: UIView, RevealLayoutAnimatableView {
     private let barView = UIView()
     private let label = UILabel()
 
@@ -674,16 +670,19 @@ private final class BlockQuoteTextSceneView: UIView {
         label.preferredMaxLayoutWidth = textMaxWidth
     }
 
-    func reveal(upTo displayedUnits: Int) {
+    func applyRevealState(_ state: RevealState) {
+        let displayedUnits = state.displayedUnits
         let text = sourceText.string
         let clamped = max(0, min(displayedUnits, text.count))
         if clamped <= 0 {
             label.attributedText = NSAttributedString(string: "")
+            invalidateRevealLayout()
             return
         }
         label.attributedText = sourceText.attributedSubstring(
             from: NSRange(location: 0, length: clamped)
         )
+        invalidateRevealLayout()
     }
 }
 
@@ -814,7 +813,7 @@ private final class ImagePlaceholderSceneView: UIView {
     }
 }
 
-private final class TableSceneView: UIView {
+private final class TableSceneView: UIView, RevealLayoutAnimatableView {
     private let scrollView = UIScrollView()
     private let contentView = TableGridContentView()
 
@@ -874,13 +873,16 @@ private final class TableSceneView: UIView {
         contentView.setNeedsDisplay()
     }
 
-    func setVisibleRowCount(_ count: Int) {
+    func applyRevealState(_ state: RevealState) {
+        setVisibleRowCount(state.displayedUnits)
+    }
+
+    private func setVisibleRowCount(_ count: Int) {
         guard let component else { return }
         let clamped = min(component.rows.count + 1, max(0, count))
         guard visibleRowCount != clamped else { return }
         visibleRowCount = clamped
-        invalidateIntrinsicContentSize()
-        setNeedsLayout()
+        invalidateRevealLayout()
         contentView.setNeedsDisplay()
     }
 

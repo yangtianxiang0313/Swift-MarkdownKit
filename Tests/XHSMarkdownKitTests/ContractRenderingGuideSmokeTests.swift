@@ -56,9 +56,8 @@ final class ContractRenderingGuideSmokeTests: XCTestCase {
                 reuseIdentifier: "custom.card",
                 signature: "v1",
                 revealUnitCount: 1,
-                makeView: { UIView() },
-                configure: { _, _ in },
-                reveal: { _, _ in }
+                makeView: { GuideRevealCardView() },
+                configure: { _, _ in }
             )
             return [.standalone(node)]
         }
@@ -71,5 +70,11 @@ final class ContractRenderingGuideSmokeTests: XCTestCase {
         let scene = try adapter.render(model: model, theme: .default, maxWidth: 320)
         XCTAssertEqual(scene.nodes.count, 1)
         XCTAssertEqual(scene.nodes.first?.kind, "custom.card")
+    }
+}
+
+private final class GuideRevealCardView: UIView, RevealLayoutAnimatableView {
+    func applyRevealState(_ state: RevealState) {
+        invalidateRevealLayout()
     }
 }
