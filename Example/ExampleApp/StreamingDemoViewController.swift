@@ -2,6 +2,27 @@ import UIKit
 import XHSMarkdownKit
 import SnapKit
 
+private enum StreamingDemoHeightLogger {
+    private static let envKey = "XHS_STREAM_HEIGHT_DEBUG"
+    private static let defaultsKey = "xhs.streaming.height.debug"
+
+    static var isEnabled: Bool {
+#if DEBUG
+        if let envValue = ProcessInfo.processInfo.environment[envKey], envValue == "1" {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: defaultsKey)
+#else
+        return false
+#endif
+    }
+
+    static func log(_ message: @autoclosure () -> String) {
+        guard isEnabled else { return }
+        print("[XHSStreamHeight] \(message())")
+    }
+}
+
 // MARK: - View Controller
 
 @MainActor
@@ -363,9 +384,27 @@ final class StreamingDemoViewController: UIViewController {
 
     private func presentConfigAlert(_ alert: UIAlertController) {
         if let popover = alert.popoverPresentationController {
-            popover.barButtonItem = navigationItem.rightBarButtonItem
-            popover.sourceView = view
-            popover.sourceRect = CGRect(x: view.bounds.midX, y: 60, width: 1, height: 1)
+            if let item = navigationItem.rightBarButtonItem {
+                // Anchor to the nav button directly to avoid off-screen popover positioning.
+                popover.barButtonItem = item
+            } else if let navigationBar = navigationController?.navigationBar {
+                popover.sourceView = navigationBar
+                popover.sourceRect = CGRect(
+                    x: navigationBar.bounds.maxX - 24,
+                    y: navigationBar.bounds.midY,
+                    width: 1,
+                    height: 1
+                )
+            } else {
+                popover.sourceView = view
+                popover.sourceRect = CGRect(
+                    x: view.bounds.maxX - 24,
+                    y: view.safeAreaInsets.top + 16,
+                    width: 1,
+                    height: 1
+                )
+            }
+            popover.permittedArrowDirections = [.up, .down]
         }
         present(alert, animated: true)
     }
@@ -448,11 +487,14 @@ extension StreamingDemoViewController: StreamingDemoViewModelOutput {
 
     func viewModel(_ viewModel: StreamingDemoViewModel, didRequestHeightRecomputeAt _: IndexPath) {
         autoScrollCoordinator.prepareForContentMutation(in: tableView)
+        StreamingDemoHeightLogger.log("VC didRequestHeightRecomputeAt queue beginUpdates")
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             UIView.performWithoutAnimation {
+                StreamingDemoHeightLogger.log("VC beginUpdates contentSizeBefore=\(self.tableView.contentSize.height)")
                 self.tableView.beginUpdates()
                 self.tableView.endUpdates()
+                StreamingDemoHeightLogger.log("VC endUpdates contentSizeAfter=\(self.tableView.contentSize.height)")
             }
         }
     }
@@ -667,11 +709,10 @@ final class StreamingDemoViewModel {
     func updateMeasuredHeight(_ height: CGFloat, for messageID: UUID) {
         guard let index = messages.firstIndex(where: { $0.id == messageID }) else { return }
         let oldValue = messages[index].heightCache
-        if abs(oldValue - height) < 0.5 {
-            return
-        }
-
         messages[index].heightCache = height
+        StreamingDemoHeightLogger.log(
+            "ViewModel updateMeasuredHeight message=\(messageID) old=\(oldValue) new=\(height)"
+        )
         output?.viewModel(self, didRequestHeightRecomputeAt: IndexPath(row: index, section: 0))
         output?.viewModel(self, didEmitScrollHint: .followBottomIfPossible(animated: false))
     }
@@ -1058,8 +1099,10 @@ final class StreamingDemoMessageCell: UITableViewCell {
 
     override func prepareForReuse() {
         super.prepareForReuse()
+        let previousMessageID = messageID
         delegate = nil
         messageID = nil
+        StreamingDemoHeightLogger.log("Cell prepareForReuse message=\(String(describing: previousMessageID)) resetHeight=1")
         boundRuntime?.detach()
         boundRuntime = nil
         currentMarkdownHeight = 1
@@ -1095,6 +1138,9 @@ final class StreamingDemoMessageCell: UITableViewCell {
             markdownView.isHidden = false
             bubbleFixedMarkdownWidthConstraint?.activate()
             currentMarkdownHeight = max(1, message.heightCache)
+            StreamingDemoHeightLogger.log(
+                "Cell configure markdown message=\(message.id) cache=\(message.heightCache) apply=\(currentMarkdownHeight)"
+            )
             markdownHeightConstraint?.update(offset: currentMarkdownHeight)
             guard let runtime else {
                 boundRuntime?.detach()
@@ -1182,10 +1228,9 @@ private extension StreamingDemoMessageCell {
 extension StreamingDemoMessageCell: MarkdownContainerViewDelegate {
     func containerView(_ view: MarkdownContainerView, didChangeContentHeight height: CGFloat) {
         let resolved = max(1, ceil(height))
-        if abs(resolved - currentMarkdownHeight) < 0.5 {
-            return
-        }
-
+        StreamingDemoHeightLogger.log(
+            "Cell didChangeContentHeight message=\(String(describing: messageID)) old=\(currentMarkdownHeight) new=\(resolved) intrinsic=\(view.intrinsicContentSize.height) content=\(view.contentHeight)"
+        )
         currentMarkdownHeight = resolved
         markdownHeightConstraint?.update(offset: resolved)
         guard let messageID else { return }

@@ -194,6 +194,90 @@ final class RenderCommitCoordinatorTests: XCTestCase {
         XCTAssertLessThan(displayedAfterSwitch, 5)
     }
 
+    func testInsertedStandaloneEntityMountsOnlyWhenItsRevealStarts() {
+        let host = SceneHost()
+        let coordinator = host.makeCoordinator()
+        coordinator.concurrencyPolicy = .fullyOrdered
+
+        let completion = expectation(description: "animation completed")
+        coordinator.onAnimationComplete = {
+            completion.fulfill()
+        }
+
+        let target = RenderScene(
+            documentId: "doc",
+            nodes: [
+                .init(
+                    id: "text",
+                    kind: "paragraph",
+                    component: MergedTextSceneComponent(attributedText: NSAttributedString(string: "abcdefghij"))
+                ),
+                .init(
+                    id: "code",
+                    kind: "codeBlock",
+                    component: CodeBlockSceneComponent(
+                        code: "0123456789",
+                        language: "swift",
+                        font: .monospacedSystemFont(ofSize: 12, weight: .regular),
+                        textColor: .label,
+                        backgroundColor: .secondarySystemBackground,
+                        cornerRadius: 8,
+                        padding: .init(top: 8, left: 8, bottom: 8, right: 8),
+                        borderWidth: 0,
+                        borderColor: .clear
+                    )
+                )
+            ]
+        )
+        let structural = [
+            StructuralSceneChange(kind: .insert, entityId: "text", toIndex: 0),
+            StructuralSceneChange(kind: .insert, entityId: "code", toIndex: 1)
+        ]
+        let content = [
+            ContentSceneChange(entityId: "text", stableUnits: 0, targetUnits: 10, inserted: true),
+            ContentSceneChange(entityId: "code", stableUnits: 0, targetUnits: 10, inserted: true)
+        ]
+        let plan = RenderExecutionPlan(stages: [
+            .init(
+                id: "structure",
+                phase: .structure,
+                effectKey: .segmentFade,
+                structuralChanges: structural
+            ),
+            .init(
+                id: "content",
+                phase: .content,
+                effectKey: .typing,
+                contentChanges: content
+            )
+        ])
+
+        let frame = RenderFrame(
+            version: 1,
+            previousScene: .empty(documentId: "doc"),
+            targetScene: target,
+            diff: SceneDiff(changes: [
+                SceneChange(kind: .insert, entityId: "text", toIndex: 0),
+                SceneChange(kind: .insert, entityId: "code", toIndex: 1)
+            ]),
+            delta: SceneDelta(structuralChanges: structural, contentChanges: content),
+            executionPlan: plan,
+            isFinal: false,
+            animationMode: .dualPhase,
+            defaultEffectKey: .typing,
+            entityAppearanceMode: .sequential,
+            unitsPerSecond: 24
+        )
+        coordinator.submit(frame)
+
+        runMainLoop(for: 0.18)
+        XCTAssertTrue(host.hasView(for: "text"))
+        XCTAssertFalse(host.hasView(for: "code"))
+
+        wait(for: [completion], timeout: 2.0)
+        XCTAssertTrue(host.hasView(for: "code"))
+    }
+
     private func runMainLoop(for seconds: TimeInterval) {
         RunLoop.main.run(until: Date().addingTimeInterval(seconds))
     }
@@ -269,6 +353,10 @@ private final class SceneHost {
     func renderedText(for entityID: String) -> NSAttributedString? {
         guard let root = viewGraphCoordinator.view(for: entityID) else { return nil }
         return findTextView(in: root)?.attributedText
+    }
+
+    func hasView(for entityID: String) -> Bool {
+        viewGraphCoordinator.view(for: entityID) != nil
     }
 
     func displayedUnits(for entityID: String) -> Int {

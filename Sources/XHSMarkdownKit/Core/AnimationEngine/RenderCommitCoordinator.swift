@@ -53,6 +53,7 @@ public final class RenderCommitCoordinator {
 
     private struct ContentTrack {
         let entityId: String
+        let inserted: Bool
         let revealStartUnits: Int
         let stableStartUnits: Int
         let targetUnits: Int
@@ -69,6 +70,7 @@ public final class RenderCommitCoordinator {
         let frame: RenderFrame
         let stageWorks: [StageWork]
         let totalDeltaUnits: Int
+        let insertedEntitiesWithContent: Set<String>
 
         var stageIndex: Int = 0
         var completedDeltaUnits: Int = 0
@@ -81,11 +83,21 @@ public final class RenderCommitCoordinator {
         var displayLink: CADisplayLink?
         var stageStartTimestamp: CFTimeInterval?
         var cancellationToken: Int
+        var hiddenInsertedEntityIDs: Set<String>
 
-        init(frame: RenderFrame, stageWorks: [StageWork], totalDeltaUnits: Int, cancellationToken: Int) {
+        init(
+            frame: RenderFrame,
+            stageWorks: [StageWork],
+            totalDeltaUnits: Int,
+            insertedEntitiesWithContent: Set<String>,
+            hiddenInsertedEntityIDs: Set<String>,
+            cancellationToken: Int
+        ) {
             self.frame = frame
             self.stageWorks = stageWorks
             self.totalDeltaUnits = totalDeltaUnits
+            self.insertedEntitiesWithContent = insertedEntitiesWithContent
+            self.hiddenInsertedEntityIDs = hiddenInsertedEntityIDs
             self.cancellationToken = cancellationToken
         }
     }
@@ -143,6 +155,7 @@ public final class RenderCommitCoordinator {
         guard let active = activeTransaction else { return }
         active.displayLink?.invalidate()
         active.displayLink = nil
+        applyScene(active.frame.targetScene)
         applyFullyVisibleState(to: active.frame.targetScene, elapsedMilliseconds: 0, version: active.frame.version)
         layoutCoordinator.publishFrame(
             version: active.frame.version,
@@ -170,11 +183,16 @@ public final class RenderCommitCoordinator {
             return
         }
 
-        applyScene(frame.targetScene)
         let stageWorks = makeStageWorks(for: frame)
+        let hiddenInsertedEntityIDs = initialHiddenInsertedEntityIDs(for: frame, stageWorks: stageWorks)
+        applyProjectedScene(
+            targetScene: frame.targetScene,
+            hiddenInsertedEntityIDs: hiddenInsertedEntityIDs
+        )
         let totalDelta = stageWorks.reduce(0) { $0 + $1.totalDeltaUnits }
 
         guard !stageWorks.isEmpty else {
+            applyScene(frame.targetScene)
             applyFullyVisibleState(to: frame.targetScene, elapsedMilliseconds: 0, version: frame.version)
             publishCompletedProgress(for: frame)
             finalize(version: frame.version)
@@ -182,10 +200,15 @@ public final class RenderCommitCoordinator {
         }
 
         cancellationToken += 1
+        let insertedEntitiesWithContent = Set(stageWorks.flatMap { work in
+            work.tracks.compactMap { $0.inserted ? $0.entityId : nil }
+        })
         let transaction = ActiveTransaction(
             frame: frame,
             stageWorks: stageWorks,
             totalDeltaUnits: totalDelta,
+            insertedEntitiesWithContent: insertedEntitiesWithContent,
+            hiddenInsertedEntityIDs: hiddenInsertedEntityIDs,
             cancellationToken: cancellationToken
         )
         activeTransaction = transaction
@@ -234,7 +257,8 @@ public final class RenderCommitCoordinator {
             targetScene: transaction.frame.targetScene,
             effectKey: transaction.currentStageEffectKey,
             appearanceMode: transaction.frame.entityAppearanceMode,
-            version: transaction.frame.version
+            version: transaction.frame.version,
+            transaction: transaction
         )
 
         layoutCoordinator.publishFrame(
@@ -259,7 +283,8 @@ public final class RenderCommitCoordinator {
                 targetScene: transaction.frame.targetScene,
                 effectKey: transaction.currentStageEffectKey,
                 appearanceMode: transaction.frame.entityAppearanceMode,
-                version: transaction.frame.version
+                version: transaction.frame.version,
+                transaction: transaction
             )
             transaction.completedDeltaUnits += transaction.currentStageDeltaUnits
             transaction.stageIndex += 1
@@ -326,6 +351,7 @@ public final class RenderCommitCoordinator {
 
             return ContentTrack(
                 entityId: change.entityId,
+                inserted: change.inserted,
                 revealStartUnits: revealStartUnits,
                 stableStartUnits: stableStartUnits,
                 targetUnits: targetUnits,
@@ -341,17 +367,29 @@ public final class RenderCommitCoordinator {
         targetScene: RenderScene,
         effectKey: AnimationEffectKey,
         appearanceMode: ContentEntityAppearanceMode,
-        version: Int
+        version: Int,
+        transaction: ActiveTransaction? = nil
     ) {
         let allocations = allocatedDeltaUnits(
             progressedUnits: progressedUnits,
             tracks: tracks,
             appearanceMode: appearanceMode
         )
+        let displayedUnits = tracks.enumerated().map { index, track in
+            let consumed = allocations[index]
+            return track.revealStartUnits + min(track.deltaUnits, consumed)
+        }
+
+        if let transaction {
+            revealInsertedEntitiesIfNeeded(
+                tracks: tracks,
+                displayedUnits: displayedUnits,
+                transaction: transaction
+            )
+        }
 
         for (index, track) in tracks.enumerated() {
-            let consumed = allocations[index]
-            let displayed = track.revealStartUnits + min(track.deltaUnits, consumed)
+            let displayed = displayedUnits[index]
 
             guard let node = targetScene.componentNodeByID(track.entityId),
                   let component = node.component as? any RevealAnimatableComponent,
@@ -509,6 +547,7 @@ public final class RenderCommitCoordinator {
         }
 
         let work = transaction.stageWorks[transaction.stageIndex]
+        activateStructuralInsertionsIfNeeded(work: work, transaction: transaction)
         if !work.stage.structuralChanges.isEmpty {
             applyStructuralChanges(changes: work.stage.structuralChanges, effectKey: work.stage.effectKey)
         }
@@ -543,7 +582,8 @@ public final class RenderCommitCoordinator {
             targetScene: transaction.frame.targetScene,
             effectKey: work.stage.effectKey,
             appearanceMode: transaction.frame.entityAppearanceMode,
-            version: transaction.frame.version
+            version: transaction.frame.version,
+            transaction: transaction
         )
 
         layoutCoordinator.publishFrame(
@@ -591,6 +631,7 @@ public final class RenderCommitCoordinator {
     private func complete(transaction: ActiveTransaction, elapsedMilliseconds: Int) {
         transaction.displayLink?.invalidate()
         transaction.displayLink = nil
+        applyScene(transaction.frame.targetScene)
         applyFullyVisibleState(
             to: transaction.frame.targetScene,
             elapsedMilliseconds: elapsedMilliseconds,
@@ -613,6 +654,109 @@ public final class RenderCommitCoordinator {
 
     private func animationEntityKey(documentID: String, entityID: String) -> AnimationEntityKey {
         AnimationEntityKey(documentId: documentID, entityId: entityID)
+    }
+
+    private func activateStructuralInsertionsIfNeeded(work: StageWork, transaction: ActiveTransaction) {
+        let stageInsertedIDs = Set(
+            work.stage.structuralChanges.compactMap { change in
+                change.kind == .insert ? change.entityId : nil
+            }
+        )
+        guard !stageInsertedIDs.isEmpty else { return }
+
+        let immediateIDs = stageInsertedIDs.subtracting(transaction.insertedEntitiesWithContent)
+        guard !immediateIDs.isEmpty else { return }
+
+        let beforeCount = transaction.hiddenInsertedEntityIDs.count
+        transaction.hiddenInsertedEntityIDs.subtract(immediateIDs)
+        guard transaction.hiddenInsertedEntityIDs.count != beforeCount else { return }
+
+        applyProjectedScene(
+            targetScene: transaction.frame.targetScene,
+            hiddenInsertedEntityIDs: transaction.hiddenInsertedEntityIDs
+        )
+    }
+
+    private func revealInsertedEntitiesIfNeeded(
+        tracks: [ContentTrack],
+        displayedUnits: [Int],
+        transaction: ActiveTransaction
+    ) {
+        guard !tracks.isEmpty, !transaction.hiddenInsertedEntityIDs.isEmpty else { return }
+
+        var revealedEntityIDs: [String] = []
+        revealedEntityIDs.reserveCapacity(tracks.count)
+        for (index, track) in tracks.enumerated() {
+            guard track.inserted else { continue }
+            guard displayedUnits[index] > 0 else { continue }
+            guard transaction.hiddenInsertedEntityIDs.contains(track.entityId) else { continue }
+            revealedEntityIDs.append(track.entityId)
+        }
+
+        guard !revealedEntityIDs.isEmpty else { return }
+        transaction.hiddenInsertedEntityIDs.subtract(revealedEntityIDs)
+        applyProjectedScene(
+            targetScene: transaction.frame.targetScene,
+            hiddenInsertedEntityIDs: transaction.hiddenInsertedEntityIDs
+        )
+    }
+
+    private func initialHiddenInsertedEntityIDs(for frame: RenderFrame, stageWorks: [StageWork]) -> Set<String> {
+        var hidden = Set(
+            frame.delta.structuralChanges.compactMap { change in
+                change.kind == .insert ? change.entityId : nil
+            }
+        )
+        hidden.formUnion(
+            frame.delta.contentChanges.compactMap { change in
+                change.inserted ? change.entityId : nil
+            }
+        )
+        guard !hidden.isEmpty else { return [] }
+
+        let progressByEntity = animationStateStore.animationStates(documentID: frame.targetScene.documentId)
+        for entityID in Array(hidden) {
+            let key = animationEntityKey(documentID: frame.targetScene.documentId, entityID: entityID)
+            if let progress = progressByEntity[key], progress.displayedUnits > 0 {
+                hidden.remove(entityID)
+            }
+        }
+
+        for work in stageWorks {
+            for track in work.tracks where track.inserted && track.revealStartUnits > 0 {
+                hidden.remove(track.entityId)
+            }
+        }
+        return hidden
+    }
+
+    private func applyProjectedScene(targetScene: RenderScene, hiddenInsertedEntityIDs: Set<String>) {
+        applyScene(projectedScene(targetScene, hidingInsertedEntityIDs: hiddenInsertedEntityIDs))
+    }
+
+    private func projectedScene(_ scene: RenderScene, hidingInsertedEntityIDs: Set<String>) -> RenderScene {
+        guard !hidingInsertedEntityIDs.isEmpty else { return scene }
+
+        func projectNode(_ node: RenderScene.Node, parentHidden: Bool) -> RenderScene.Node {
+            let hidden = parentHidden || hidingInsertedEntityIDs.contains(node.id)
+            let projectedChildren = node.children.map { child in
+                projectNode(child, parentHidden: hidden)
+            }
+            return RenderScene.Node(
+                id: node.id,
+                kind: node.kind,
+                component: hidden ? nil : node.component,
+                children: projectedChildren,
+                spacingAfter: hidden ? 0 : node.spacingAfter,
+                metadata: node.metadata
+            )
+        }
+
+        return RenderScene(
+            documentId: scene.documentId,
+            nodes: scene.nodes.map { projectNode($0, parentHidden: false) },
+            metadata: scene.metadata
+        )
     }
 
     private func allocatedDeltaUnits(

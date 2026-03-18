@@ -21,8 +21,18 @@ public final class LayoutCoordinator {
     ) {
         let height = max(0, measureHeight())
         if shouldPublishHeight(height) {
+            let previous = lastPublishedHeight ?? -1
             lastPublishedHeight = height
+            SceneDebugLogger.log(
+                "LayoutCoordinator publish version=\(version) phase=\(phase) displayed=\(displayedUnits)/\(totalUnits) height=\(height) prev=\(previous)",
+                level: .verbose
+            )
             onHeightChange?(height)
+        } else {
+            SceneDebugLogger.log(
+                "LayoutCoordinator skip version=\(version) phase=\(phase) displayed=\(displayedUnits)/\(totalUnits) height=\(height) last=\(lastPublishedHeight ?? -1)",
+                level: .verbose
+            )
         }
 
         onProgress?(AnimationProgress(
@@ -43,7 +53,12 @@ public final class LayoutCoordinator {
         onHeightChange: ((CGFloat) -> Void)?
     ) {
         let height = max(0, measureHeight())
+        let previous = lastPublishedHeight ?? -1
         lastPublishedHeight = height
+        SceneDebugLogger.log(
+            "LayoutCoordinator force-final version=\(version) height=\(height) prev=\(previous)",
+            level: .verbose
+        )
         onHeightChange?(height)
         onProgress?(AnimationProgress(
             version: version,

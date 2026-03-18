@@ -469,16 +469,24 @@ private extension MarkdownRuntime {
 
     func handleStoreEvent(_ event: MarkdownRenderStoreEvent) {
         switch event.kind {
-        case let .streamUpdated(ref), let .streamFinished(ref):
+        case let .streamUpdated(ref):
             guard ownedStreamRefs.contains(ref),
                   let record = event.snapshot.streamRecord(ref: ref),
                   let update = record.latestUpdate else {
                 return
             }
             applyProjectedStreamingUpdate(update, mode: .incremental)
-            if record.isFinal {
-                ownedStreamRefs.remove(ref)
+
+        case let .streamFinished(ref):
+            guard ownedStreamRefs.contains(ref),
+                  let record = event.snapshot.streamRecord(ref: ref),
+                  let update = record.latestUpdate else {
+                return
             }
+            if currentRawModel != update.model {
+                applyProjectedStreamingUpdate(update, mode: .incremental)
+            }
+            ownedStreamRefs.remove(ref)
 
         case let .streamRemoved(ref):
             ownedStreamRefs.remove(ref)

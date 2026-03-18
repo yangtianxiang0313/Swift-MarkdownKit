@@ -295,6 +295,28 @@ final class MarkdownRuntimeTests: XCTestCase {
             XCTFail("copyStatus should stay copied when stale reset is dropped")
         }
     }
+
+    func testFinishStreamWithUnchangedModelDoesNotTriggerAdditionalRenderPass() throws {
+        let view = MarkdownContainerView(theme: .default)
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
+        let delegate = RuntimeContainerDelegateSpy()
+        view.delegate = delegate
+
+        let runtime = MarkdownRuntime(streamingEngine: MarkdownnAdapter.makeEngine())
+        runtime.attach(to: view)
+
+        let ref = try runtime.startStream(documentID: "doc.runtime.finish.stable")
+        try runtime.appendStreamChunk(ref: ref, chunk: "Hello world")
+
+        let sceneAfterAppend = view.currentSceneSnapshot
+        let heightEventsAfterAppend = delegate.heightEvents.count
+        XCTAssertGreaterThan(heightEventsAfterAppend, 0)
+
+        try runtime.finishStream(ref: ref)
+
+        XCTAssertEqual(delegate.heightEvents.count, heightEventsAfterAppend)
+        XCTAssertEqual(view.currentSceneSnapshot, sceneAfterAppend)
+    }
 }
 
 @MainActor
@@ -342,6 +364,14 @@ private final class RuntimeEffectTestToken: MarkdownEffectToken {
 
     func cancel() {
         cancelBlock()
+    }
+}
+
+private final class RuntimeContainerDelegateSpy: MarkdownContainerViewDelegate {
+    private(set) var heightEvents: [CGFloat] = []
+
+    func containerView(_ view: MarkdownContainerView, didChangeContentHeight height: CGFloat) {
+        heightEvents.append(height)
     }
 }
 

@@ -44,6 +44,18 @@ final class MarkdownContainerViewTests: XCTestCase {
         XCTAssertGreaterThan(view.contentHeight, 0)
     }
 
+    func testContainerViewKeepsNonZeroHeightDuringEmptyStreamingBootstrap() throws {
+        let view = makeConfiguredContainerView()
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
+        let runtime = makeConfiguredRuntime()
+        runtime.attach(to: view)
+
+        _ = try runtime.startStream(documentID: "doc.runtime.bootstrap.empty")
+
+        XCTAssertGreaterThanOrEqual(view.contentHeight, 1)
+        XCTAssertGreaterThanOrEqual(view.intrinsicContentSize.height, 1)
+    }
+
     func testContainerViewContractDirectiveCustomElementCanOverrideRendering() throws {
         let view = makeConfiguredContainerView()
         view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)

@@ -108,10 +108,11 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
     )
 
     private var currentScene: RenderScene
+    private var logicalScene: RenderScene
     private var lastWidth: CGFloat = 0
     private var transactionVersion: Int = 0
     private var measuredContentHeight: CGFloat = 0
-    private var lastNotifiedContentHeight: CGFloat = -1
+    private let minimumNonZeroContentHeight: CGFloat = 1
 
     private var currentContractModel: MarkdownContract.RenderModel?
     private let contractModelDiffer: any MarkdownContract.RenderModelDiffer = MarkdownContract.DefaultRenderModelDiffer()
@@ -132,6 +133,7 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
             blockMapperChain: MarkdownContract.RenderModelUIKitAdapter.makeDefaultBlockMapperChain()
         )
         self.currentScene = RenderScene.empty(documentId: "document")
+        self.logicalScene = self.currentScene
 
         super.init(frame: .zero)
         clipsToBounds = true
@@ -184,7 +186,7 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
     }
 
     public var contentHeight: CGFloat {
-        ceil(max(0, measuredContentHeight))
+        ceil(max(minimumNonZeroContentHeight, measuredContentHeight))
     }
 
     public override func layoutSubviews() {
@@ -282,7 +284,9 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
         guard bounds.width > 0 else { return }
 
         guard let contractModel = currentContractModel else {
-            applySceneSnapshot(RenderScene.empty(documentId: currentScene.documentId))
+            let emptyScene = RenderScene.empty(documentId: logicalScene.documentId)
+            logicalScene = emptyScene
+            applySceneSnapshot(emptyScene)
             return
         }
 
@@ -300,13 +304,15 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
         }
         lastRenderError = nil
 
-        let diff = sceneDiffer.diff(old: currentScene, new: targetScene)
+        let previousScene = logicalScene
+        let diff = sceneDiffer.diff(old: previousScene, new: targetScene)
         guard !diff.isEmpty else {
+            logicalScene = targetScene
             applySceneSnapshot(targetScene)
             return
         }
 
-        let delta = sceneDeltaBuilder.makeDelta(old: currentScene, new: targetScene, diff: diff)
+        let delta = sceneDeltaBuilder.makeDelta(old: previousScene, new: targetScene, diff: diff)
         let resolvedExecutionPlan = makeExecutionPlan(
             oldContractModel: oldContractModel,
             newContractModel: contractModel,
@@ -317,7 +323,7 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
         transactionVersion += 1
         let renderFrame = RenderFrame(
             version: transactionVersion,
-            previousScene: currentScene,
+            previousScene: previousScene,
             targetScene: targetScene,
             diff: diff,
             delta: delta,
@@ -328,6 +334,7 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
             entityAppearanceMode: contentEntityAppearanceMode,
             unitsPerSecond: typingCharactersPerSecond
         )
+        logicalScene = targetScene
         renderCommitCoordinator.submit(renderFrame)
     }
 
@@ -352,11 +359,10 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
     private func notifyHeightChange() {
         invalidateIntrinsicContentSize()
         let resolvedHeight = contentHeight
-        if abs(lastNotifiedContentHeight - resolvedHeight) < 0.5 {
-            return
-        }
-        lastNotifiedContentHeight = resolvedHeight
-        SceneDebugLogger.log("Container height document=\(currentScene.documentId) version=\(transactionVersion) height=\(resolvedHeight)")
+        SceneDebugLogger.log(
+            "Container height notify document=\(currentScene.documentId) version=\(transactionVersion) height=\(resolvedHeight)",
+            level: .verbose
+        )
         delegate?.containerView(self, didChangeContentHeight: contentHeight)
     }
 
