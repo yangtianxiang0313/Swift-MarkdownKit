@@ -391,6 +391,7 @@ public final class RenderCommitCoordinator {
 
         for (index, track) in tracks.enumerated() {
             let displayed = displayedUnits[index]
+            let consumedUnits = allocations[index]
 
             guard let node = targetScene.componentNodeByID(track.entityId),
                   let component = node.component as? any RevealAnimatableComponent,
@@ -400,14 +401,20 @@ public final class RenderCommitCoordinator {
 
             let stableUnits: Int
             if let appearance = component as? any AppearanceAnimatableComponent {
-                let tail = tailRampUnits(
-                    for: effectKey,
-                    base: appearance.appearanceProfile.tailRampUnits
-                )
-                stableUnits = min(
-                    displayed,
-                    max(track.stableStartUnits, displayed - tail)
-                )
+                // Once this entity's delta is fully consumed, it must be fully stable.
+                // This prevents trailing glyph alpha from lingering when the next entity starts.
+                if consumedUnits >= track.deltaUnits {
+                    stableUnits = displayed
+                } else {
+                    let tail = tailRampUnits(
+                        for: effectKey,
+                        base: appearance.appearanceProfile.tailRampUnits
+                    )
+                    stableUnits = min(
+                        displayed,
+                        max(track.stableStartUnits, displayed - tail)
+                    )
+                }
             } else {
                 stableUnits = displayed
             }

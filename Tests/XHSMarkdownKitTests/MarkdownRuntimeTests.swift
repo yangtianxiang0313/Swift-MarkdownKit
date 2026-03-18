@@ -317,6 +317,27 @@ final class MarkdownRuntimeTests: XCTestCase {
         XCTAssertEqual(delegate.heightEvents.count, heightEventsAfterAppend)
         XCTAssertEqual(view.currentSceneSnapshot, sceneAfterAppend)
     }
+
+    func testAttachWithoutCurrentModelClearsReusedContainerScene() throws {
+        let view = MarkdownContainerView(theme: .default)
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
+
+        let firstRuntime = MarkdownRuntime(streamingEngine: MarkdownnAdapter.makeEngine())
+        firstRuntime.attach(to: view)
+        let firstRef = try firstRuntime.startStream(documentID: "doc.runtime.reuse.1")
+        try firstRuntime.appendStreamChunk(ref: firstRef, chunk: "Hello")
+        try firstRuntime.finishStream(ref: firstRef)
+
+        XCTAssertTrue(mergedText(from: view.currentSceneSnapshot).contains("Hello"))
+        firstRuntime.cancelStream(ref: firstRef)
+        firstRuntime.detach()
+
+        let secondRuntime = MarkdownRuntime(streamingEngine: MarkdownnAdapter.makeEngine())
+        secondRuntime.attach(to: view)
+
+        XCTAssertTrue(mergedText(from: view.currentSceneSnapshot).isEmpty)
+        XCTAssertGreaterThanOrEqual(view.contentHeight, 1)
+    }
 }
 
 @MainActor

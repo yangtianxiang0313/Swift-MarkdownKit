@@ -334,7 +334,11 @@ public final class MarkdownRuntime {
         }
         view.bindAnimationStateStore(renderStore)
 
-        renderCurrentModel()
+        if currentRawModel == nil {
+            view.resetRenderSurface(documentID: stateStore.snapshot.documentID)
+        } else {
+            renderCurrentModel()
+        }
     }
 
     public func detach() {

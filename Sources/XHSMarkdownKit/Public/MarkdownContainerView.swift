@@ -218,6 +218,16 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
         animationStateStoreProxy.base = store
     }
 
+    func resetRenderSurface(documentID: String = "document") {
+        renderCommitCoordinator.finishAll()
+        currentContractModel = nil
+        lastRenderError = nil
+
+        let emptyScene = RenderScene.empty(documentId: documentID)
+        logicalScene = emptyScene
+        applySceneSnapshot(emptyScene)
+    }
+
     func applyStreamingUpdateFromRuntime(
         _ update: MarkdownContract.StreamingRenderUpdate,
         mode: MarkdownStreamingApplyMode

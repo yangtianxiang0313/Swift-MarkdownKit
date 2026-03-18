@@ -156,6 +156,61 @@ final class RenderCommitCoordinatorTests: XCTestCase {
         XCTAssertGreaterThan(simB, 0)
     }
 
+    func testSequentialRevealMakesPreviousEntityFullyOpaqueBeforeNextStarts() {
+        let host = SceneHost()
+        let coordinator = host.makeCoordinator()
+        coordinator.concurrencyPolicy = .fullyOrdered
+
+        let target = RenderScene(
+            documentId: "doc",
+            nodes: [
+                .init(
+                    id: "a",
+                    kind: "paragraph",
+                    component: MergedTextSceneComponent(attributedText: NSAttributedString(string: String(repeating: "a", count: 24)))
+                ),
+                .init(
+                    id: "b",
+                    kind: "paragraph",
+                    component: MergedTextSceneComponent(attributedText: NSAttributedString(string: String(repeating: "b", count: 24)))
+                )
+            ]
+        )
+
+        let contentChanges = [
+            ContentSceneChange(entityId: "a", stableUnits: 0, targetUnits: 24, inserted: true),
+            ContentSceneChange(entityId: "b", stableUnits: 0, targetUnits: 24, inserted: true)
+        ]
+
+        coordinator.submit(makeFrame(
+            version: 1,
+            previousScene: .empty(documentId: "doc"),
+            targetScene: target,
+            diffChanges: [
+                SceneChange(kind: .insert, entityId: "a", toIndex: 0),
+                SceneChange(kind: .insert, entityId: "b", toIndex: 1)
+            ],
+            contentChanges: contentChanges,
+            unitsPerSecond: 24,
+            entityAppearanceMode: .sequential
+        ))
+
+        let reached = waitUntil(timeout: 2.0) {
+            host.displayedUnits(for: "b") > 0
+        }
+        XCTAssertTrue(reached)
+
+        guard let renderedA = host.renderedText(for: "a") else {
+            XCTFail("Expected rendered text for first entity")
+            return
+        }
+        XCTAssertEqual(renderedA.length, 24)
+
+        let color = renderedA.attribute(.foregroundColor, at: renderedA.length - 1, effectiveRange: nil) as? UIColor
+        let alpha = color?.cgColor.alpha ?? 1
+        XCTAssertGreaterThanOrEqual(alpha, 0.995)
+    }
+
     func testSwitchingDocumentResetsSidecarProgressForSameEntityID() {
         let host = SceneHost()
         let coordinator = host.makeCoordinator()
