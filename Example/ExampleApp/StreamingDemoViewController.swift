@@ -9,6 +9,7 @@ final class StreamingDemoViewController: UIViewController {
     private let autoScrollCoordinator = StreamingDemoAutoScrollCoordinator()
     private var pendingScrollHint: StreamingDemoScrollHint?
     private var isScrollHintFlushScheduled = false
+    private var animationConfig = StreamingDemoAnimationConfig.default
 
     private lazy var scenarioSelector: UISegmentedControl = {
         let control = UISegmentedControl(items: viewModel.scenarios.map(\.title))
@@ -34,6 +35,16 @@ final class StreamingDemoViewController: UIViewController {
         button.backgroundColor = UIColor.systemRed.withAlphaComponent(0.12)
         button.layer.cornerRadius = 10
         button.addTarget(self, action: #selector(stopTapped), for: .touchUpInside)
+        return button
+    }()
+
+    private lazy var fullChunkButton: UIButton = {
+        let button = UIButton(type: .system)
+        button.setTitle("全量chunk", for: .normal)
+        button.setTitleColor(.systemGreen, for: .normal)
+        button.backgroundColor = UIColor.systemGreen.withAlphaComponent(0.12)
+        button.layer.cornerRadius = 10
+        button.addTarget(self, action: #selector(fullChunkTapped), for: .touchUpInside)
         return button
     }()
 
@@ -93,6 +104,7 @@ final class StreamingDemoViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
+        setupNavigationItems()
         viewModel.selectScenario(at: 0)
     }
 
@@ -100,7 +112,9 @@ final class StreamingDemoViewController: UIViewController {
         title = "流式+动画"
         view.backgroundColor = .systemBackground
 
-        let controlsStack = UIStackView(arrangedSubviews: [startButton, stopButton, replayButton, resetButton])
+        let controlsStack = UIStackView(
+            arrangedSubviews: [startButton, fullChunkButton, stopButton, replayButton, resetButton]
+        )
         controlsStack.axis = .horizontal
         controlsStack.distribution = .fillEqually
         controlsStack.spacing = 8
@@ -127,6 +141,15 @@ final class StreamingDemoViewController: UIViewController {
         ])
     }
 
+    private func setupNavigationItems() {
+        navigationItem.rightBarButtonItem = UIBarButtonItem(
+            title: "配置",
+            style: .plain,
+            target: self,
+            action: #selector(configTapped)
+        )
+    }
+
     @objc
     private func scenarioChanged() {
         viewModel.selectScenario(at: scenarioSelector.selectedSegmentIndex)
@@ -136,6 +159,12 @@ final class StreamingDemoViewController: UIViewController {
     private func startTapped() {
         autoScrollCoordinator.noteStreamingStart(in: tableView)
         viewModel.startSelectedScenario()
+    }
+
+    @objc
+    private func fullChunkTapped() {
+        autoScrollCoordinator.noteStreamingStart(in: tableView)
+        viewModel.startSelectedScenarioInSingleChunk()
     }
 
     @objc
@@ -154,6 +183,11 @@ final class StreamingDemoViewController: UIViewController {
         pendingScrollHint = nil
         autoScrollCoordinator.reset()
         viewModel.resetConversation()
+    }
+
+    @objc
+    private func configTapped() {
+        presentAnimationConfigMenu()
     }
 
     private func applyScrollHint(_ hint: StreamingDemoScrollHint) {
@@ -188,6 +222,153 @@ final class StreamingDemoViewController: UIViewController {
             self.applyScrollHint(hint)
         }
     }
+
+    private func presentAnimationConfigMenu() {
+        let alert = UIAlertController(
+            title: "动画参数",
+            message: animationConfig.summaryText,
+            preferredStyle: .actionSheet
+        )
+
+        alert.addAction(UIAlertAction(title: "动画模式", style: .default) { [weak self] _ in
+            self?.presentAnimationModeSheet()
+        })
+        alert.addAction(UIAlertAction(title: "效果类型", style: .default) { [weak self] _ in
+            self?.presentEffectSheet()
+        })
+        alert.addAction(UIAlertAction(title: "打字速度", style: .default) { [weak self] _ in
+            self?.presentTypingSpeedEditor()
+        })
+        alert.addAction(UIAlertAction(title: "并发策略", style: .default) { [weak self] _ in
+            self?.presentConcurrencySheet()
+        })
+        alert.addAction(UIAlertAction(title: "实体显隐顺序", style: .default) { [weak self] _ in
+            self?.presentAppearanceModeSheet()
+        })
+        alert.addAction(UIAlertAction(title: "恢复默认", style: .destructive) { [weak self] _ in
+            guard let self else { return }
+            animationConfig = .default
+            applyAnimationConfigChange(status: "动画参数已恢复默认")
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        presentConfigAlert(alert)
+    }
+
+    private func presentAnimationModeSheet() {
+        let alert = UIAlertController(title: "动画模式", message: nil, preferredStyle: .actionSheet)
+        alert.addAction(UIAlertAction(title: "Instant", style: .default) { [weak self] _ in
+            guard let self else { return }
+            animationConfig.mode = .instant
+            applyAnimationConfigChange(status: "动画模式: Instant")
+        })
+        alert.addAction(UIAlertAction(title: "DualPhase", style: .default) { [weak self] _ in
+            guard let self else { return }
+            animationConfig.mode = .dualPhase
+            applyAnimationConfigChange(status: "动画模式: DualPhase")
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        presentConfigAlert(alert)
+    }
+
+    private func presentEffectSheet() {
+        let alert = UIAlertController(title: "效果类型", message: nil, preferredStyle: .actionSheet)
+        let options: [(String, AnimationEffectKey)] = [
+            ("Typing", .typing),
+            ("SegmentFade", .segmentFade),
+            ("MaskReveal", .maskReveal),
+            ("StreamingMask", .streamingMask),
+            ("Instant", .instant)
+        ]
+        for (title, key) in options {
+            alert.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in
+                guard let self else { return }
+                animationConfig.effectKey = key
+                applyAnimationConfigChange(status: "效果类型: \(title)")
+            })
+        }
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        presentConfigAlert(alert)
+    }
+
+    private func presentTypingSpeedEditor() {
+        let alert = UIAlertController(
+            title: "打字速度",
+            message: "字符/秒（1~300）",
+            preferredStyle: .alert
+        )
+        alert.addTextField { [current = animationConfig.charactersPerSecond] textField in
+            textField.keyboardType = .numberPad
+            textField.text = "\(current)"
+            textField.placeholder = "例如 38"
+        }
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.addAction(UIAlertAction(title: "保存", style: .default) { [weak self] _ in
+            guard let self else { return }
+            let raw = alert.textFields?.first?.text ?? ""
+            guard let value = Int(raw) else { return }
+            animationConfig.charactersPerSecond = max(1, min(300, value))
+            applyAnimationConfigChange(status: "打字速度: \(animationConfig.charactersPerSecond) cps")
+        })
+        presentConfigAlert(alert)
+    }
+
+    private func presentConcurrencySheet() {
+        let alert = UIAlertController(title: "并发策略", message: nil, preferredStyle: .actionSheet)
+        alert.addAction(UIAlertAction(title: "FullyOrdered", style: .default) { [weak self] _ in
+            guard let self else { return }
+            animationConfig.concurrencyPolicy = .fullyOrdered
+            applyAnimationConfigChange(status: "并发策略: FullyOrdered")
+        })
+        alert.addAction(UIAlertAction(title: "LatestWins", style: .default) { [weak self] _ in
+            guard let self else { return }
+            animationConfig.concurrencyPolicy = .latestWins
+            applyAnimationConfigChange(status: "并发策略: LatestWins")
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        presentConfigAlert(alert)
+    }
+
+    private func presentAppearanceModeSheet() {
+        let alert = UIAlertController(title: "实体显隐顺序", message: nil, preferredStyle: .actionSheet)
+        alert.addAction(UIAlertAction(title: "Sequential", style: .default) { [weak self] _ in
+            guard let self else { return }
+            animationConfig.appearanceMode = .sequential
+            applyAnimationConfigChange(status: "实体显隐顺序: Sequential")
+        })
+        alert.addAction(UIAlertAction(title: "Simultaneous", style: .default) { [weak self] _ in
+            guard let self else { return }
+            animationConfig.appearanceMode = .simultaneous
+            applyAnimationConfigChange(status: "实体显隐顺序: Simultaneous")
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        presentConfigAlert(alert)
+    }
+
+    private func applyAnimationConfigChange(status: String) {
+        statusLabel.text = status
+        for cell in tableView.visibleCells {
+            guard let messageCell = cell as? StreamingDemoMessageCell,
+                  let indexPath = tableView.indexPath(for: messageCell),
+                  let message = viewModel.message(at: indexPath.row) else {
+                continue
+            }
+            messageCell.configure(
+                message: message,
+                runtime: viewModel.runtime(for: message.id),
+                animationConfig: animationConfig,
+                delegate: self
+            )
+        }
+    }
+
+    private func presentConfigAlert(_ alert: UIAlertController) {
+        if let popover = alert.popoverPresentationController {
+            popover.barButtonItem = navigationItem.rightBarButtonItem
+            popover.sourceView = view
+            popover.sourceRect = CGRect(x: view.bounds.midX, y: 60, width: 1, height: 1)
+        }
+        present(alert, animated: true)
+    }
 }
 
 extension StreamingDemoViewController: UITableViewDataSource {
@@ -207,6 +388,7 @@ extension StreamingDemoViewController: UITableViewDataSource {
         cell.configure(
             message: message,
             runtime: viewModel.runtime(for: message.id),
+            animationConfig: animationConfig,
             delegate: self
         )
         return cell
@@ -251,6 +433,7 @@ extension StreamingDemoViewController: StreamingDemoViewModelOutput {
                 visibleCell.configure(
                     message: message,
                     runtime: viewModel.runtime(for: message.id),
+                    animationConfig: animationConfig,
                     delegate: self
                 )
             } else {
@@ -324,6 +507,77 @@ enum StreamingDemoScrollHint {
     case followBottomIfPossible(animated: Bool)
 }
 
+enum StreamingDemoDeliveryMode {
+    case normal
+    case singleChunk
+}
+
+struct StreamingDemoAnimationConfig {
+    var mode: RenderAnimationMode
+    var effectKey: AnimationEffectKey
+    var charactersPerSecond: Int
+    var concurrencyPolicy: AnimationConcurrencyPolicy
+    var appearanceMode: ContentEntityAppearanceMode
+
+    static let `default` = StreamingDemoAnimationConfig(
+        mode: .dualPhase,
+        effectKey: .typing,
+        charactersPerSecond: 38,
+        concurrencyPolicy: .fullyOrdered,
+        appearanceMode: .sequential
+    )
+
+    var summaryText: String {
+        [
+            "Mode: \(mode.displayName)",
+            "Effect: \(effectKey.displayName)",
+            "Speed: \(charactersPerSecond) cps",
+            "Concurrency: \(concurrencyPolicy.displayName)",
+            "Appearance: \(appearanceMode.displayName)"
+        ].joined(separator: "\n")
+    }
+}
+
+private extension RenderAnimationMode {
+    var displayName: String {
+        switch self {
+        case .instant: return "Instant"
+        case .dualPhase: return "DualPhase"
+        }
+    }
+}
+
+private extension AnimationConcurrencyPolicy {
+    var displayName: String {
+        switch self {
+        case .latestWins: return "LatestWins"
+        case .fullyOrdered: return "FullyOrdered"
+        }
+    }
+}
+
+private extension ContentEntityAppearanceMode {
+    var displayName: String {
+        switch self {
+        case .sequential: return "Sequential"
+        case .simultaneous: return "Simultaneous"
+        }
+    }
+}
+
+private extension AnimationEffectKey {
+    var displayName: String {
+        switch rawValue {
+        case AnimationEffectKey.instant.rawValue: return "Instant"
+        case AnimationEffectKey.typing.rawValue: return "Typing"
+        case AnimationEffectKey.segmentFade.rawValue: return "SegmentFade"
+        case AnimationEffectKey.maskReveal.rawValue: return "MaskReveal"
+        case AnimationEffectKey.streamingMask.rawValue: return "StreamingMask"
+        default: return rawValue
+        }
+    }
+}
+
 // MARK: - ViewModel
 
 @MainActor
@@ -354,6 +608,7 @@ final class StreamingDemoViewModel {
     private var activeAssistantMessageID: UUID?
     private var activeRunToken = UUID()
     private var lastScenarioIndex: Int?
+    private var lastDeliveryMode: StreamingDemoDeliveryMode = .normal
     private var runtimeByMessageID: [UUID: MarkdownRuntime] = [:]
 
     init(
@@ -382,12 +637,16 @@ final class StreamingDemoViewModel {
     }
 
     func startSelectedScenario() {
-        startScenario(at: selectedScenarioIndex)
+        startScenario(at: selectedScenarioIndex, deliveryMode: .normal)
+    }
+
+    func startSelectedScenarioInSingleChunk() {
+        startScenario(at: selectedScenarioIndex, deliveryMode: .singleChunk)
     }
 
     func replayCurrentScenario() {
         let index = lastScenarioIndex ?? selectedScenarioIndex
-        startScenario(at: index)
+        startScenario(at: index, deliveryMode: lastDeliveryMode)
     }
 
     func resetConversation() {
@@ -445,12 +704,13 @@ private extension StreamingDemoViewModel {
 }
 
 private extension StreamingDemoViewModel {
-    func startScenario(at index: Int) {
+    func startScenario(at index: Int, deliveryMode: StreamingDemoDeliveryMode) {
         guard scenarios.indices.contains(index) else { return }
 
         stopStreaming(emitStatus: false)
         let scenario = scenarios[index]
         lastScenarioIndex = index
+        lastDeliveryMode = deliveryMode
 
         appendUserMessage(for: scenario)
         guard let assistantID = appendAssistantMessage(for: scenario) else {
@@ -462,17 +722,49 @@ private extension StreamingDemoViewModel {
         let runToken = UUID()
         activeRunToken = runToken
 
-        output?.viewModel(self, didUpdateStatus: "准备中 · \(scenario.title)")
+        let modeText = deliveryMode == .singleChunk ? "全量chunk" : "增量chunk"
+        output?.viewModel(self, didUpdateStatus: "准备中 · \(scenario.title) · \(modeText)")
         output?.viewModel(self, didEmitScrollHint: .followBottomIfPossible(animated: true))
 
-        let configuration = MarkdownNetworkStreamSimulator.Configuration(
-            markdown: scenario.assistantMarkdown,
-            chunkProfile: scenario.chunkProfile,
-            networkProfile: scenario.networkProfile
-        )
+        let configuration = makeStreamConfiguration(for: scenario, deliveryMode: deliveryMode)
 
         streamService.start(configuration: configuration) { [weak self] event in
             self?.handle(event: event, for: assistantID, runToken: runToken)
+        }
+    }
+
+    func makeStreamConfiguration(
+        for scenario: StreamingDemoScenario,
+        deliveryMode: StreamingDemoDeliveryMode
+    ) -> MarkdownNetworkStreamSimulator.Configuration {
+        switch deliveryMode {
+        case .normal:
+            return MarkdownNetworkStreamSimulator.Configuration(
+                markdown: scenario.assistantMarkdown,
+                chunkProfile: scenario.chunkProfile,
+                networkProfile: scenario.networkProfile
+            )
+
+        case .singleChunk:
+            let fullChunkCharacters = max(1, scenario.assistantMarkdown.count)
+            let frameBytes = max(8, scenario.assistantMarkdown.utf8.count + 4)
+            return MarkdownNetworkStreamSimulator.Configuration(
+                markdown: scenario.assistantMarkdown,
+                chunkProfile: .init(
+                    preferredCharacters: fullChunkCharacters,
+                    jitterCharacters: 0...0
+                ),
+                networkProfile: .init(
+                    ttfbMs: 40...120,
+                    receiveBytes: frameBytes...frameBytes,
+                    interPacketMs: 0...0,
+                    stallProbability: 0,
+                    stallMs: 0...0,
+                    burstProbability: 0,
+                    burstReceiveBytes: frameBytes...frameBytes,
+                    burstInterPacketMs: 0...0
+                )
+            )
         }
     }
 
@@ -745,10 +1037,6 @@ final class StreamingDemoMessageCell: UITableViewCell {
         view.translatesAutoresizingMaskIntoConstraints = false
         view.backgroundColor = .clear
         view.delegate = self
-        view.animationEffectKey = .typing
-        view.animationMode = .dualPhase
-        view.typingCharactersPerSecond = 38
-        view.animationConcurrencyPolicy = .fullyOrdered
         return view
     }()
 
@@ -782,12 +1070,14 @@ final class StreamingDemoMessageCell: UITableViewCell {
     func configure(
         message: StreamingDemoMessage,
         runtime: MarkdownRuntime?,
+        animationConfig: StreamingDemoAnimationConfig,
         delegate: StreamingDemoMessageCellDelegate
     ) {
         self.delegate = delegate
         self.messageID = message.id
 
         applyRoleStyle(message.role)
+        applyAnimationConfig(animationConfig)
 
         switch message.renderState {
         case let .text(text):
@@ -878,6 +1168,14 @@ private extension StreamingDemoMessageCell {
             bubbleView.backgroundColor = UIColor.secondarySystemBackground
             textLabelView.textColor = .label
         }
+    }
+
+    func applyAnimationConfig(_ config: StreamingDemoAnimationConfig) {
+        markdownView.animationEffectKey = config.effectKey
+        markdownView.animationMode = config.mode
+        markdownView.typingCharactersPerSecond = config.charactersPerSecond
+        markdownView.animationConcurrencyPolicy = config.concurrencyPolicy
+        markdownView.contentEntityAppearanceMode = config.appearanceMode
     }
 }
 
