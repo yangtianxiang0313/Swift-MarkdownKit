@@ -174,6 +174,63 @@ final class MarkdownContainerViewTests: XCTestCase {
         XCTAssertEqual(view.contentEntityAppearanceMode, .sequential)
     }
 
+    func testContainerViewRenderFailureKeepsPreviousSceneAndReportsError() {
+        let view = MarkdownContainerView(theme: .default)
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
+        let delegate = RenderFailureDelegateSpy()
+        view.delegate = delegate
+
+        let initialModel = makeRenderModel(documentID: "doc.failure", text: "Before")
+        view.setContractRenderModel(initialModel)
+        let beforeScene = view.currentSceneSnapshot
+        let beforeHeight = view.contentHeight
+
+        let failingAdapter = MarkdownContract.RenderModelUIKitAdapter(
+            mergePolicy: MarkdownContract.FirstBlockAnchoredMergePolicy(),
+            blockMapperChain: MarkdownContract.BlockMapperChain()
+        )
+        view.contractRenderAdapter = failingAdapter
+
+        let failingModel = makeRenderModel(documentID: "doc.failure", text: "After")
+        view.setContractRenderModel(failingModel)
+
+        XCTAssertEqual(view.currentSceneSnapshot, beforeScene)
+        XCTAssertEqual(view.contentHeight, beforeHeight)
+        XCTAssertNotNil(view.lastRenderError)
+        XCTAssertEqual(delegate.failureDocumentIDs, ["doc.failure"])
+        XCTAssertEqual(delegate.failureCount, 1)
+    }
+
+    func testContainerViewCanRecoverAfterRenderFailure() {
+        let view = MarkdownContainerView(theme: .default)
+        view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
+        let delegate = RenderFailureDelegateSpy()
+        view.delegate = delegate
+
+        let initialModel = makeRenderModel(documentID: "doc.recover", text: "Initial")
+        view.setContractRenderModel(initialModel)
+
+        let failingAdapter = MarkdownContract.RenderModelUIKitAdapter(
+            mergePolicy: MarkdownContract.FirstBlockAnchoredMergePolicy(),
+            blockMapperChain: MarkdownContract.BlockMapperChain()
+        )
+        view.contractRenderAdapter = failingAdapter
+        view.setContractRenderModel(makeRenderModel(documentID: "doc.recover", text: "ShouldFail"))
+
+        XCTAssertNotNil(view.lastRenderError)
+        XCTAssertEqual(delegate.failureCount, 1)
+
+        view.contractRenderAdapter = MarkdownContract.RenderModelUIKitAdapter(
+            mergePolicy: MarkdownContract.FirstBlockAnchoredMergePolicy(),
+            blockMapperChain: MarkdownContract.RenderModelUIKitAdapter.makeDefaultBlockMapperChain()
+        )
+        view.setContractRenderModel(makeRenderModel(documentID: "doc.recover", text: "Recovered"))
+
+        XCTAssertTrue(mergedText(from: view.currentSceneSnapshot).contains("Recovered"))
+        XCTAssertNil(view.lastRenderError)
+        XCTAssertEqual(delegate.failureCount, 1)
+    }
+
     private func makeConfiguredContainerView() -> MarkdownContainerView {
         let specs = ExtensionNodeTestSupport.makeNodeSpecRegistry()
         let parser = XYMarkdownContractParser(nodeSpecRegistry: specs)
@@ -201,6 +258,19 @@ final class MarkdownContainerViewTests: XCTestCase {
             contractStreamingEngine: streamingEngine
         )
     }
+
+    private func makeRenderModel(documentID: String, text: String) -> MarkdownContract.RenderModel {
+        MarkdownContract.RenderModel(
+            documentId: documentID,
+            blocks: [
+                .init(
+                    id: "\(documentID).paragraph",
+                    kind: .paragraph,
+                    inlines: [.init(id: "\(documentID).text", kind: .text, text: text)]
+                )
+            ]
+        )
+    }
 }
 
 private extension MarkdownContainerViewTests {
@@ -210,5 +280,15 @@ private extension MarkdownContainerViewTests {
             result.append(contentsOf: flatten(child))
         }
         return result
+    }
+}
+
+private final class RenderFailureDelegateSpy: MarkdownContainerViewDelegate {
+    private(set) var failureDocumentIDs: [String] = []
+    private(set) var failureCount: Int = 0
+
+    func containerView(_ view: MarkdownContainerView, didFailRender error: Error, forDocumentID documentID: String) {
+        failureCount += 1
+        failureDocumentIDs.append(documentID)
     }
 }

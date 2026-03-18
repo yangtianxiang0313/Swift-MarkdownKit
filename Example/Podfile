@@ -14,6 +14,7 @@ project 'ExampleApp.xcodeproj'
 target 'ExampleApp' do
   # 演示工程默认接入 Full（UIKit + markdownn adapter）
   pod 'XHSMarkdownKit/Full', :path => '../'
+  pod 'SnapKit'
   
   # Lookin 调试工具
   pod 'LookinServer', :configurations => ['Debug']

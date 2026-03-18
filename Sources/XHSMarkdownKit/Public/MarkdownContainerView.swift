@@ -45,6 +45,7 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
     // MARK: - Delegate
 
     public weak var delegate: MarkdownContainerViewDelegate?
+    public private(set) var lastRenderError: Error?
 
     // MARK: - Scene Host
 
@@ -70,7 +71,7 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
             self?.viewGraphCoordinator.view(for: entityID)
         },
         measureHeight: { [weak self] in
-            self?.contentHeight ?? 0
+            self?.measureAnimatedContentHeight() ?? 0
         },
         animateStructuralChanges: { [weak self] changes in
             self?.viewGraphCoordinator.animateStructuralChanges(changes)
@@ -120,12 +121,18 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
     // MARK: - Public API
 
     public func setContractRenderModel(
-        _ model: MarkdownContract.RenderModel
+        _ model: MarkdownContract.RenderModel,
+        forceInstant: Bool = false
     ) {
         let oldModel = currentContractModel
         currentContractModel = model
         contractStreamingSession = nil
-        rerender(isFinal: true, oldContractModel: oldModel, compiledAnimationPlan: nil)
+        rerender(
+            isFinal: true,
+            forceInstant: forceInstant,
+            oldContractModel: oldModel,
+            compiledAnimationPlan: nil
+        )
     }
 
     public func setContractMarkdown(
@@ -190,13 +197,7 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
         }
 
         let update = try session.appendChunk(chunk)
-        let oldModel = currentContractModel
-        currentContractModel = update.model
-        rerender(
-            isFinal: update.isFinal,
-            oldContractModel: oldModel,
-            compiledAnimationPlan: update.compiledAnimationPlan
-        )
+        applyContractStreamingUpdate(update, mode: .incremental)
         return update
     }
 
@@ -222,15 +223,36 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
         }
 
         let update = try session.finish()
+        applyContractStreamingUpdate(update, mode: .incremental)
+        return update
+    }
+
+    public func applyContractStreamingUpdate(
+        _ update: MarkdownContract.StreamingRenderUpdate,
+        mode: MarkdownStreamingApplyMode = .incremental
+    ) {
         let oldModel = currentContractModel
         currentContractModel = update.model
-        rerender(
-            isFinal: true,
-            oldContractModel: oldModel,
-            compiledAnimationPlan: update.compiledAnimationPlan
-        )
-        contractStreamingSession = nil
-        return update
+
+        switch mode {
+        case .incremental:
+            rerender(
+                isFinal: update.isFinal,
+                oldContractModel: oldModel,
+                compiledAnimationPlan: update.compiledAnimationPlan
+            )
+        case .snapshot:
+            rerender(
+                isFinal: update.isFinal,
+                forceInstant: true,
+                oldContractModel: oldModel,
+                compiledAnimationPlan: nil
+            )
+        }
+
+        if update.isFinal {
+            contractStreamingSession = nil
+        }
     }
 
     public func skipAnimation() {
@@ -268,6 +290,15 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
 
     private func setupStackView() {
         addSubview(contentView)
+    }
+
+    private func measureAnimatedContentHeight() -> CGFloat {
+        guard bounds.width > 0 else { return contentHeight }
+        measuredContentHeight = viewGraphCoordinator.relayout(
+            scene: currentScene,
+            maxWidth: max(bounds.width, 1)
+        )
+        return contentHeight
     }
 
     private func bindRenderCommitCoordinator() {
@@ -308,9 +339,11 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
                 maxWidth: bounds.width
             )
         } catch {
-            applySceneSnapshot(RenderScene.empty(documentId: contractModel.documentId))
+            lastRenderError = error
+            notifyRenderFailure(error, documentID: contractModel.documentId)
             return
         }
+        lastRenderError = nil
 
         let diff = sceneDiffer.diff(old: currentScene, new: targetScene)
         guard !diff.isEmpty else {
@@ -348,6 +381,17 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
             return .instant
         }
         return animationMode
+    }
+
+    private func notifyRenderFailure(_ error: Error, documentID: String) {
+        if Thread.isMainThread {
+            delegate?.containerView(self, didFailRender: error, forDocumentID: documentID)
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.delegate?.containerView(self, didFailRender: error, forDocumentID: documentID)
+        }
     }
 
     private func notifyHeightChange() {

@@ -43,6 +43,32 @@ public final class SceneApplier {
         return max(0, ceil(result.endY))
     }
 
+    @discardableResult
+    public func relayout(
+        scene: RenderScene,
+        maxWidth: CGFloat,
+        managedViews: inout [String: UIView]
+    ) -> CGFloat {
+        applyPass += 1
+        let targetIDs = scene.componentNodeIDs()
+
+        for (id, view) in managedViews where !targetIDs.contains(id) {
+            view.removeFromSuperview()
+            managedViews.removeValue(forKey: id)
+        }
+
+        let result = relayoutExisting(
+            nodes: scene.nodes,
+            documentId: scene.documentId,
+            in: containerView,
+            originY: 0,
+            maxWidth: max(1, maxWidth),
+            managedViews: &managedViews
+        )
+        syncSubviewOrder(in: containerView, orderedViews: result.orderedViews)
+        return max(0, ceil(result.endY))
+    }
+
     private func layout(
         nodes: [RenderScene.Node],
         documentId: String,
@@ -138,6 +164,115 @@ public final class SceneApplier {
 
             if !node.children.isEmpty {
                 let passthrough = layout(
+                    nodes: node.children,
+                    documentId: documentId,
+                    in: parent,
+                    originY: y,
+                    maxWidth: resolvedMaxWidth,
+                    managedViews: &managedViews
+                )
+                y = sanitize(passthrough.endY, fallback: y, minimum: 0)
+                orderedViews.append(contentsOf: passthrough.orderedViews)
+            }
+        }
+
+        return LayoutResult(endY: y, orderedViews: orderedViews)
+    }
+
+    private func relayoutExisting(
+        nodes: [RenderScene.Node],
+        documentId: String,
+        in parent: UIView,
+        originY: CGFloat,
+        maxWidth: CGFloat,
+        managedViews: inout [String: UIView]
+    ) -> LayoutResult {
+        let resolvedMaxWidth = sanitize(maxWidth, fallback: 1, minimum: 1)
+        var y = sanitize(originY, fallback: 0, minimum: 0)
+        var orderedViews: [UIView] = []
+
+        for node in nodes {
+            guard let component = node.component else {
+                let passthrough = relayoutExisting(
+                    nodes: node.children,
+                    documentId: documentId,
+                    in: parent,
+                    originY: y,
+                    maxWidth: resolvedMaxWidth,
+                    managedViews: &managedViews
+                )
+                y = sanitize(passthrough.endY, fallback: y, minimum: 0)
+                orderedViews.append(contentsOf: passthrough.orderedViews)
+                continue
+            }
+
+            let view: UIView
+            if let existing = managedViews[node.id] {
+                if existing.superview !== parent {
+                    existing.removeFromSuperview()
+                    parent.addSubview(existing)
+                }
+                view = existing
+            } else {
+                let created = resolveView(for: node, component: component, parent: parent, managedViews: &managedViews)
+                component.configure(view: created, maxWidth: resolvedMaxWidth)
+                view = created
+            }
+
+            let baseHeight = measuredHeight(for: view, width: resolvedMaxWidth)
+            let spacingAfter = sanitize(node.spacingAfter, fallback: 0, minimum: 0)
+
+            if let nestedContainer = view as? SceneContainerView {
+                let insets = sanitize(nestedContainer.sceneContentInsets)
+                let childMaxWidth = sanitize(resolvedMaxWidth - insets.left - insets.right, fallback: 1, minimum: 1)
+                let childLayout = relayoutExisting(
+                    nodes: node.children,
+                    documentId: documentId,
+                    in: nestedContainer.sceneContentContainerView,
+                    originY: 0,
+                    maxWidth: childMaxWidth,
+                    managedViews: &managedViews
+                )
+                syncSubviewOrder(in: nestedContainer.sceneContentContainerView, orderedViews: childLayout.orderedViews)
+
+                let childEndY = sanitize(childLayout.endY, fallback: 0, minimum: 0)
+                let ownHeight = sanitize(max(baseHeight, insets.top + childEndY + insets.bottom), fallback: baseHeight, minimum: 1)
+                applyFrame(
+                    to: view,
+                    node: node,
+                    frame: CGRect(x: 0, y: y, width: resolvedMaxWidth, height: ownHeight),
+                    documentId: documentId,
+                    role: "node"
+                )
+                applyChildContainerFrame(
+                    to: nestedContainer.sceneContentContainerView,
+                    node: node,
+                    frame: CGRect(
+                        x: insets.left,
+                        y: insets.top,
+                        width: childMaxWidth,
+                        height: childEndY
+                    ),
+                    documentId: documentId
+                )
+
+                orderedViews.append(view)
+                y = sanitize(y + ownHeight + spacingAfter, fallback: y + ownHeight, minimum: 0)
+                continue
+            }
+
+            applyFrame(
+                to: view,
+                node: node,
+                frame: CGRect(x: 0, y: y, width: resolvedMaxWidth, height: baseHeight),
+                documentId: documentId,
+                role: "node"
+            )
+            orderedViews.append(view)
+            y = sanitize(y + baseHeight + spacingAfter, fallback: y + baseHeight, minimum: 0)
+
+            if !node.children.isEmpty {
+                let passthrough = relayoutExisting(
                     nodes: node.children,
                     documentId: documentId,
                     in: parent,

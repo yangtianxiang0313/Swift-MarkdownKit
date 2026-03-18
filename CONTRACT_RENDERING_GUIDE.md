@@ -142,9 +142,17 @@ If extension renderer is missing, rendering fails with `unknown_node_kind`.
 UIKit override example:
 
 ```swift
-let adapter = MarkdownContract.RenderModelUIKitAdapter()
-adapter.registerBlockRenderer(forExtension: "ext.demo.callout") { block, _, adapter in
-    [adapter.makeTextNode(id: block.id, kind: "callout", text: NSAttributedString(string: "CALLOUT"))]
+let adapter = MarkdownContract.RenderModelUIKitAdapter(
+    mergePolicy: MarkdownContract.FirstBlockAnchoredMergePolicy(),
+    blockMapperChain: MarkdownContract.RenderModelUIKitAdapter.makeDefaultBlockMapperChain()
+)
+adapter.registerBlockMapper(forExtension: "ext.demo.callout") { block, _, adapter in
+    let segment = adapter.makeMergeTextSegment(
+        sourceBlockID: block.id,
+        kind: "callout",
+        attributedText: NSAttributedString(string: "CALLOUT")
+    )
+    return [.mergeSegment(segment)]
 }
 
 adapter.registerInlineRenderer(forExtension: "ext.demo.mention") { span, _, _, _ in
@@ -155,16 +163,19 @@ adapter.registerInlineRenderer(forExtension: "ext.demo.mention") { span, _, _, _
 For complex custom UI:
 
 ```swift
-adapter.makeCustomViewNode(
-    id: block.id,
-    kind: "custom",
-    reuseIdentifier: "custom.card",
-    signature: "v1",
-    revealUnitCount: 1,
-    makeView: { CustomView() },
-    configure: { view, maxWidth in ... },
-    reveal: { view, units in ... }
-)
+adapter.registerBlockMapper(forExtension: "ext.demo.card") { block, _, adapter in
+    let node = adapter.makeCustomStandaloneNode(
+        id: block.id,
+        kind: "custom.card",
+        reuseIdentifier: "custom.card",
+        signature: "v1",
+        revealUnitCount: 1,
+        makeView: { CustomView() },
+        configure: { view, maxWidth in ... },
+        reveal: { view, state in ... }
+    )
+    return [.standalone(node)]
+}
 ```
 
 ## 5. Streaming

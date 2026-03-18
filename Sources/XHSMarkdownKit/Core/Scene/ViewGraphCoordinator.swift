@@ -19,6 +19,11 @@ public final class ViewGraphCoordinator {
         sceneApplier.apply(scene: scene, maxWidth: maxWidth, managedViews: &managedViews)
     }
 
+    @discardableResult
+    public func relayout(scene: RenderScene, maxWidth: CGFloat) -> CGFloat {
+        sceneApplier.relayout(scene: scene, maxWidth: maxWidth, managedViews: &managedViews)
+    }
+
     public func view(for entityID: String) -> UIView? {
         managedViews[entityID]
     }

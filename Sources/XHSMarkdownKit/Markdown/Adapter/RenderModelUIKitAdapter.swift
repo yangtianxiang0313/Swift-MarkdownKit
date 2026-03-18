@@ -531,6 +531,17 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
     }
 
     func mapParagraphBlock(_ block: MarkdownContract.RenderBlock, context: Context) throws -> [MarkdownContract.BlockMappingResult] {
+        if let provisionalTable = makeProvisionalTableSceneComponent(from: block, context: context) {
+            let node = makeStandaloneNode(
+                id: block.id,
+                kind: "table.provisional",
+                component: provisionalTable,
+                spacingAfter: blockSpacing(for: .table, theme: context.theme, layoutHints: block.layoutHints),
+                metadata: block.metadata
+            )
+            return [.standalone(node)]
+        }
+
         let attributed = renderInlines(
             block.inlines,
             in: block,
@@ -1215,6 +1226,128 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
             borderColor: context.theme.table.borderColor,
             cornerRadius: context.theme.table.cornerRadius,
             cellPadding: context.theme.table.cellPadding
+        )
+    }
+
+    func makeProvisionalTableSceneComponent(
+        from block: MarkdownContract.RenderBlock,
+        context: Context
+    ) -> TableSceneComponent? {
+        let raw = block.inlines.map(\.text).joined()
+        let lines = raw
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
+        guard lines.count >= 2 else { return nil }
+        guard lines.allSatisfy({ looksLikeTableLine($0) }) else { return nil }
+
+        let headerCells = parseTableCells(from: lines[0])
+        guard !headerCells.isEmpty else { return nil }
+
+        let alignments: [TableSceneComponent.ColumnAlignment]
+        let rowLines: [String]
+        if let parsedAlignments = parseTableAlignments(fromDelimiterLine: lines[1]) {
+            alignments = normalizedTableAlignments(
+                values: parsedAlignments,
+                columnCount: headerCells.count
+            )
+            rowLines = Array(lines.dropFirst(2))
+        } else {
+            alignments = Array(repeating: .left, count: headerCells.count)
+            rowLines = Array(lines.dropFirst())
+        }
+
+        let headers = headerCells.map { provisionalTableCellText($0, isHeader: true, context: context) }
+        let rows = rowLines.map { line in
+            let cells = parseTableCells(from: line).map { text in
+                provisionalTableCellText(text, isHeader: false, context: context)
+            }
+            return normalizedRow(cells, targetColumnCount: headers.count)
+        }
+
+        return TableSceneComponent(
+            headers: headers,
+            rows: rows,
+            alignments: alignments,
+            headerBackgroundColor: context.theme.table.headerBackgroundColor,
+            borderColor: context.theme.table.borderColor,
+            cornerRadius: context.theme.table.cornerRadius,
+            cellPadding: context.theme.table.cellPadding
+        )
+    }
+
+    func looksLikeTableLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.contains("|") else { return false }
+        let pipeCount = trimmed.reduce(into: 0) { count, character in
+            if character == "|" { count += 1 }
+        }
+        return pipeCount >= 2
+    }
+
+    func parseTableCells(from line: String) -> [String] {
+        var trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("|") {
+            trimmed.removeFirst()
+        }
+        if trimmed.hasSuffix("|") {
+            trimmed.removeLast()
+        }
+        return trimmed
+            .split(separator: "|", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    func parseTableAlignments(fromDelimiterLine line: String) -> [String?]? {
+        let cells = parseTableCells(from: line)
+        guard !cells.isEmpty else { return nil }
+
+        var alignments: [String?] = []
+        alignments.reserveCapacity(cells.count)
+        for cell in cells {
+            let token = cell.replacingOccurrences(of: " ", with: "")
+            guard isDelimiterToken(token) else { return nil }
+
+            let left = token.hasPrefix(":")
+            let right = token.hasSuffix(":")
+            if left && right {
+                alignments.append("center")
+            } else if right {
+                alignments.append("right")
+            } else {
+                alignments.append("left")
+            }
+        }
+        return alignments
+    }
+
+    func isDelimiterToken(_ token: String) -> Bool {
+        guard !token.isEmpty else { return false }
+        let stripped = token.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
+        guard stripped.count >= 3 else { return false }
+        return stripped.allSatisfy { $0 == "-" }
+    }
+
+    func provisionalTableCellText(
+        _ text: String,
+        isHeader: Bool,
+        context: Context
+    ) -> NSAttributedString {
+        let font = isHeader ? context.theme.table.headerFont : context.theme.table.font
+        let color = context.theme.table.textColor
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.minimumLineHeight = context.theme.body.lineHeight
+        paragraph.maximumLineHeight = context.theme.body.lineHeight
+        paragraph.lineBreakMode = .byWordWrapping
+        return NSAttributedString(
+            string: text,
+            attributes: [
+                .font: font,
+                .foregroundColor: color,
+                .xhsBaseForegroundColor: color,
+                .paragraphStyle: paragraph
+            ]
         )
     }
 

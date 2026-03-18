@@ -1,1280 +1,994 @@
 import UIKit
 import XHSMarkdownKit
+import SnapKit
+
+// MARK: - View Controller
 
 @MainActor
 final class StreamingDemoViewController: UIViewController {
+    private let autoScrollCoordinator = StreamingDemoAutoScrollCoordinator()
+    private var pendingScrollHint: StreamingDemoScrollHint?
+    private var isScrollHintFlushScheduled = false
 
-    private enum Role {
-        case user
-        case assistant
-    }
-
-    private enum ReplyContentPreset: Int, CaseIterable {
-        case taskPlan
-        case reviewChecklist
-        case incidentResponse
-        case fullCoverage
-
-        var title: String {
-            switch self {
-            case .taskPlan:
-                return "任务拆解"
-            case .reviewChecklist:
-                return "评审清单"
-            case .incidentResponse:
-                return "故障响应"
-            case .fullCoverage:
-                return "全量覆盖"
-            }
-        }
-
-        var prompt: String {
-            switch self {
-            case .taskPlan:
-                return "那请把每一项展开成可执行步骤，并标注优先级。"
-            case .reviewChecklist:
-                return "给我一个本次改造的 Code Review 清单，按风险从高到低排列。"
-            case .incidentResponse:
-                return "如果上线后动画出现异常，请给我一份应急处理 Runbook。"
-            case .fullCoverage:
-                return "给我一份完整输出，覆盖自定义节点、特殊格式、表格、代码块和链接交互。"
-            }
-        }
-
-        var markdown: String {
-            switch self {
-            case .taskPlan:
-                return """
-                好的，下面按**可执行步骤 + 优先级**展开：
-
-                ### 1) 开发任务（P0）
-                - [ ] 完成 `SceneDelta` 拆分：结构变化 / 内容变化
-                - [ ] 接入 `RenderCommitCoordinator`，统一 instant 与 animated 提交
-                - [ ] 校验 `latestWins` 与 `fullyOrdered` 两种并发策略
-
-                ### 2) 评审任务（P1）
-                - [ ] PR-A：重点看动画状态机是否有中间态泄漏
-                - [ ] PR-B：重点看高度同步是否和进度同帧
-                - [ ] 输出 review note：风险、建议、回归点
-
-                ### 3) 沟通任务（P1）
-                - [ ] 午前同步：说明当前改造范围和影响面
-                - [ ] 午后同步：反馈测试结果与剩余风险
-                - [ ] 收尾同步：确认上线策略与回滚点
-
-                > 建议节奏：先 P0，再并行推进两个 P1。
-                """
-
-            case .reviewChecklist:
-                return """
-                可以，下面是按风险排序的 review 清单：
-
-                ### P0 - 立即确认
-                - [ ] 并发策略切换后，是否存在动画中间态残留
-                - [ ] 流式 `appendChunk` 失败时，是否仍能在 `finish` 后收敛为完整内容
-                - [ ] `skipAnimation` 是否会留下高度不同步
-
-                ### P1 - 重点确认
-                - [ ] 高度变化和动画进度是否同帧提交
-                - [ ] 大文档下 `latestWins` 是否造成视觉跳变
-                - [ ] 气泡复用时 container 约束是否稳定
-
-                ### P2 - 稳定性确认
-                - [ ] 长列表滚动场景是否有抖动
-                - [ ] 切后台再回来，流式状态是否恢复正确
-                - [ ] 多次快速点击生成，状态机是否仍然收敛
-                """
-
-            case .incidentResponse:
-                return """
-                收到，下面是动画异常的应急 Runbook：
-
-                ### 1) 快速止损（5 分钟内）
-                - [ ] 切换到 `instant` 动画模式
-                - [ ] 将并发策略强制改为 `fullyOrdered`
-                - [ ] 暂停新的流式任务入口
-
-                ### 2) 现场诊断（30 分钟内）
-                - [ ] 拉取最近一次异常日志（含 chunk 序列）
-                - [ ] 比对 `append` 与 `finish` 的状态转换
-                - [ ] 检查是否出现高度回调风暴
-
-                ### 3) 修复与回归
-                - [ ] 修复后先灰度 10%
-                - [ ] 回归 3 组场景：普通消息 / 长文档 / 快速中断
-                - [ ] 全量前确认回滚开关可用
-
-                > 原则：先恢复可用性，再追求动画完整性。
-                """
-            case .fullCoverage:
-                return """
-                已切换到全量覆盖输出，下面是统一验收样例：
-
-                @Hero(title: "Streaming Full Coverage", subtitle: "custom nodes + special formats")
-
-                @Panel(style: "warning") {
-                - mention: <mention userId="stream-user-01" />
-                - badge: <badge text="HOT" />
-                - chip: <chip text="A/B 2026Q1" />
-                - cite: <Cite id="stream-cite-001">citation-001</Cite>
-                }
-
-                <Think id="stream-think-001">
-                ### Thinking Plan
-                - step 1: parse custom tags
-                - step 2: validate tree roles
-                - step 3: project runtime state
-                </Think>
-
-                行内能力：~~strikethrough~~、`inline code`、[runtime-link](https://example.com/runtime?from=streaming)。
-
-                ```swift
-                let runtime = MarkdownRuntime()
-                runtime.attach(to: containerView)
-                try runtime.setInput(.markdown(text: markdown, documentID: "streaming.full.coverage"))
-                ```
-
-                | capability | status | note |
-                | --- | :---: | --- |
-                | customTag | ✅ | mention/cite/think |
-                | specialFormat | ✅ | strike/code/link |
-                | streaming | ✅ | chunked append |
-                """
-            }
-        }
-    }
-
-    private enum EffectMode: Int {
-        case typing
-        case streamingMask
-        case instant
-
-        var effectKey: AnimationEffectKey {
-            switch self {
-            case .typing:
-                return .typing
-            case .streamingMask:
-                return .streamingMask
-            case .instant:
-                return .instant
-            }
-        }
-    }
-
-    private struct ScrollDebugSnapshot: Equatable {
-        let reason: String
-        let followBottom: Bool
-        let streamingActive: Bool
-        let offsetY: Int
-        let contentHeight: Int
-        let boundsHeight: Int
-        let insetTop: Int
-        let insetBottom: Int
-        let minOffsetY: Int
-        let maxOffsetY: Int
-        let targetY: Int?
-        let deltaHeight: Int
-        let deltaOffsetY: Int
-        let applied: Bool?
-    }
-
-    private struct HeightState {
-        var reported: CGFloat
-    }
-
-    private final class ContainerDelegateProxy: NSObject, MarkdownContainerViewDelegate {
-        var onHeightChange: ((CGFloat) -> Void)?
-
-        func containerView(_ view: MarkdownContainerView, didChangeContentHeight height: CGFloat) {
-            onHeightChange?(height)
-        }
-    }
-
-    @MainActor
-    private final class MessageItem {
-        let id: String
-        let role: Role
-        var markdown: String
-        var isStreaming: Bool
-        var streamSessionStarted: Bool
-
-        let container: MarkdownContainerView
-        let delegateProxy: ContainerDelegateProxy
-        let runtime: MarkdownRuntime
-        var streamingSession: MarkdownContract.StreamingMarkdownSession?
-
-        init(
-            id: String = UUID().uuidString,
-            role: Role,
-            markdown: String,
-            isStreaming: Bool = false,
-            animationConcurrencyPolicy: AnimationConcurrencyPolicy,
-            animationEffectKey: AnimationEffectKey,
-            typingCharactersPerSecond: Int,
-            contentEntityAppearanceMode: ContentEntityAppearanceMode,
-            onHeightChange: ((CGFloat) -> Void)?
-        ) {
-            self.id = id
-            self.role = role
-            self.markdown = markdown
-            self.isStreaming = isStreaming
-            self.streamSessionStarted = false
-            self.runtime = ExampleMarkdownRuntime.makeRuntime()
-            self.streamingSession = nil
-
-            container = ExampleMarkdownRuntime.makeConfiguredContainer()
-            container.animationConcurrencyPolicy = animationConcurrencyPolicy
-            container.animationEffectKey = animationEffectKey
-            container.animationMode = animationEffectKey == .instant ? .instant : .dualPhase
-            container.typingCharactersPerSecond = max(1, typingCharactersPerSecond)
-            container.contentEntityAppearanceMode = contentEntityAppearanceMode
-
-            delegateProxy = ContainerDelegateProxy()
-            delegateProxy.onHeightChange = onHeightChange
-            container.delegate = delegateProxy
-            runtime.eventHandler = { event in
-                if event.action == "activate",
-                   let url = event.payload.valueString(forKey: "url"),
-                   (url.hasPrefix("xhs-think://") || url.hasPrefix("xhs-cite://")) {
-                    return .handled
-                }
-                return .continueDefault
-            }
-            runtime.attach(to: container)
-        }
-
-        func renderStatic() {
-            do {
-                try runtime.setInput(
-                    .markdown(
-                        text: markdown,
-                        documentID: id,
-                        rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
-                    )
-                )
-            } catch {
-                // Keep demo resilient; failed render falls back to plain text paragraph.
-                try? runtime.setInput(.markdown(text: markdown, documentID: id))
-            }
-            isStreaming = false
-            streamSessionStarted = false
-            streamingSession = nil
-        }
-
-        func appendChunk(_ chunk: String) {
-            markdown += chunk
-            do {
-                if !streamSessionStarted {
-                    streamSessionStarted = true
-                    guard let engine = container.contractStreamingEngine else {
-                        try runtime.setInput(
-                            .markdown(
-                                text: markdown,
-                                documentID: id,
-                                rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
-                            )
-                        )
-                        return
-                    }
-                    streamingSession = MarkdownContract.StreamingMarkdownSession(
-                        engine: engine,
-                        parseOptions: .init(documentId: id)
-                    )
-                }
-
-                if let session = streamingSession {
-                    let update = try session.appendChunk(chunk)
-                    try runtime.setRenderModel(update.model, isFinal: update.isFinal)
-                } else {
-                    try runtime.setInput(
-                        .markdown(
-                            text: markdown,
-                            documentID: id,
-                            rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
-                        )
-                    )
-                }
-            } catch {
-                // Keep streaming resilient: fall back to best-effort full-text render for this frame.
-                try? runtime.setInput(
-                    .markdown(
-                        text: markdown,
-                        documentID: id,
-                        rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
-                    )
-                )
-            }
-        }
-
-        func finishStreaming() {
-            if streamSessionStarted {
-                do {
-                    if let session = streamingSession {
-                        let update = try session.finish()
-                        try runtime.setRenderModel(update.model, isFinal: update.isFinal)
-                    } else {
-                        try runtime.setInput(
-                            .markdown(
-                                text: markdown,
-                                documentID: id,
-                                rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
-                            )
-                        )
-                    }
-                } catch {
-                    // Final fallback to the full accumulated markdown so tail-only rendering cannot persist.
-                    do {
-                        try runtime.setInput(
-                            .markdown(
-                                text: markdown,
-                                documentID: id,
-                                rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
-                            )
-                        )
-                    } catch {
-                        try? runtime.setInput(.markdown(text: markdown, documentID: id))
-                    }
-                }
-            } else {
-                renderStatic()
-            }
-            isStreaming = false
-            streamSessionStarted = false
-            streamingSession = nil
-        }
-    }
-
-    private final class BubbleMarkdownCell: UITableViewCell {
-        static let reuseID = "BubbleMarkdownCell"
-
-        private let bubbleView = UIView()
-        private var leadingConstraint: NSLayoutConstraint!
-        private var trailingConstraint: NSLayoutConstraint!
-        private var maxWidthConstraint: NSLayoutConstraint!
-
-        private weak var hostedContainer: UIView?
-        private var hostedConstraints: [NSLayoutConstraint] = []
-
-        override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
-            super.init(style: style, reuseIdentifier: reuseIdentifier)
-            selectionStyle = .none
-            backgroundColor = .clear
-            contentView.backgroundColor = .clear
-
-            bubbleView.layer.cornerRadius = 16
-            bubbleView.layer.cornerCurve = .continuous
-            bubbleView.layer.masksToBounds = true
-            bubbleView.translatesAutoresizingMaskIntoConstraints = false
-            contentView.addSubview(bubbleView)
-
-            leadingConstraint = bubbleView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12)
-            trailingConstraint = bubbleView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12)
-            maxWidthConstraint = bubbleView.widthAnchor.constraint(lessThanOrEqualTo: contentView.widthAnchor, multiplier: 0.82)
-
-            NSLayoutConstraint.activate([
-                bubbleView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
-                bubbleView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
-                maxWidthConstraint,
-                leadingConstraint
-            ])
-        }
-
-        @available(*, unavailable)
-        required init?(coder: NSCoder) { fatalError() }
-
-        func configure(with item: MessageItem) {
-            switch item.role {
-            case .assistant:
-                leadingConstraint.isActive = true
-                trailingConstraint.isActive = false
-                bubbleView.backgroundColor = UIColor.secondarySystemBackground
-                bubbleView.layer.borderWidth = 1
-                bubbleView.layer.borderColor = UIColor.systemGray4.cgColor
-
-            case .user:
-                trailingConstraint.isActive = true
-                leadingConstraint.isActive = false
-                bubbleView.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.14)
-                bubbleView.layer.borderWidth = 0
-                bubbleView.layer.borderColor = nil
-            }
-
-            host(container: item.container)
-        }
-
-        private func host(container: UIView) {
-            if hostedContainer === container {
-                return
-            }
-
-            hostedContainer?.removeFromSuperview()
-            hostedConstraints.forEach { $0.isActive = false }
-            hostedConstraints.removeAll()
-
-            if container.superview != nil {
-                container.removeFromSuperview()
-            }
-
-            container.translatesAutoresizingMaskIntoConstraints = false
-            bubbleView.addSubview(container)
-            hostedConstraints = [
-                container.topAnchor.constraint(equalTo: bubbleView.topAnchor, constant: 10),
-                container.leadingAnchor.constraint(equalTo: bubbleView.leadingAnchor, constant: 12),
-                container.trailingAnchor.constraint(equalTo: bubbleView.trailingAnchor, constant: -12),
-                container.bottomAnchor.constraint(equalTo: bubbleView.bottomAnchor, constant: -10)
-            ]
-            NSLayoutConstraint.activate(hostedConstraints)
-
-            hostedContainer = container
-        }
-    }
-
-    private lazy var tableView: UITableView = {
-        let table = UITableView(frame: .zero, style: .plain)
-        table.backgroundColor = UIColor.systemGroupedBackground
-        table.separatorStyle = .none
-        table.keyboardDismissMode = .interactive
-        table.rowHeight = UITableView.automaticDimension
-        table.estimatedRowHeight = defaultEstimatedRowHeight
-        table.dataSource = self
-        table.delegate = self
-        table.register(BubbleMarkdownCell.self, forCellReuseIdentifier: BubbleMarkdownCell.reuseID)
-        table.translatesAutoresizingMaskIntoConstraints = false
-        return table
-    }()
-
-    private lazy var followLabel: UILabel = {
-        let label = UILabel()
-        label.text = "跟随底部"
-        label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.textColor = .secondaryLabel
-        return label
-    }()
-
-    private lazy var followSwitch: UISwitch = {
-        let uiSwitch = UISwitch()
-        uiSwitch.isOn = true
-        uiSwitch.addTarget(self, action: #selector(followSwitchChanged), for: .valueChanged)
-        return uiSwitch
-    }()
-
-    private lazy var policyLabel: UILabel = {
-        let label = UILabel()
-        label.text = "并发"
-        label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.textColor = .secondaryLabel
-        return label
-    }()
-
-    private lazy var policySegmentedControl: UISegmentedControl = {
-        let control = UISegmentedControl(items: ["Queue", "Latest"])
+    private lazy var scenarioSelector: UISegmentedControl = {
+        let control = UISegmentedControl(items: viewModel.scenarios.map(\.title))
         control.selectedSegmentIndex = 0
-        control.addTarget(self, action: #selector(policyChanged), for: .valueChanged)
+        control.addTarget(self, action: #selector(scenarioChanged), for: .valueChanged)
         return control
     }()
 
-    private lazy var contentLabel: UILabel = {
-        let label = UILabel()
-        label.text = "内容模板"
-        label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.textColor = .secondaryLabel
-        return label
-    }()
-
-    private lazy var contentSegmentedControl: UISegmentedControl = {
-        let control = UISegmentedControl(items: ReplyContentPreset.allCases.map(\.title))
-        control.selectedSegmentIndex = ReplyContentPreset.taskPlan.rawValue
-        control.addTarget(self, action: #selector(contentPresetChanged), for: .valueChanged)
-        return control
-    }()
-
-    private lazy var effectLabel: UILabel = {
-        let label = UILabel()
-        label.text = "动画"
-        label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.textColor = .secondaryLabel
-        return label
-    }()
-
-    private lazy var effectSegmentedControl: UISegmentedControl = {
-        let control = UISegmentedControl(items: ["Typing", "Mask", "Instant"])
-        control.selectedSegmentIndex = EffectMode.typing.rawValue
-        control.addTarget(self, action: #selector(effectChanged), for: .valueChanged)
-        return control
-    }()
-
-    private lazy var entityLabel: UILabel = {
-        let label = UILabel()
-        label.text = "实体"
-        label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.textColor = .secondaryLabel
-        return label
-    }()
-
-    private lazy var entitySegmentedControl: UISegmentedControl = {
-        let control = UISegmentedControl(items: ["Seq", "Sim"])
-        control.selectedSegmentIndex = 0
-        control.addTarget(self, action: #selector(entityModeChanged), for: .valueChanged)
-        return control
-    }()
-
-    private lazy var speedLabel: UILabel = {
-        let label = UILabel()
-        label.font = .systemFont(ofSize: 12, weight: .medium)
-        label.textColor = .secondaryLabel
-        return label
-    }()
-
-    private lazy var speedSlider: UISlider = {
-        let slider = UISlider()
-        slider.minimumValue = 5
-        slider.maximumValue = 120
-        slider.value = 32
-        slider.addTarget(self, action: #selector(speedChanged), for: .valueChanged)
-        return slider
-    }()
-
-    private lazy var streamChunkLabel: UILabel = {
-        let label = UILabel()
-        label.font = .systemFont(ofSize: 12, weight: .medium)
-        label.textColor = .secondaryLabel
-        return label
-    }()
-
-    private lazy var streamChunkSlider: UISlider = {
-        let slider = UISlider()
-        slider.minimumValue = 1
-        slider.maximumValue = 12
-        slider.value = 4
-        slider.addTarget(self, action: #selector(streamChunkChanged), for: .valueChanged)
-        return slider
-    }()
-
-    private lazy var streamIntervalLabel: UILabel = {
-        let label = UILabel()
-        label.font = .systemFont(ofSize: 12, weight: .medium)
-        label.textColor = .secondaryLabel
-        return label
-    }()
-
-    private lazy var streamIntervalSlider: UISlider = {
-        let slider = UISlider()
-        slider.minimumValue = 20
-        slider.maximumValue = 220
-        slider.value = 60
-        slider.addTarget(self, action: #selector(streamIntervalChanged), for: .valueChanged)
-        return slider
-    }()
-
-    private lazy var generateButton: UIButton = {
+    private lazy var startButton: UIButton = {
         let button = UIButton(type: .system)
-        button.setTitle("生成回复", for: .normal)
+        button.setTitle("开始", for: .normal)
         button.setTitleColor(.white, for: .normal)
         button.backgroundColor = .systemBlue
         button.layer.cornerRadius = 10
-        button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
-        button.addTarget(self, action: #selector(startStreamingReply), for: .touchUpInside)
+        button.addTarget(self, action: #selector(startTapped), for: .touchUpInside)
+        return button
+    }()
+
+    private lazy var stopButton: UIButton = {
+        let button = UIButton(type: .system)
+        button.setTitle("停止", for: .normal)
+        button.setTitleColor(.systemRed, for: .normal)
+        button.backgroundColor = UIColor.systemRed.withAlphaComponent(0.12)
+        button.layer.cornerRadius = 10
+        button.addTarget(self, action: #selector(stopTapped), for: .touchUpInside)
+        return button
+    }()
+
+    private lazy var replayButton: UIButton = {
+        let button = UIButton(type: .system)
+        button.setTitle("重播", for: .normal)
+        button.setTitleColor(.systemIndigo, for: .normal)
+        button.backgroundColor = UIColor.systemIndigo.withAlphaComponent(0.12)
+        button.layer.cornerRadius = 10
+        button.addTarget(self, action: #selector(replayTapped), for: .touchUpInside)
         return button
     }()
 
     private lazy var resetButton: UIButton = {
         let button = UIButton(type: .system)
         button.setTitle("重置", for: .normal)
-        button.setTitleColor(.systemBlue, for: .normal)
+        button.setTitleColor(.secondaryLabel, for: .normal)
+        button.backgroundColor = UIColor.secondarySystemBackground
         button.layer.cornerRadius = 10
-        button.layer.borderWidth = 1
-        button.layer.borderColor = UIColor.systemBlue.cgColor
-        button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
-        button.addTarget(self, action: #selector(resetConversation), for: .touchUpInside)
+        button.addTarget(self, action: #selector(resetTapped), for: .touchUpInside)
         return button
     }()
 
-    private lazy var skipButton: UIButton = {
-        let button = UIButton(type: .system)
-        button.setTitle("跳过动画", for: .normal)
-        button.setTitleColor(.systemBlue, for: .normal)
-        button.layer.cornerRadius = 10
-        button.layer.borderWidth = 1
-        button.layer.borderColor = UIColor.systemBlue.cgColor
-        button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
-        button.addTarget(self, action: #selector(skipAnimation), for: .touchUpInside)
-        return button
+    private lazy var statusLabel: UILabel = {
+        let label = UILabel()
+        label.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
+        label.textColor = .secondaryLabel
+        label.numberOfLines = 2
+        label.text = "准备就绪"
+        return label
     }()
 
-    private lazy var settingsRow: UIStackView = {
-        let row = UIStackView(arrangedSubviews: [followLabel, followSwitch, UIView(), policyLabel, policySegmentedControl])
-        row.axis = .horizontal
-        row.alignment = .center
-        row.spacing = 10
-        return row
+    private lazy var tableView: UITableView = {
+        let tableView = UITableView(frame: .zero, style: .plain)
+        tableView.separatorStyle = .none
+        tableView.backgroundColor = .systemBackground
+        tableView.keyboardDismissMode = .interactive
+        tableView.estimatedRowHeight = 120
+        tableView.rowHeight = UITableView.automaticDimension
+        tableView.contentInset = UIEdgeInsets(top: 12, left: 0, bottom: 20, right: 0)
+        tableView.dataSource = self
+        tableView.delegate = self
+        tableView.register(StreamingDemoMessageCell.self, forCellReuseIdentifier: StreamingDemoMessageCell.reuseIdentifier)
+        return tableView
     }()
 
-    private lazy var contentRow: UIStackView = {
-        let row = UIStackView(arrangedSubviews: [contentLabel, contentSegmentedControl])
-        row.axis = .vertical
-        row.alignment = .fill
-        row.spacing = 6
-        return row
+    private lazy var viewModel: StreamingDemoViewModel = {
+        let pipeline = StreamingDemoMarkdownPipeline(streamingEngine: ExampleMarkdownRuntime.makeStreamingEngine())
+        let vm = StreamingDemoViewModel(
+            scenarios: StreamingDemoMockData.scenarios,
+            streamService: StreamingDemoStreamService(),
+            markdownPipeline: pipeline
+        )
+        vm.output = self
+        return vm
     }()
-
-    private lazy var effectRow: UIStackView = {
-        let row = UIStackView(arrangedSubviews: [effectLabel, effectSegmentedControl, UIView(), entityLabel, entitySegmentedControl])
-        row.axis = .horizontal
-        row.alignment = .center
-        row.spacing = 8
-        return row
-    }()
-
-    private lazy var speedRow: UIStackView = {
-        let row = UIStackView(arrangedSubviews: [speedLabel, speedSlider])
-        row.axis = .vertical
-        row.alignment = .fill
-        row.spacing = 6
-        return row
-    }()
-
-    private lazy var streamChunkRow: UIStackView = {
-        let row = UIStackView(arrangedSubviews: [streamChunkLabel, streamChunkSlider])
-        row.axis = .vertical
-        row.alignment = .fill
-        row.spacing = 6
-        return row
-    }()
-
-    private lazy var streamIntervalRow: UIStackView = {
-        let row = UIStackView(arrangedSubviews: [streamIntervalLabel, streamIntervalSlider])
-        row.axis = .vertical
-        row.alignment = .fill
-        row.spacing = 6
-        return row
-    }()
-
-    private lazy var actionsRow: UIStackView = {
-        let row = UIStackView(arrangedSubviews: [UIView(), skipButton, resetButton, generateButton])
-        row.axis = .horizontal
-        row.alignment = .center
-        row.spacing = 10
-        return row
-    }()
-
-    private lazy var controlsScrollView: UIScrollView = {
-        let scrollView = UIScrollView()
-        scrollView.showsVerticalScrollIndicator = false
-        scrollView.alwaysBounceVertical = true
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.addSubview(bottomBar)
-
-        NSLayoutConstraint.activate([
-            bottomBar.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
-            bottomBar.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
-            bottomBar.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
-            bottomBar.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
-            bottomBar.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor)
-        ])
-        return scrollView
-    }()
-
-    private lazy var bottomBar: UIStackView = {
-        let controls = UIStackView(arrangedSubviews: [
-            settingsRow,
-            contentRow,
-            effectRow,
-            speedRow,
-            streamChunkRow,
-            streamIntervalRow,
-            actionsRow
-        ])
-        controls.axis = .vertical
-        controls.alignment = .fill
-        controls.spacing = 8
-        controls.translatesAutoresizingMaskIntoConstraints = false
-        return controls
-    }()
-
-    private var messages: [MessageItem] = []
-    private var streamingTimer: Timer?
-    private var streamTokens: [String] = []
-    private var streamTokenCursor = 0
-    private var activeStreamingMessageID: String?
-    private var shouldFollowBottom = true
-    private var isRelayoutScheduled = false
-    private var isRelayoutRunning = false
-    private var needsAnotherRelayoutPass = false
-    private var currentConcurrencyPolicy: AnimationConcurrencyPolicy = .fullyOrdered
-    private var heightStateByMessageID: [String: HeightState] = [:]
-
-    private var currentContentPreset: ReplyContentPreset = .taskPlan
-    private var currentEffectMode: EffectMode = .typing
-    private var currentContentEntityAppearanceMode: ContentEntityAppearanceMode = .sequential
-    private var currentTypingCharactersPerSecond: Int = 32
-    private var currentStreamChunkSize: Int = 4
-    private var currentStreamInterval: TimeInterval = 0.06
-    private var lastScrollDebugSnapshot: ScrollDebugSnapshot?
-    private var lastScrollDebugTimestamp: TimeInterval = 0
-    private var lastUserScrollLoggedOffsetY: CGFloat = .nan
-    private var lastKnownTableWidth: CGFloat = 0
-
-    private let defaultEstimatedRowHeight: CGFloat = 110
-    private let rowChromeHeight: CGFloat = 28
-    private let controlsMaxHeightRatio: CGFloat = 0.45
-
-    private static let scrollDebugEnvKey = "XHS_SCROLL_DEBUG"
-    private static let scrollDebugDefaultsKey = "xhs.stream.scroll.debug"
 
     override func viewDidLoad() {
         super.viewDidLoad()
-#if DEBUG
-        if UserDefaults.standard.object(forKey: Self.scrollDebugDefaultsKey) == nil {
-            UserDefaults.standard.set(true, forKey: Self.scrollDebugDefaultsKey)
-        }
-#endif
-        title = "流式 + 动画"
-        view.backgroundColor = UIColor.systemGroupedBackground
         setupUI()
-        applyControlStateToUI()
-        seedConversation()
-    }
-
-    deinit {
-        streamingTimer?.invalidate()
-    }
-
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        let width = tableView.bounds.width
-        guard width > 0 else { return }
-        if abs(width - lastKnownTableWidth) < 1 {
-            return
-        }
-        lastKnownTableWidth = width
-        resetEffectiveHeightsForWidthChange()
+        viewModel.selectScenario(at: 0)
     }
 
     private func setupUI() {
+        title = "流式+动画"
+        view.backgroundColor = .systemBackground
+
+        let controlsStack = UIStackView(arrangedSubviews: [startButton, stopButton, replayButton, resetButton])
+        controlsStack.axis = .horizontal
+        controlsStack.distribution = .fillEqually
+        controlsStack.spacing = 8
+
+        let topStack = UIStackView(arrangedSubviews: [scenarioSelector, controlsStack, statusLabel])
+        topStack.axis = .vertical
+        topStack.spacing = 10
+
+        view.addSubview(topStack)
         view.addSubview(tableView)
-        view.addSubview(controlsScrollView)
+
+        topStack.translatesAutoresizingMaskIntoConstraints = false
+        tableView.translatesAutoresizingMaskIntoConstraints = false
 
         NSLayoutConstraint.activate([
-            controlsScrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            controlsScrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            controlsScrollView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
-            controlsScrollView.heightAnchor.constraint(lessThanOrEqualTo: view.heightAnchor, multiplier: controlsMaxHeightRatio),
+            topStack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            topStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            topStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
 
-            tableView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            tableView.topAnchor.constraint(equalTo: topStack.bottomAnchor, constant: 10),
             tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            tableView.bottomAnchor.constraint(equalTo: controlsScrollView.topAnchor, constant: -10)
+            tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
     }
 
-    private func seedConversation() {
-        messages = [
-            makeMessage(role: .user, markdown: "请给我一个今天待办清单，包含开发、评审和沟通。"),
-            makeMessage(
-                role: .assistant,
-                markdown: """
-                当然可以，先给你一个结构化清单：
-
-                - **开发**：完成动画链路重构（Diff -> Commit -> UI）
-                - **评审**：review 2 个 PR，重点看并发和回归
-                - **沟通**：同步今天风险和阻塞
-                """
-            )
-        ]
-
-        tableView.reloadData()
-        scrollToBottom(animated: false)
+    @objc
+    private func scenarioChanged() {
+        viewModel.selectScenario(at: scenarioSelector.selectedSegmentIndex)
     }
 
-    private func makeMessage(role: Role, markdown: String, isStreaming: Bool = false) -> MessageItem {
-        let messageID = UUID().uuidString
-        let item = MessageItem(
-            id: messageID,
-            role: role,
-            markdown: markdown,
-            isStreaming: isStreaming,
-            animationConcurrencyPolicy: currentConcurrencyPolicy,
-            animationEffectKey: currentEffectMode.effectKey,
-            typingCharactersPerSecond: currentTypingCharactersPerSecond,
-            contentEntityAppearanceMode: currentContentEntityAppearanceMode
-        ) { [weak self] newHeight in
-            self?.handleReportedHeightChange(messageID: messageID, newHeight: newHeight)
+    @objc
+    private func startTapped() {
+        autoScrollCoordinator.noteStreamingStart(in: tableView)
+        viewModel.startSelectedScenario()
+    }
+
+    @objc
+    private func stopTapped() {
+        viewModel.stopStreaming()
+    }
+
+    @objc
+    private func replayTapped() {
+        autoScrollCoordinator.noteStreamingStart(in: tableView)
+        viewModel.replayCurrentScenario()
+    }
+
+    @objc
+    private func resetTapped() {
+        pendingScrollHint = nil
+        autoScrollCoordinator.reset()
+        viewModel.resetConversation()
+    }
+
+    private func applyScrollHint(_ hint: StreamingDemoScrollHint) {
+        switch hint {
+        case let .followBottomIfPossible(animated):
+            guard autoScrollCoordinator.shouldAutoScrollAfterMutation(in: tableView) else { return }
+            scrollToBottom(animated: animated)
         }
-
-        heightStateByMessageID[messageID] = HeightState(reported: 0)
-        if !isStreaming {
-            item.renderStatic()
-        }
-        return item
-    }
-
-    private func applyAnimationConfiguration(to container: MarkdownContainerView) {
-        container.animationConcurrencyPolicy = currentConcurrencyPolicy
-        container.animationEffectKey = currentEffectMode.effectKey
-        container.animationMode = currentEffectMode == .instant ? .instant : .dualPhase
-        container.typingCharactersPerSecond = currentTypingCharactersPerSecond
-        container.contentEntityAppearanceMode = currentContentEntityAppearanceMode
-    }
-
-    private func applyAnimationConfigurationToAllMessages() {
-        for message in messages {
-            applyAnimationConfiguration(to: message.container)
-        }
-    }
-
-    private func applyControlStateToUI() {
-        speedLabel.text = "速度: \(currentTypingCharactersPerSecond) 字/秒"
-        streamChunkLabel.text = "分片大小: \(currentStreamChunkSize) 字/次"
-        streamIntervalLabel.text = "流式间隔: \(Int(currentStreamInterval * 1000)) ms"
-
-        let isInstant = currentEffectMode == .instant
-        entitySegmentedControl.isEnabled = !isInstant
-        speedSlider.isEnabled = !isInstant
-    }
-
-    private func findMessage(id: String) -> MessageItem? {
-        messages.first(where: { $0.id == id })
-    }
-
-    @objc private func startStreamingReply() {
-        guard streamingTimer == nil else { return }
-
-        let question = makeMessage(role: .user, markdown: currentContentPreset.prompt)
-        messages.append(question)
-
-        let streaming = makeMessage(role: .assistant, markdown: "", isStreaming: true)
-        messages.append(streaming)
-        activeStreamingMessageID = streaming.id
-
-        let startInsert = messages.count - 2
-        tableView.performBatchUpdates {
-            tableView.insertRows(at: [
-                IndexPath(row: startInsert, section: 0),
-                IndexPath(row: startInsert + 1, section: 0)
-            ], with: .none)
-        }
-
-        scrollToBottom(animated: false)
-
-        streamTokens = MarkdownStreamingChunker.tokenize(currentContentPreset.markdown)
-        streamTokenCursor = 0
-
-        applyAnimationConfiguration(to: streaming.container)
-        streaming.container.resetContractStreamingSession()
-        emitNextChunk()
-        if streamingTimer == nil, streamTokenCursor < streamTokens.count {
-            scheduleStreamingTimer()
-        }
-    }
-
-    private func scheduleStreamingTimer() {
-        streamingTimer = Timer.scheduledTimer(withTimeInterval: currentStreamInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.emitNextChunk()
-            }
-        }
-    }
-
-    private func restartStreamingTimerIfNeeded() {
-        guard activeStreamingMessageID != nil else { return }
-        streamingTimer?.invalidate()
-        scheduleStreamingTimer()
-    }
-
-    private func emitNextChunk() {
-        guard let activeStreamingMessageID,
-              let message = findMessage(id: activeStreamingMessageID) else {
-            stopStreaming()
-            return
-        }
-
-        guard streamTokenCursor < streamTokens.count else {
-            message.finishStreaming()
-            stopStreaming()
-            return
-        }
-
-        let next = MarkdownStreamingChunker.nextChunk(
-            from: streamTokens,
-            cursor: streamTokenCursor,
-            preferredCharacterCount: currentStreamChunkSize
-        )
-        let chunk = next.chunk
-        streamTokenCursor = next.nextCursor
-
-        message.appendChunk(chunk)
-        requestHeightRelayout(reason: "stream.chunk")
-
-        if streamTokenCursor >= streamTokens.count {
-            message.finishStreaming()
-            stopStreaming()
-        }
-    }
-
-    private func stopStreaming() {
-        streamingTimer?.invalidate()
-        streamingTimer = nil
-        activeStreamingMessageID = nil
-        streamTokens = []
-        streamTokenCursor = 0
-        requestHeightRelayout(reason: "stream.stop")
-    }
-
-    private func handleReportedHeightChange(messageID: String, newHeight: CGFloat) {
-        let resolvedHeight = max(0, ceil(newHeight))
-        let previous = heightStateByMessageID[messageID] ?? HeightState(reported: 0)
-        if abs(previous.reported - resolvedHeight) < 0.5 {
-            if shouldFollowBottom {
-                requestHeightRelayout(reason: "height.stable")
-            }
-            return
-        }
-
-        let next = HeightState(reported: resolvedHeight)
-        heightStateByMessageID[messageID] = next
-
-        logScrollState(
-            reason: "height.msg",
-            note: "mid=\(messageID.prefix(6)) h=\(toDebugInt(previous.reported))->\(toDebugInt(resolvedHeight))"
-        )
-
-        requestHeightRelayout(reason: "height.msg")
-    }
-
-    private func resetEffectiveHeightsForWidthChange() {
-        guard !heightStateByMessageID.isEmpty else { return }
-        // Width changes invalidate previous fixed row heights; let rows re-measure.
-        for messageID in heightStateByMessageID.keys {
-            heightStateByMessageID[messageID] = HeightState(reported: 0)
-        }
-        requestHeightRelayout(reason: "width.change")
-    }
-
-    private func requestHeightRelayout(reason: String) {
-        if !Thread.isMainThread {
-            DispatchQueue.main.async { [weak self] in
-                self?.requestHeightRelayout(reason: reason)
-            }
-            return
-        }
-
-        needsAnotherRelayoutPass = true
-        guard !isRelayoutScheduled else {
-            logScrollState(reason: "relayout.defer")
-            return
-        }
-
-        isRelayoutScheduled = true
-        DispatchQueue.main.async { [weak self] in
-            self?.drainHeightRelayoutQueue(triggerReason: reason)
-        }
-    }
-
-    private func drainHeightRelayoutQueue(triggerReason: String) {
-        guard Thread.isMainThread else {
-            DispatchQueue.main.async { [weak self] in
-                self?.drainHeightRelayoutQueue(triggerReason: triggerReason)
-            }
-            return
-        }
-
-        guard !isRelayoutRunning else {
-            needsAnotherRelayoutPass = true
-            return
-        }
-
-        isRelayoutRunning = true
-        defer {
-            isRelayoutRunning = false
-            isRelayoutScheduled = false
-            if needsAnotherRelayoutPass {
-                requestHeightRelayout(reason: "relayout.requeue")
-            }
-        }
-
-        while needsAnotherRelayoutPass {
-            needsAnotherRelayoutPass = false
-            applyHeightRelayoutPass(triggerReason: triggerReason)
-        }
-    }
-
-    private func applyHeightRelayoutPass(triggerReason: String) {
-        let previousContentHeight = tableView.contentSize.height
-        let previousOffsetY = tableView.contentOffset.y
-        let minOffsetY = minimumOffsetY()
-        var targetY: CGFloat?
-        var appliedOffset = false
-        var reason = shouldFollowBottom ? "relayout.follow" : "relayout.anchor"
-
-        UIView.performWithoutAnimation {
-            tableView.beginUpdates()
-            tableView.endUpdates()
-            tableView.layoutIfNeeded()
-
-            if shouldFollowBottom {
-                let pinResult = pinBottomWithoutAnimation()
-                targetY = pinResult.targetY
-                appliedOffset = pinResult.applied
-                return
-            }
-
-            let delta = tableView.contentSize.height - previousContentHeight
-            guard abs(delta) >= 0.5 else { return }
-
-            let maxOffsetY = maximumOffsetY(minOffsetY: minOffsetY)
-            let anchoredOffsetY = min(max(previousOffsetY + delta, minOffsetY), maxOffsetY)
-            targetY = anchoredOffsetY
-            if abs(anchoredOffsetY - tableView.contentOffset.y) >= 0.5 {
-                tableView.setContentOffset(CGPoint(x: tableView.contentOffset.x, y: anchoredOffsetY), animated: false)
-                appliedOffset = true
-            }
-        }
-
-        logScrollState(
-            reason: reason,
-            previousContentHeight: previousContentHeight,
-            previousOffsetY: previousOffsetY,
-            targetY: targetY,
-            applied: appliedOffset,
-            note: "src=\(triggerReason)"
-        )
-    }
-
-    @objc private func resetConversation() {
-        stopStreaming()
-        heightStateByMessageID.removeAll()
-        seedConversation()
-    }
-
-    @objc private func skipAnimation() {
-        if let activeStreamingMessageID,
-           let message = findMessage(id: activeStreamingMessageID) {
-            message.finishStreaming()
-            stopStreaming()
-        }
-
-        for message in messages {
-            message.container.skipAnimation()
-        }
-        requestHeightRelayout(reason: "skip.animation")
-    }
-
-    @objc private func followSwitchChanged() {
-        shouldFollowBottom = followSwitch.isOn
-        logScrollState(reason: "follow.toggle", note: "on=\(shouldFollowBottom ? 1 : 0)")
-        if shouldFollowBottom {
-            scrollToBottom(animated: true)
-        }
-    }
-
-    @objc private func policyChanged() {
-        currentConcurrencyPolicy = policySegmentedControl.selectedSegmentIndex == 0 ? .fullyOrdered : .latestWins
-        applyAnimationConfigurationToAllMessages()
-    }
-
-    @objc private func contentPresetChanged() {
-        currentContentPreset = ReplyContentPreset(rawValue: contentSegmentedControl.selectedSegmentIndex) ?? .taskPlan
-    }
-
-    @objc private func effectChanged() {
-        currentEffectMode = EffectMode(rawValue: effectSegmentedControl.selectedSegmentIndex) ?? .typing
-        applyControlStateToUI()
-        applyAnimationConfigurationToAllMessages()
-    }
-
-    @objc private func entityModeChanged() {
-        currentContentEntityAppearanceMode = entitySegmentedControl.selectedSegmentIndex == 0 ? .sequential : .simultaneous
-        applyAnimationConfigurationToAllMessages()
-    }
-
-    @objc private func speedChanged() {
-        currentTypingCharactersPerSecond = max(1, Int(speedSlider.value.rounded()))
-        applyControlStateToUI()
-        applyAnimationConfigurationToAllMessages()
-    }
-
-    @objc private func streamChunkChanged() {
-        currentStreamChunkSize = max(1, Int(streamChunkSlider.value.rounded()))
-        applyControlStateToUI()
-    }
-
-    @objc private func streamIntervalChanged() {
-        let milliseconds = max(20, Int(streamIntervalSlider.value.rounded()))
-        currentStreamInterval = TimeInterval(Double(milliseconds) / 1000.0)
-        applyControlStateToUI()
-        restartStreamingTimerIfNeeded()
     }
 
     private func scrollToBottom(animated: Bool) {
-        guard !messages.isEmpty else { return }
-        let bottom = IndexPath(row: messages.count - 1, section: 0)
-        logScrollState(
-            reason: "scroll.bottom",
-            targetY: maximumOffsetY(),
-            note: "animated=\(animated ? 1 : 0)"
-        )
-        tableView.scrollToRow(at: bottom, at: .bottom, animated: animated)
+        guard viewModel.numberOfMessages > 0 else { return }
+        let row = max(0, viewModel.numberOfMessages - 1)
+        tableView.scrollToRow(at: IndexPath(row: row, section: 0), at: .bottom, animated: animated)
     }
 
-    private func resolvedRowHeight(for messageID: String) -> CGFloat? {
-        guard let state = heightStateByMessageID[messageID], state.reported > 0 else {
-            return nil
-        }
-        return ceil(state.reported + rowChromeHeight)
+    private func enqueueScrollHint(_ hint: StreamingDemoScrollHint) {
+        pendingScrollHint = hint
+        flushScrollHintOnNextRunLoop()
     }
 
-    private func minimumOffsetY() -> CGFloat {
-        -tableView.adjustedContentInset.top
-    }
+    private func flushScrollHintOnNextRunLoop() {
+        guard !isScrollHintFlushScheduled else { return }
+        isScrollHintFlushScheduled = true
 
-    private func maximumOffsetY(minOffsetY: CGFloat? = nil) -> CGFloat {
-        let resolvedMin = minOffsetY ?? minimumOffsetY()
-        return max(
-            resolvedMin,
-            tableView.contentSize.height - tableView.bounds.height + tableView.adjustedContentInset.bottom
-        )
-    }
-
-    private func pinBottomWithoutAnimation() -> (targetY: CGFloat, applied: Bool) {
-        let targetY = maximumOffsetY()
-        if abs(targetY - tableView.contentOffset.y) >= 0.5 {
-            tableView.setContentOffset(CGPoint(x: tableView.contentOffset.x, y: targetY), animated: false)
-            return (targetY, true)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.isScrollHintFlushScheduled = false
+            self.tableView.layoutIfNeeded()
+            guard let hint = self.pendingScrollHint else { return }
+            self.pendingScrollHint = nil
+            self.applyScrollHint(hint)
         }
-        return (targetY, false)
-    }
-
-    private var isScrollDebugEnabled: Bool {
-#if DEBUG
-        if let envValue = ProcessInfo.processInfo.environment[Self.scrollDebugEnvKey], envValue == "1" {
-            return true
-        }
-        return UserDefaults.standard.bool(forKey: Self.scrollDebugDefaultsKey)
-#else
-        return false
-#endif
-    }
-
-    private func toDebugInt(_ value: CGFloat) -> Int {
-        Int(value.rounded())
-    }
-
-    private func logScrollState(
-        reason: String,
-        previousContentHeight: CGFloat? = nil,
-        previousOffsetY: CGFloat? = nil,
-        targetY: CGFloat? = nil,
-        applied: Bool? = nil,
-        note: String? = nil
-    ) {
-        guard isScrollDebugEnabled else { return }
-
-        let insets = tableView.adjustedContentInset
-        let minOffset = minimumOffsetY()
-        let maxOffset = maximumOffsetY(minOffsetY: minOffset)
-        let offsetY = tableView.contentOffset.y
-        let contentHeight = tableView.contentSize.height
-
-        let snapshot = ScrollDebugSnapshot(
-            reason: reason,
-            followBottom: shouldFollowBottom,
-            streamingActive: activeStreamingMessageID != nil,
-            offsetY: toDebugInt(offsetY),
-            contentHeight: toDebugInt(contentHeight),
-            boundsHeight: toDebugInt(tableView.bounds.height),
-            insetTop: toDebugInt(insets.top),
-            insetBottom: toDebugInt(insets.bottom),
-            minOffsetY: toDebugInt(minOffset),
-            maxOffsetY: toDebugInt(maxOffset),
-            targetY: targetY.map(toDebugInt),
-            deltaHeight: previousContentHeight.map { toDebugInt(contentHeight - $0) } ?? 0,
-            deltaOffsetY: previousOffsetY.map { toDebugInt(offsetY - $0) } ?? 0,
-            applied: applied
-        )
-
-        let now = Date.timeIntervalSinceReferenceDate
-        if snapshot == lastScrollDebugSnapshot {
-            return
-        }
-        if reason.hasPrefix("scroll."), now - lastScrollDebugTimestamp < 0.08 {
-            return
-        }
-
-        lastScrollDebugSnapshot = snapshot
-        lastScrollDebugTimestamp = now
-
-        var message = "[XHSScroll] r=\(snapshot.reason)"
-        message += " follow=\(snapshot.followBottom ? 1 : 0)"
-        message += " stream=\(snapshot.streamingActive ? 1 : 0)"
-        message += " off=\(snapshot.offsetY)"
-        message += " h=\(snapshot.contentHeight)"
-        message += " b=\(snapshot.boundsHeight)"
-        message += " inset=\(snapshot.insetTop),\(snapshot.insetBottom)"
-        message += " range=\(snapshot.minOffsetY)...\(snapshot.maxOffsetY)"
-        if snapshot.deltaHeight != 0 {
-            message += " dH=\(snapshot.deltaHeight)"
-        }
-        if snapshot.deltaOffsetY != 0 {
-            message += " dY=\(snapshot.deltaOffsetY)"
-        }
-        if let targetY = snapshot.targetY {
-            message += " target=\(targetY)"
-        }
-        if let applied = snapshot.applied {
-            message += " set=\(applied ? 1 : 0)"
-        }
-        if let note, !note.isEmpty {
-            message += " \(note)"
-        }
-        print(message)
     }
 }
 
-private extension StreamingDemoViewController {
-}
-
-private extension Dictionary where Key == String, Value == MarkdownContract.Value {
-    func valueString(forKey key: String) -> String? {
-        guard case let .string(value)? = self[key] else {
-            return nil
-        }
-        return value
-    }
-}
-
-extension StreamingDemoViewController: UITableViewDataSource, UITableViewDelegate {
+extension StreamingDemoViewController: UITableViewDataSource {
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        messages.count
-    }
-
-    func tableView(_ tableView: UITableView, estimatedHeightForRowAt indexPath: IndexPath) -> CGFloat {
-        let message = messages[indexPath.row]
-        return resolvedRowHeight(for: message.id) ?? defaultEstimatedRowHeight
-    }
-
-    func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
-        let message = messages[indexPath.row]
-        return resolvedRowHeight(for: message.id) ?? UITableView.automaticDimension
+        viewModel.numberOfMessages
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        guard let cell = tableView.dequeueReusableCell(withIdentifier: BubbleMarkdownCell.reuseID, for: indexPath) as? BubbleMarkdownCell else {
+        guard let cell = tableView.dequeueReusableCell(
+            withIdentifier: StreamingDemoMessageCell.reuseIdentifier,
+            for: indexPath
+        ) as? StreamingDemoMessageCell,
+        let message = viewModel.message(at: indexPath.row) else {
             return UITableViewCell()
         }
-        cell.configure(with: messages[indexPath.row])
+
+        cell.configure(message: message, delegate: self)
         return cell
     }
+}
 
+extension StreamingDemoViewController: UITableViewDelegate {
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        guard scrollView === tableView else { return }
-        let isUserDriven = scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating
-        guard isUserDriven else { return }
+        autoScrollCoordinator.handleDidScroll(scrollView)
+    }
+}
 
-        let offsetY = scrollView.contentOffset.y
-        if lastUserScrollLoggedOffsetY.isFinite, abs(offsetY - lastUserScrollLoggedOffsetY) < 8 {
+extension StreamingDemoViewController: StreamingDemoMessageCellDelegate {
+    func streamingDemoMessageCell(
+        _ cell: StreamingDemoMessageCell,
+        didChangeContentHeight height: CGFloat,
+        for messageID: UUID
+    ) {
+        viewModel.updateMeasuredHeight(height, for: messageID)
+    }
+}
+
+extension StreamingDemoViewController: StreamingDemoViewModelOutput {
+    func viewModelDidResetMessages(_ viewModel: StreamingDemoViewModel) {
+        tableView.reloadData()
+    }
+
+    func viewModel(_ viewModel: StreamingDemoViewModel, didInsert indexPaths: [IndexPath]) {
+        autoScrollCoordinator.prepareForContentMutation(in: tableView)
+        tableView.insertRows(at: indexPaths, with: .fade)
+    }
+
+    func viewModel(_ viewModel: StreamingDemoViewModel, didReload indexPaths: [IndexPath]) {
+        guard !indexPaths.isEmpty else { return }
+        let validIndexPaths = indexPaths.filter { $0.row < tableView.numberOfRows(inSection: $0.section) }
+        guard !validIndexPaths.isEmpty else { return }
+
+        var fallbackReloadPaths: [IndexPath] = []
+        for indexPath in validIndexPaths {
+            guard let message = viewModel.message(at: indexPath.row) else { continue }
+            if let visibleCell = tableView.cellForRow(at: indexPath) as? StreamingDemoMessageCell {
+                visibleCell.configure(message: message, delegate: self)
+            } else {
+                fallbackReloadPaths.append(indexPath)
+            }
+        }
+
+        guard !fallbackReloadPaths.isEmpty else { return }
+        autoScrollCoordinator.prepareForContentMutation(in: tableView)
+        tableView.reloadRows(at: fallbackReloadPaths, with: .none)
+    }
+
+    func viewModel(_ viewModel: StreamingDemoViewModel, didRequestHeightRecomputeAt _: IndexPath) {
+        autoScrollCoordinator.prepareForContentMutation(in: tableView)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            UIView.performWithoutAnimation {
+                self.tableView.beginUpdates()
+                self.tableView.endUpdates()
+            }
+        }
+    }
+
+    func viewModel(_ viewModel: StreamingDemoViewModel, didEmitScrollHint hint: StreamingDemoScrollHint) {
+        enqueueScrollHint(hint)
+    }
+
+    func viewModel(_ viewModel: StreamingDemoViewModel, didUpdateStatus text: String) {
+        statusLabel.text = text
+    }
+}
+
+// MARK: - Types
+
+enum StreamingDemoMessageRole {
+    case user
+    case assistant
+}
+
+enum StreamingDemoMessageRenderState {
+    case text(String)
+    case markdownSnapshot(documentID: String, markdown: String)
+    case markdownStreaming(documentID: String, latestUpdate: MarkdownContract.StreamingRenderUpdate?)
+}
+
+struct StreamingDemoStreamContext {
+    let ref: MarkdownStreamRef
+    let documentID: String
+    var isFinal: Bool
+}
+
+struct StreamingDemoMessage {
+    let id: UUID
+    let role: StreamingDemoMessageRole
+    var renderState: StreamingDemoMessageRenderState
+    var heightCache: CGFloat
+    var streamContext: StreamingDemoStreamContext?
+}
+
+struct StreamingDemoScenario {
+    let id: String
+    let title: String
+    let userPrompt: String
+    let assistantMarkdown: String
+    let chunkProfile: MarkdownNetworkStreamSimulator.ChunkProfile
+    let networkProfile: MarkdownNetworkStreamSimulator.NetworkProfile
+}
+
+enum StreamingDemoStreamEvent {
+    case started(ttfbMs: Int)
+    case stalled(durationMs: Int)
+    case chunk(index: Int, text: String)
+    case completed(totalChunks: Int, totalBytes: Int)
+    case failed(Error)
+    case cancelled
+}
+
+enum StreamingDemoScrollHint {
+    case followBottomIfPossible(animated: Bool)
+}
+
+// MARK: - ViewModel
+
+@MainActor
+protocol StreamingDemoViewModelOutput: AnyObject {
+    func viewModelDidResetMessages(_ viewModel: StreamingDemoViewModel)
+    func viewModel(_ viewModel: StreamingDemoViewModel, didInsert indexPaths: [IndexPath])
+    func viewModel(_ viewModel: StreamingDemoViewModel, didReload indexPaths: [IndexPath])
+    func viewModel(_ viewModel: StreamingDemoViewModel, didRequestHeightRecomputeAt indexPath: IndexPath)
+    func viewModel(_ viewModel: StreamingDemoViewModel, didEmitScrollHint hint: StreamingDemoScrollHint)
+    func viewModel(_ viewModel: StreamingDemoViewModel, didUpdateStatus text: String)
+}
+
+@MainActor
+final class StreamingDemoViewModel {
+    weak var output: StreamingDemoViewModelOutput?
+
+    let scenarios: [StreamingDemoScenario]
+
+    var numberOfMessages: Int {
+        messages.count
+    }
+
+    private let streamService: StreamingDemoStreamService
+    private let markdownPipeline: StreamingDemoMarkdownPipeline
+
+    private var messages: [StreamingDemoMessage] = []
+    private var selectedScenarioIndex: Int = 0
+    private var activeAssistantMessageID: UUID?
+    private var activeRunToken = UUID()
+    private var lastScenarioIndex: Int?
+
+    init(
+        scenarios: [StreamingDemoScenario],
+        streamService: StreamingDemoStreamService,
+        markdownPipeline: StreamingDemoMarkdownPipeline
+    ) {
+        self.scenarios = scenarios
+        self.streamService = streamService
+        self.markdownPipeline = markdownPipeline
+    }
+
+    func message(at index: Int) -> StreamingDemoMessage? {
+        guard messages.indices.contains(index) else { return nil }
+        return messages[index]
+    }
+
+    func selectScenario(at index: Int) {
+        guard scenarios.indices.contains(index) else { return }
+        selectedScenarioIndex = index
+        output?.viewModel(self, didUpdateStatus: "场景已切换: \(scenarios[index].title)")
+    }
+
+    func startSelectedScenario() {
+        startScenario(at: selectedScenarioIndex)
+    }
+
+    func replayCurrentScenario() {
+        let index = lastScenarioIndex ?? selectedScenarioIndex
+        startScenario(at: index)
+    }
+
+    func resetConversation() {
+        stopStreaming(emitStatus: false)
+        messages.removeAll()
+        activeAssistantMessageID = nil
+        activeRunToken = UUID()
+        markdownPipeline.resetAllStreams()
+        output?.viewModelDidResetMessages(self)
+        output?.viewModel(self, didUpdateStatus: "已重置")
+    }
+
+    func stopStreaming() {
+        stopStreaming(emitStatus: true)
+    }
+
+    func updateMeasuredHeight(_ height: CGFloat, for messageID: UUID) {
+        guard let index = messages.firstIndex(where: { $0.id == messageID }) else { return }
+        let oldValue = messages[index].heightCache
+        if abs(oldValue - height) < 0.5 {
             return
         }
-        lastUserScrollLoggedOffsetY = offsetY
-        logScrollState(reason: "scroll.user")
+
+        messages[index].heightCache = height
+        output?.viewModel(self, didRequestHeightRecomputeAt: IndexPath(row: index, section: 0))
+        output?.viewModel(self, didEmitScrollHint: .followBottomIfPossible(animated: false))
+    }
+}
+
+private extension StreamingDemoViewModel {
+    func stopStreaming(emitStatus: Bool) {
+        streamService.stop()
+        guard let activeID = activeAssistantMessageID else {
+            if emitStatus {
+                output?.viewModel(self, didUpdateStatus: "流式已停止")
+            }
+            return
+        }
+
+        markdownPipeline.cancelStream(for: activeID)
+        activeAssistantMessageID = nil
+        activeRunToken = UUID()
+        if emitStatus {
+            output?.viewModel(self, didUpdateStatus: "流式已停止")
+        }
+    }
+
+}
+
+private extension StreamingDemoViewModel {
+    func startScenario(at index: Int) {
+        guard scenarios.indices.contains(index) else { return }
+
+        stopStreaming(emitStatus: false)
+        let scenario = scenarios[index]
+        lastScenarioIndex = index
+
+        appendUserMessage(for: scenario)
+        guard let assistantID = appendAssistantMessage(for: scenario) else {
+            output?.viewModel(self, didUpdateStatus: "streaming engine 不可用")
+            return
+        }
+
+        activeAssistantMessageID = assistantID
+        let runToken = UUID()
+        activeRunToken = runToken
+
+        output?.viewModel(self, didUpdateStatus: "准备中 · \(scenario.title)")
+        output?.viewModel(self, didEmitScrollHint: .followBottomIfPossible(animated: true))
+
+        let configuration = MarkdownNetworkStreamSimulator.Configuration(
+            markdown: scenario.assistantMarkdown,
+            chunkProfile: scenario.chunkProfile,
+            networkProfile: scenario.networkProfile
+        )
+
+        streamService.start(configuration: configuration) { [weak self] event in
+            self?.handle(event: event, for: assistantID, runToken: runToken)
+        }
+    }
+
+    @discardableResult
+    func appendUserMessage(for scenario: StreamingDemoScenario) -> UUID {
+        let id = UUID()
+        let message = StreamingDemoMessage(
+            id: id,
+            role: .user,
+            renderState: .text(scenario.userPrompt),
+            heightCache: 0,
+            streamContext: nil
+        )
+        let row = messages.count
+        messages.append(message)
+        output?.viewModel(self, didInsert: [IndexPath(row: row, section: 0)])
+        return id
+    }
+
+    @discardableResult
+    func appendAssistantMessage(for scenario: StreamingDemoScenario) -> UUID? {
+        let id = UUID()
+        let documentID = "example.streaming.\(id.uuidString)"
+
+        do {
+            let streamContext = try markdownPipeline.beginStream(for: id, documentID: documentID)
+            let message = StreamingDemoMessage(
+                id: id,
+                role: .assistant,
+                renderState: .markdownStreaming(documentID: documentID, latestUpdate: nil),
+                heightCache: 1,
+                streamContext: streamContext
+            )
+            let row = messages.count
+            messages.append(message)
+            output?.viewModel(self, didInsert: [IndexPath(row: row, section: 0)])
+            return id
+        } catch {
+            let fallback = StreamingDemoMessage(
+                id: id,
+                role: .assistant,
+                renderState: .text("初始化流式管线失败: \(error.localizedDescription)"),
+                heightCache: 0,
+                streamContext: nil
+            )
+            let row = messages.count
+            messages.append(fallback)
+            output?.viewModel(self, didInsert: [IndexPath(row: row, section: 0)])
+            return nil
+        }
+    }
+
+    func handle(event: StreamingDemoStreamEvent, for messageID: UUID, runToken: UUID) {
+        guard runToken == activeRunToken else { return }
+        guard let index = messages.firstIndex(where: { $0.id == messageID }) else { return }
+
+        switch event {
+        case let .started(ttfbMs):
+            output?.viewModel(self, didUpdateStatus: "TTFB \(ttfbMs)ms")
+
+        case let .stalled(durationMs):
+            output?.viewModel(self, didUpdateStatus: "网络抖动 \(durationMs)ms")
+
+        case let .chunk(index: chunkIndex, text: text):
+            do {
+                let update = try markdownPipeline.appendChunk(text, for: messageID)
+                messages[index].renderState = .markdownStreaming(
+                    documentID: update.model.documentId,
+                    latestUpdate: update
+                )
+                output?.viewModel(self, didReload: [IndexPath(row: index, section: 0)])
+                output?.viewModel(self, didUpdateStatus: "chunk #\(chunkIndex) · seq \(update.sequence)")
+                output?.viewModel(self, didEmitScrollHint: .followBottomIfPossible(animated: true))
+            } catch {
+                output?.viewModel(self, didUpdateStatus: "chunk 处理失败: \(error.localizedDescription)")
+            }
+
+        case let .completed(totalChunks, totalBytes):
+            do {
+                let update = try markdownPipeline.finishStream(for: messageID)
+                messages[index].renderState = .markdownSnapshot(
+                    documentID: update.model.documentId,
+                    markdown: update.currentText
+                )
+                messages[index].streamContext = nil
+                markdownPipeline.removeStream(for: messageID)
+                output?.viewModel(self, didReload: [IndexPath(row: index, section: 0)])
+                output?.viewModel(
+                    self,
+                    didUpdateStatus: "完成 · \(totalChunks) chunks / \(totalBytes) bytes"
+                )
+                output?.viewModel(self, didEmitScrollHint: .followBottomIfPossible(animated: true))
+            } catch {
+                output?.viewModel(self, didUpdateStatus: "收尾失败: \(error.localizedDescription)")
+            }
+            activeAssistantMessageID = nil
+
+        case let .failed(error):
+            output?.viewModel(self, didUpdateStatus: "流式失败: \(error.localizedDescription)")
+            activeAssistantMessageID = nil
+
+        case .cancelled:
+            output?.viewModel(self, didUpdateStatus: "流式已取消")
+            activeAssistantMessageID = nil
+        }
+    }
+}
+
+// MARK: - Stream Service
+
+@MainActor
+final class StreamingDemoStreamService {
+    private var task: Task<Void, Never>?
+
+    func start(
+        configuration: MarkdownNetworkStreamSimulator.Configuration,
+        onEvent: @escaping (StreamingDemoStreamEvent) -> Void
+    ) {
+        stop()
+
+        task = Task { [configuration] in
+            await MarkdownNetworkStreamSimulator.run(configuration: configuration) { event in
+                if Task.isCancelled { return }
+
+                let mappedEvent: StreamingDemoStreamEvent
+                switch event {
+                case let .started(ttfbMs):
+                    mappedEvent = .started(ttfbMs: ttfbMs)
+                case let .stalled(durationMs):
+                    mappedEvent = .stalled(durationMs: durationMs)
+                case let .chunk(index, text):
+                    mappedEvent = .chunk(index: index, text: text)
+                case let .completed(totalChunks, totalBytes):
+                    mappedEvent = .completed(totalChunks: totalChunks, totalBytes: totalBytes)
+                }
+
+                await MainActor.run {
+                    onEvent(mappedEvent)
+                }
+            }
+        }
+    }
+
+    func stop() {
+        task?.cancel()
+        task = nil
+    }
+}
+
+// MARK: - Markdown Pipeline
+
+enum StreamingDemoMarkdownPipelineError: Error {
+    case streamingEngineUnavailable
+    case streamNotStarted
+    case missingUpdate
+}
+
+@MainActor
+final class StreamingDemoMarkdownPipeline {
+    private let streamStore: MarkdownStreamStore?
+    private var contextsByMessageID: [UUID: StreamingDemoStreamContext] = [:]
+
+    init(streamingEngine: MarkdownContractEngine?) {
+        if let streamingEngine {
+            self.streamStore = MarkdownStreamStore(engine: streamingEngine)
+        } else {
+            self.streamStore = nil
+        }
+    }
+
+    func beginStream(for messageID: UUID, documentID: String) throws -> StreamingDemoStreamContext {
+        guard let streamStore else {
+            throw StreamingDemoMarkdownPipelineError.streamingEngineUnavailable
+        }
+
+        let ref = streamStore.createStream(documentID: documentID)
+        let context = StreamingDemoStreamContext(ref: ref, documentID: documentID, isFinal: false)
+        contextsByMessageID[messageID] = context
+        return context
+    }
+
+    func appendChunk(_ chunk: String, for messageID: UUID) throws -> MarkdownContract.StreamingRenderUpdate {
+        guard let streamStore, let context = contextsByMessageID[messageID] else {
+            throw StreamingDemoMarkdownPipelineError.streamNotStarted
+        }
+
+        let event = try streamStore.append(ref: context.ref, chunk: chunk)
+        guard let update = event.latestUpdate else {
+            throw StreamingDemoMarkdownPipelineError.missingUpdate
+        }
+        return update
+    }
+
+    func finishStream(for messageID: UUID) throws -> MarkdownContract.StreamingRenderUpdate {
+        guard let streamStore, var context = contextsByMessageID[messageID] else {
+            throw StreamingDemoMarkdownPipelineError.streamNotStarted
+        }
+
+        let event = try streamStore.finish(ref: context.ref)
+        context.isFinal = true
+        contextsByMessageID[messageID] = context
+
+        guard let update = event.latestUpdate else {
+            throw StreamingDemoMarkdownPipelineError.missingUpdate
+        }
+        return update
+    }
+
+    func removeStream(for messageID: UUID) {
+        guard let streamStore, let context = contextsByMessageID.removeValue(forKey: messageID) else {
+            return
+        }
+        streamStore.removeStream(ref: context.ref)
+    }
+
+    func cancelStream(for messageID: UUID) {
+        removeStream(for: messageID)
+    }
+
+    func resetAllStreams() {
+        guard let streamStore else {
+            contextsByMessageID.removeAll()
+            return
+        }
+        for context in contextsByMessageID.values {
+            streamStore.removeStream(ref: context.ref)
+        }
+        contextsByMessageID.removeAll()
+    }
+}
+
+// MARK: - Auto Scroll Coordinator
+
+final class StreamingDemoAutoScrollCoordinator {
+    private let bottomThreshold: CGFloat = 48
+
+    private var contentExceededViewport = false
+    private var followBottom = false
+    private var wasNearBottomBeforeMutation = false
+
+    func noteStreamingStart(in tableView: UITableView) {
+        updateViewportState(in: tableView)
+        let distance = distanceToBottom(in: tableView)
+        followBottom = contentExceededViewport && distance <= bottomThreshold
+    }
+
+    func reset() {
+        contentExceededViewport = false
+        followBottom = false
+        wasNearBottomBeforeMutation = false
+    }
+
+    func prepareForContentMutation(in tableView: UITableView) {
+        updateViewportState(in: tableView)
+        wasNearBottomBeforeMutation = distanceToBottom(in: tableView) <= bottomThreshold
+    }
+
+    func shouldAutoScrollAfterMutation(in tableView: UITableView) -> Bool {
+        updateViewportState(in: tableView)
+
+        guard contentExceededViewport else {
+            followBottom = false
+            return false
+        }
+
+        if wasNearBottomBeforeMutation {
+            followBottom = true
+        }
+
+        return followBottom
+    }
+
+    func handleDidScroll(_ scrollView: UIScrollView) {
+        guard let tableView = scrollView as? UITableView else { return }
+        updateViewportState(in: tableView)
+
+        guard contentExceededViewport else {
+            followBottom = false
+            return
+        }
+
+        let distance = distanceToBottom(in: tableView)
+        if distance <= bottomThreshold {
+            followBottom = true
+            return
+        }
+
+        if scrollView.isDragging || scrollView.isTracking || scrollView.isDecelerating {
+            followBottom = false
+        }
+    }
+}
+
+private extension StreamingDemoAutoScrollCoordinator {
+    func distanceToBottom(in tableView: UITableView) -> CGFloat {
+        let visibleMaxY = tableView.contentOffset.y + tableView.bounds.height - tableView.adjustedContentInset.bottom
+        return max(0, tableView.contentSize.height - visibleMaxY)
+    }
+
+    func updateViewportState(in tableView: UITableView) {
+        let viewportHeight = tableView.bounds.height - tableView.adjustedContentInset.top - tableView.adjustedContentInset.bottom
+        contentExceededViewport = tableView.contentSize.height > max(0, viewportHeight) + 1
+    }
+}
+
+// MARK: - Message Cell
+
+@MainActor
+protocol StreamingDemoMessageCellDelegate: AnyObject {
+    func streamingDemoMessageCell(
+        _ cell: StreamingDemoMessageCell,
+        didChangeContentHeight height: CGFloat,
+        for messageID: UUID
+    )
+}
+
+final class StreamingDemoMessageCell: UITableViewCell {
+    static let reuseIdentifier = "StreamingDemoMessageCell"
+
+    private weak var delegate: StreamingDemoMessageCellDelegate?
+    private var messageID: UUID?
+    private var currentDocumentID: String?
+    private var currentSequence: Int?
+
+    private lazy var bubbleView: UIView = {
+        let view = UIView()
+        view.layer.cornerRadius = 14
+        view.layer.cornerCurve = .continuous
+        view.translatesAutoresizingMaskIntoConstraints = false
+        return view
+    }()
+
+    private lazy var textLabelView: UILabel = {
+        let label = UILabel()
+        label.font = .systemFont(ofSize: 16)
+        label.numberOfLines = 0
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
+    }()
+
+    private lazy var markdownView: MarkdownContainerView = {
+        let view = ExampleMarkdownRuntime.makeConfiguredContainer()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.backgroundColor = .clear
+        view.delegate = self
+        view.animationEffectKey = .typing
+        view.animationMode = .dualPhase
+        view.typingCharactersPerSecond = 38
+        view.animationConcurrencyPolicy = .fullyOrdered
+        return view
+    }()
+
+    private lazy var runtime: MarkdownRuntime = {
+        let runtime = ExampleMarkdownRuntime.makeRuntime()
+        runtime.attach(to: markdownView)
+        return runtime
+    }()
+
+    private var bubbleLeadingConstraint: Constraint?
+    private var bubbleTrailingConstraint: Constraint?
+    private var bubbleFixedMarkdownWidthConstraint: Constraint?
+    private var markdownHeightConstraint: Constraint?
+    private var currentMarkdownHeight: CGFloat = 1
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        setupUI()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        delegate = nil
+        messageID = nil
+        currentDocumentID = nil
+        currentSequence = nil
+        currentMarkdownHeight = 1
+        markdownHeightConstraint?.update(offset: 1)
+        markdownView.skipAnimation()
+    }
+
+    func configure(message: StreamingDemoMessage, delegate: StreamingDemoMessageCellDelegate) {
+        self.delegate = delegate
+        self.messageID = message.id
+
+        applyRoleStyle(message.role)
+
+        switch message.renderState {
+        case let .text(text):
+            textLabelView.isHidden = false
+            markdownView.isHidden = true
+            bubbleFixedMarkdownWidthConstraint?.deactivate()
+            textLabelView.text = text
+            currentMarkdownHeight = 0
+            markdownHeightConstraint?.update(offset: 0)
+
+        case let .markdownSnapshot(documentID, markdown):
+            textLabelView.isHidden = true
+            markdownView.isHidden = false
+            bubbleFixedMarkdownWidthConstraint?.activate()
+            currentMarkdownHeight = max(1, message.heightCache)
+            markdownHeightConstraint?.update(offset: currentMarkdownHeight)
+            currentSequence = nil
+
+            if currentDocumentID != documentID {
+                currentDocumentID = documentID
+                try? runtime.setInput(
+                    .markdown(
+                        text: markdown,
+                        documentID: documentID,
+                        rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                    )
+                )
+            }
+
+        case let .markdownStreaming(documentID, latestUpdate):
+            textLabelView.isHidden = true
+            markdownView.isHidden = false
+            bubbleFixedMarkdownWidthConstraint?.activate()
+            currentMarkdownHeight = max(1, message.heightCache)
+            markdownHeightConstraint?.update(offset: currentMarkdownHeight)
+
+            if currentDocumentID != documentID {
+                currentDocumentID = documentID
+                currentSequence = nil
+                if let latestUpdate {
+                    runtime.setStreamingRenderUpdate(latestUpdate, mode: .snapshot)
+                    currentSequence = latestUpdate.sequence
+                    return
+                }
+
+                try? runtime.setInput(
+                    .markdown(
+                        text: "",
+                        documentID: documentID,
+                        rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
+                    )
+                )
+                return
+            }
+
+            guard let latestUpdate else { return }
+            if currentSequence == latestUpdate.sequence {
+                return
+            }
+
+            runtime.setStreamingRenderUpdate(latestUpdate, mode: .incremental)
+            currentSequence = latestUpdate.sequence
+        }
+    }
+}
+
+private extension StreamingDemoMessageCell {
+    func setupUI() {
+        selectionStyle = .none
+        backgroundColor = .clear
+        contentView.backgroundColor = .clear
+
+        contentView.addSubview(bubbleView)
+        bubbleView.addSubview(textLabelView)
+        bubbleView.addSubview(markdownView)
+
+        bubbleView.snp.makeConstraints { make in
+            make.top.equalToSuperview().offset(6)
+            make.bottom.equalToSuperview().offset(-6)
+            make.width.lessThanOrEqualTo(contentView.snp.width).multipliedBy(0.84)
+            make.leading.greaterThanOrEqualToSuperview().offset(14)
+            make.trailing.lessThanOrEqualToSuperview().offset(-14)
+
+            bubbleLeadingConstraint = make.leading.equalToSuperview().offset(14).constraint
+            bubbleTrailingConstraint = make.trailing.equalToSuperview().offset(-14).constraint
+            // markdown 视图使用固定气泡宽度，避免布局系统把宽度压缩成竖排。
+            bubbleFixedMarkdownWidthConstraint = make.width.equalTo(300).priority(.high).constraint
+        }
+
+        textLabelView.snp.makeConstraints { make in
+            make.top.equalToSuperview().offset(10)
+            make.leading.equalToSuperview().offset(12)
+            make.trailing.equalToSuperview().offset(-12)
+            make.bottom.equalToSuperview().offset(-10)
+        }
+
+        markdownView.snp.makeConstraints { make in
+            make.top.equalToSuperview().offset(10)
+            make.leading.equalToSuperview().offset(10)
+            make.trailing.equalToSuperview().offset(-10)
+            make.bottom.equalToSuperview().offset(-10)
+            markdownHeightConstraint = make.height.equalTo(1).constraint
+        }
+
+        bubbleLeadingConstraint?.deactivate()
+        bubbleTrailingConstraint?.deactivate()
+        bubbleFixedMarkdownWidthConstraint?.deactivate()
+    }
+
+    func applyRoleStyle(_ role: StreamingDemoMessageRole) {
+        bubbleLeadingConstraint?.deactivate()
+        bubbleTrailingConstraint?.deactivate()
+
+        switch role {
+        case .user:
+            bubbleTrailingConstraint?.activate()
+            bubbleView.backgroundColor = UIColor.systemBlue
+            textLabelView.textColor = .white
+
+        case .assistant:
+            bubbleLeadingConstraint?.activate()
+            bubbleView.backgroundColor = UIColor.secondarySystemBackground
+            textLabelView.textColor = .label
+        }
+    }
+}
+
+extension StreamingDemoMessageCell: MarkdownContainerViewDelegate {
+    func containerView(_ view: MarkdownContainerView, didChangeContentHeight height: CGFloat) {
+        let resolved = max(1, ceil(height))
+        if abs(resolved - currentMarkdownHeight) < 0.5 {
+            return
+        }
+
+        currentMarkdownHeight = resolved
+        markdownHeightConstraint?.update(offset: resolved)
+        guard let messageID else { return }
+        delegate?.streamingDemoMessageCell(self, didChangeContentHeight: resolved, for: messageID)
     }
 }

@@ -271,9 +271,12 @@ public final class MarkdownRuntime {
 
     private weak var containerView: MarkdownContainerView?
     private let stateProjector = MarkdownStateProjector()
+    private let syntheticDiffer: any MarkdownContract.RenderModelDiffer = MarkdownContract.DefaultRenderModelDiffer()
+    private let syntheticCompiler: any MarkdownContract.RenderModelAnimationCompiler = MarkdownContract.DefaultRenderModelAnimationCompiler()
     private var currentRawModel: MarkdownContract.RenderModel?
     private var businessContext: [String: MarkdownContract.Value] = [:]
     private var preparedDocumentID: String?
+    private var syntheticUpdateSequence: Int = 0
 
     public init(
         behaviorRegistry: MarkdownContract.NodeBehaviorRegistry? = nil,
@@ -314,10 +317,12 @@ public final class MarkdownRuntime {
     ) throws {
         self.businessContext = businessContext
 
-        let model = try resolveModel(from: input)
-        currentRawModel = model
-        prepareState(for: model.documentId)
-        renderCurrentModel()
+        let resolved = try resolveInput(from: input)
+        let update = makeSyntheticFinalUpdate(
+            newModel: resolved.model,
+            currentText: resolved.currentText
+        )
+        setStreamingRenderUpdate(update, mode: .snapshot)
     }
 
     public func setRenderModel(
@@ -328,9 +333,31 @@ public final class MarkdownRuntime {
         if let businessContext {
             self.businessContext = businessContext
         }
-        currentRawModel = model
-        prepareState(for: model.documentId)
-        renderCurrentModel()
+        let update = makeSyntheticFinalUpdate(newModel: model, currentText: "")
+        setStreamingRenderUpdate(update, mode: .snapshot)
+    }
+
+    public func setStreamingRenderUpdate(
+        _ update: MarkdownContract.StreamingRenderUpdate,
+        mode: MarkdownStreamingApplyMode = .incremental,
+        businessContext: [String: MarkdownContract.Value]? = nil
+    ) {
+        if let businessContext {
+            self.businessContext = businessContext
+        }
+
+        currentRawModel = update.model
+        prepareState(for: update.model.documentId)
+
+        guard let containerView else { return }
+        let projected = stateProjector.project(
+            model: update.model,
+            snapshot: stateStore.snapshot,
+            behaviorRegistry: behaviorRegistry
+        )
+        var projectedUpdate = update
+        projectedUpdate.model = projected
+        containerView.applyContractStreamingUpdate(projectedUpdate, mode: mode)
     }
 
     public func dispatch(_ event: MarkdownEvent) {
@@ -339,6 +366,11 @@ public final class MarkdownRuntime {
 }
 
 private extension MarkdownRuntime {
+    struct ResolvedRuntimeInput {
+        var model: MarkdownContract.RenderModel
+        var currentText: String
+    }
+
     static func makeDefaultBehaviorRegistry() -> MarkdownContract.NodeBehaviorRegistry {
         MarkdownContract.NodeBehaviorRegistry(
             schemas: [
@@ -362,10 +394,10 @@ private extension MarkdownRuntime {
         )
     }
 
-    func resolveModel(from input: MarkdownRuntimeInput) throws -> MarkdownContract.RenderModel {
+    func resolveInput(from input: MarkdownRuntimeInput) throws -> ResolvedRuntimeInput {
         switch input {
         case let .renderModel(model):
-            return model
+            return ResolvedRuntimeInput(model: model, currentText: "")
 
         case let .markdown(text, documentID, parserID, rendererID, parseOptions, rewritePipeline, renderOptions):
             guard let containerView else {
@@ -379,7 +411,7 @@ private extension MarkdownRuntime {
             var options = parseOptions
             options.documentId = documentID
 
-            return try containerView.contractKit.render(
+            let model = try containerView.contractKit.render(
                 text,
                 parserID: parserID,
                 rendererID: rendererID,
@@ -387,7 +419,60 @@ private extension MarkdownRuntime {
                 rewritePipeline: rewritePipeline,
                 renderOptions: renderOptions
             )
+            return ResolvedRuntimeInput(model: model, currentText: text)
         }
+    }
+
+    func makeSyntheticFinalUpdate(
+        newModel: MarkdownContract.RenderModel,
+        currentText: String
+    ) -> MarkdownContract.StreamingRenderUpdate {
+        let oldModel = makeSyntheticBaselineModel(for: newModel)
+        let diff = syntheticDiffer.diff(old: oldModel, new: newModel)
+        let compiledAnimationPlan = syntheticCompiler.compile(old: oldModel, new: newModel, diff: diff)
+        syntheticUpdateSequence += 1
+
+        return MarkdownContract.StreamingRenderUpdate(
+            sequence: syntheticUpdateSequence,
+            isFinal: true,
+            currentText: currentText,
+            document: makeSyntheticDocument(documentID: newModel.documentId, currentText: currentText),
+            model: newModel,
+            diff: diff,
+            compiledAnimationPlan: compiledAnimationPlan
+        )
+    }
+
+    func makeSyntheticBaselineModel(for newModel: MarkdownContract.RenderModel) -> MarkdownContract.RenderModel {
+        guard let currentRawModel, currentRawModel.documentId == newModel.documentId else {
+            return MarkdownContract.RenderModel(
+                documentId: newModel.documentId,
+                blocks: [],
+                assets: [],
+                metadata: [:]
+            )
+        }
+        return currentRawModel
+    }
+
+    func makeSyntheticDocument(
+        documentID: String,
+        currentText: String
+    ) -> MarkdownContract.CanonicalDocument {
+        let sourceKind: MarkdownContract.SourceKind = currentText.isEmpty ? .custom("synthetic") : .markdown
+        let root = MarkdownContract.CanonicalNode(
+            id: "\(documentID).synthetic.root",
+            kind: .document,
+            source: MarkdownContract.SourceInfo(
+                sourceKind: sourceKind,
+                raw: currentText.isEmpty ? nil : currentText
+            )
+        )
+        return MarkdownContract.CanonicalDocument(
+            documentId: documentID,
+            root: root,
+            metadata: ["synthetic": .bool(true)]
+        )
     }
 
     func prepareState(for documentID: String) {
@@ -408,14 +493,14 @@ private extension MarkdownRuntime {
         preparedDocumentID = documentID
     }
 
-    func renderCurrentModel() {
+    func renderCurrentModel(forceInstant: Bool = false) {
         guard let rawModel = currentRawModel else { return }
         let projected = stateProjector.project(
             model: rawModel,
             snapshot: stateStore.snapshot,
             behaviorRegistry: behaviorRegistry
         )
-        containerView?.setContractRenderModel(projected)
+        containerView?.setContractRenderModel(projected, forceInstant: forceInstant)
     }
 
     func handleSceneInteraction(node: RenderScene.Node, interaction: SceneInteractionPayload) -> Bool {
@@ -480,7 +565,7 @@ private extension MarkdownRuntime {
 
         if changed {
             persistenceAdapter?.save(documentID: stateStore.snapshot.documentID, snapshot: stateStore.snapshot)
-            renderCurrentModel()
+            renderCurrentModel(forceInstant: shouldRenderStateChangeInstantly(for: event))
         }
 
         return decision == .continueDefault
@@ -554,6 +639,19 @@ private extension MarkdownRuntime {
                 _ = self.process(event: emitted, notifyHandler: true)
             }
         }
+    }
+
+    func shouldRenderStateChangeInstantly(for event: MarkdownEvent) -> Bool {
+        if event.action == "toggle" {
+            return true
+        }
+        if case let .string(slot)? = event.payload["slot"], slot == "collapsed" {
+            return true
+        }
+        if event.origin == .user || event.origin == .effect {
+            return true
+        }
+        return false
     }
 }
 

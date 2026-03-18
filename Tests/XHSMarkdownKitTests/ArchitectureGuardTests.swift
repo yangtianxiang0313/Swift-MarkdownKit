@@ -139,6 +139,25 @@ final class ArchitectureGuardTests: XCTestCase {
             XCTAssertFalse(content.contains("forCustomElement"), "Deprecated API token found in \(file.path)")
         }
     }
+
+    func testContractRenderingGuideHasNoDeprecatedUIKitAdapterAPITokens() throws {
+        let projectRoot = try projectRootURL()
+        let guideFile = projectRoot.appendingPathComponent("CONTRACT_RENDERING_GUIDE.md")
+        let content = try String(contentsOf: guideFile, encoding: .utf8)
+
+        let forbiddenTokens = [
+            "makeTextNode(",
+            "makeCustomViewNode(",
+            "registerBlockRenderer(forExtension:"
+        ]
+
+        for token in forbiddenTokens {
+            XCTAssertFalse(
+                content.contains(token),
+                "Deprecated guide token found in \(guideFile.path): \(token)"
+            )
+        }
+    }
 }
 
 private extension ArchitectureGuardTests {

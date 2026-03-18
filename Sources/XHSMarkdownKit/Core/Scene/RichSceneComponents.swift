@@ -75,7 +75,7 @@ public struct CodeBlockSceneComponent: RevealAnimatableComponent {
     }
 }
 
-public struct TableSceneComponent: SceneComponent {
+public struct TableSceneComponent: RevealAnimatableComponent {
     public enum ColumnAlignment: Equatable {
         case left
         case center
@@ -109,6 +109,7 @@ public struct TableSceneComponent: SceneComponent {
     }
 
     public var reuseIdentifier: String { "scene.table" }
+    public var revealUnitCount: Int { max(1, rows.count + 1) }
 
     public func makeView() -> UIView {
         TableSceneView()
@@ -117,6 +118,11 @@ public struct TableSceneComponent: SceneComponent {
     public func configure(view: UIView, maxWidth: CGFloat) {
         guard let tableView = view as? TableSceneView else { return }
         tableView.configure(component: self, maxWidth: maxWidth)
+    }
+
+    public func reveal(view: UIView, state: RevealState) {
+        guard let tableView = view as? TableSceneView else { return }
+        tableView.setVisibleRowCount(min(revealUnitCount, max(0, state.displayedUnits)))
     }
 
     public func isContentEqual(to other: any SceneComponent) -> Bool {
@@ -814,6 +820,7 @@ private final class TableSceneView: UIView {
 
     private var component: TableSceneComponent?
     private var configuredMaxWidth: CGFloat = 0
+    private var visibleRowCount: Int?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -832,6 +839,7 @@ private final class TableSceneView: UIView {
     func configure(component: TableSceneComponent, maxWidth: CGFloat) {
         self.component = component
         configuredMaxWidth = max(1, maxWidth)
+        visibleRowCount = component.rows.count + 1
 
         layer.cornerRadius = component.cornerRadius
         layer.borderWidth = 0.5
@@ -856,9 +864,23 @@ private final class TableSceneView: UIView {
 
         guard let component else { return }
         let availableWidth = max(1, bounds.width > 0 ? bounds.width : configuredMaxWidth)
-        let layout = contentView.layout(component: component, availableWidth: availableWidth)
+        let layout = contentView.layout(
+            component: component,
+            availableWidth: availableWidth,
+            visibleRowCount: visibleRowCount
+        )
         contentView.frame = CGRect(x: 0, y: 0, width: layout.totalWidth, height: layout.totalHeight)
         scrollView.contentSize = CGSize(width: layout.totalWidth, height: layout.totalHeight)
+        contentView.setNeedsDisplay()
+    }
+
+    func setVisibleRowCount(_ count: Int) {
+        guard let component else { return }
+        let clamped = min(component.rows.count + 1, max(0, count))
+        guard visibleRowCount != clamped else { return }
+        visibleRowCount = clamped
+        invalidateIntrinsicContentSize()
+        setNeedsLayout()
         contentView.setNeedsDisplay()
     }
 
@@ -866,7 +888,11 @@ private final class TableSceneView: UIView {
         guard let component else {
             return CGSize(width: max(1, width), height: UIView.noIntrinsicMetric)
         }
-        let layout = contentView.layout(component: component, availableWidth: max(1, width))
+        let layout = contentView.layout(
+            component: component,
+            availableWidth: max(1, width),
+            visibleRowCount: visibleRowCount
+        )
         return CGSize(width: max(1, width), height: layout.totalHeight)
     }
 }
@@ -892,7 +918,11 @@ private final class TableGridContentView: UIView {
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
-    func layout(component: TableSceneComponent, availableWidth: CGFloat) -> Layout {
+    func layout(
+        component: TableSceneComponent,
+        availableWidth: CGFloat,
+        visibleRowCount: Int?
+    ) -> Layout {
         let colCount = max(
             1,
             component.headers.count,
@@ -934,18 +964,24 @@ private final class TableGridContentView: UIView {
             }
         }
 
+        let resolvedVisibleRows = min(component.rows.count + 1, max(0, visibleRowCount ?? (component.rows.count + 1)))
+        let visibleDataRowCount = max(0, resolvedVisibleRows - 1)
+        let visibleRows = Array(component.rows.prefix(visibleDataRowCount))
+
         var rowHeights: [CGFloat] = []
-        rowHeights.reserveCapacity(component.rows.count + 1)
+        rowHeights.reserveCapacity(visibleRows.count + 1)
 
         let minRowHeight = minimumRowHeight(component: component)
-        rowHeights.append(rowHeight(
-            cells: component.headers,
-            alignments: component.alignments,
-            columnWidths: widths,
-            component: component,
-            minimum: minRowHeight
-        ))
-        for row in component.rows {
+        if resolvedVisibleRows > 0 {
+            rowHeights.append(rowHeight(
+                cells: component.headers,
+                alignments: component.alignments,
+                columnWidths: widths,
+                component: component,
+                minimum: minRowHeight
+            ))
+        }
+        for row in visibleRows {
             rowHeights.append(rowHeight(
                 cells: row,
                 alignments: component.alignments,
@@ -973,7 +1009,7 @@ private final class TableGridContentView: UIView {
         guard !currentLayout.columnWidths.isEmpty, !currentLayout.rowHeights.isEmpty else { return }
         guard let context = UIGraphicsGetCurrentContext() else { return }
 
-        let rowCount = component.rows.count + 1
+        let rowCount = currentLayout.rowHeights.count
         let rowOrigins = cumulativeOffsets(for: currentLayout.rowHeights)
         guard rowOrigins.count == currentLayout.rowHeights.count else { return }
 
@@ -990,7 +1026,8 @@ private final class TableGridContentView: UIView {
             component: component
         )
 
-        for (rowIndex, rowData) in component.rows.enumerated() {
+        let visibleDataRows = Array(component.rows.prefix(max(0, rowCount - 1)))
+        for (rowIndex, rowData) in visibleDataRows.enumerated() {
             let visualRowIndex = rowIndex + 1
             let y = rowOrigins[visualRowIndex]
             let rowHeight = currentLayout.rowHeights[visualRowIndex]
