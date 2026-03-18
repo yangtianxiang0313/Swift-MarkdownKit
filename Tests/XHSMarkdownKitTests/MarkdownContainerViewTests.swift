@@ -2,6 +2,7 @@ import XCTest
 @testable import XHSMarkdownKit
 import XHSMarkdownAdapterMarkdownn
 
+@MainActor
 final class MarkdownContainerViewTests: XCTestCase {
 
     func testContainerViewSetContractMarkdownWithoutParserThrowsRequiredFieldMissing() {
@@ -18,20 +19,6 @@ final class MarkdownContainerViewTests: XCTestCase {
         }
     }
 
-    func testContainerViewContractStreamingWithoutEngineThrowsRequiredFieldMissing() {
-        let view = MarkdownContainerView(theme: .default)
-        view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
-
-        XCTAssertThrowsError(try view.appendContractStreamChunk("Hello")) { error in
-            guard let modelError = error as? MarkdownContract.ModelError else {
-                XCTFail("Expected ModelError")
-                return
-            }
-            XCTAssertEqual(modelError.code, MarkdownContract.ModelError.Code.requiredFieldMissing.rawValue)
-            XCTAssertEqual(modelError.path, "MarkdownContainerView.contractStreamingEngine")
-        }
-    }
-
     func testContainerViewSetContractMarkdownProducesContentHeight() throws {
         let view = makeConfiguredContainerView()
         view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
@@ -41,50 +28,20 @@ final class MarkdownContainerViewTests: XCTestCase {
         XCTAssertGreaterThan(view.contentHeight, 0)
     }
 
-    func testContainerViewContractStreamingProducesIncrementalUpdates() throws {
+    func testRuntimeStreamingProducesIncrementalUpdatesOnContainer() throws {
         let view = makeConfiguredContainerView()
         view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
+        let runtime = makeConfiguredRuntime()
+        runtime.attach(to: view)
 
-        let update1 = try view.appendContractStreamChunk("Hello")
-        let update2 = try view.appendContractStreamChunk(" world")
-        let finalUpdate = try view.finishContractStreaming()
-
-        XCTAssertEqual(update1.sequence, 1)
-        XCTAssertEqual(update2.sequence, 2)
-        XCTAssertEqual(finalUpdate.sequence, 3)
-        XCTAssertTrue(finalUpdate.isFinal)
-        XCTAssertFalse(update1.compiledAnimationPlan.timeline.tracks.isEmpty)
-        XCTAssertEqual(finalUpdate.compiledAnimationPlan.timeline.schemaVersion, MarkdownContract.schemaVersion)
-        XCTAssertGreaterThan(view.contentHeight, 0)
-    }
-
-    func testContainerViewContractStreamingCoversCustomInlineAndSpecialFormats() throws {
-        let view = makeConfiguredContainerView()
-        view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
-
-        view.contractRenderAdapter.registerInlineRenderer(forExtension: ExtensionNodeTestSupport.mentionKind.rawValue) { span, _, _, _ in
-            let userID = span.contractAttrString(for: "userId") ?? "unknown"
-            return NSAttributedString(string: "[mention:\(userID)]")
-        }
-        view.contractRenderAdapter.registerInlineRenderer(forExtension: ExtensionNodeTestSupport.citeKind.rawValue) { span, _, _, _ in
-            NSAttributedString(string: "[cite:\(span.text)]")
-        }
-
-        let first = try view.appendContractStreamChunk("before <mention userId=\"u1\" /> and ")
-        let second = try view.appendContractStreamChunk("<Cite id=\"ref-1\">ref-1</Cite>\n\n")
-        let third = try view.appendContractStreamChunk("```swift\nprint(1)\n```\n\n|k|v|\n|---|---|\n|a|b|\n\n~~gone~~")
-        let final = try view.finishContractStreaming()
-
-        XCTAssertEqual([first.sequence, second.sequence, third.sequence, final.sequence], [1, 2, 3, 4])
-        XCTAssertTrue(final.isFinal)
-        XCTAssertTrue(final.model.blocks.contains(where: { $0.kind == .codeBlock }))
-        XCTAssertTrue(final.model.blocks.contains(where: { $0.kind == .table }))
+        let ref = try runtime.startStream(documentID: "doc.runtime.stream.1")
+        try runtime.appendStreamChunk(ref: ref, chunk: "Hello")
+        try runtime.appendStreamChunk(ref: ref, chunk: " world")
+        try runtime.finishStream(ref: ref)
 
         let renderedText = mergedText(from: view.currentSceneSnapshot)
-        XCTAssertTrue(renderedText.contains("[mention:u1]"))
-        XCTAssertTrue(renderedText.contains("ref-1"))
-        XCTAssertTrue(renderedText.contains("gone"))
-        XCTAssertTrue(flatten(final.document.root).contains(where: { $0.kind == ExtensionNodeTestSupport.citeKind }))
+        XCTAssertTrue(renderedText.contains("Hello world"))
+        XCTAssertGreaterThan(view.contentHeight, 0)
     }
 
     func testContainerViewContractDirectiveCustomElementCanOverrideRendering() throws {
@@ -246,17 +203,26 @@ final class MarkdownContainerViewTests: XCTestCase {
         registry.registerParser(parser, id: MarkdownnAdapter.parserID)
         registry.registerRenderer(renderer, id: MarkdownnAdapter.rendererID)
 
+        return MarkdownContainerView(
+            theme: .default,
+            contractKit: MarkdownContract.UniversalMarkdownKit(registry: registry)
+        )
+    }
+
+    private func makeConfiguredRuntime() -> MarkdownRuntime {
+        let specs = ExtensionNodeTestSupport.makeNodeSpecRegistry()
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: specs)
+        let renderer = MarkdownContract.DefaultCanonicalRenderer(
+            registry: ExtensionNodeTestSupport.makeRendererRegistry(),
+            nodeSpecRegistry: specs
+        )
         let streamingEngine = MarkdownContractEngine(
             parser: parser,
             rewritePipeline: .init(nodeSpecRegistry: specs),
             renderer: renderer
         )
 
-        return MarkdownContainerView(
-            theme: .default,
-            contractKit: MarkdownContract.UniversalMarkdownKit(registry: registry),
-            contractStreamingEngine: streamingEngine
-        )
+        return MarkdownRuntime(streamingEngine: streamingEngine)
     }
 
     private func makeRenderModel(documentID: String, text: String) -> MarkdownContract.RenderModel {

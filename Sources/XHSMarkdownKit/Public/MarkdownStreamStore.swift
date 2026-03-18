@@ -3,7 +3,7 @@ import Foundation
 import XHSMarkdownCore
 #endif
 
-public struct MarkdownStreamRef: Hashable, Sendable {
+public struct MarkdownRenderStreamRef: Hashable, Sendable {
     public let rawValue: UUID
 
     public init(rawValue: UUID = UUID()) {
@@ -11,76 +11,78 @@ public struct MarkdownStreamRef: Hashable, Sendable {
     }
 }
 
-public struct MarkdownStreamTimePoint: Sendable, Equatable {
-    public let seconds: TimeInterval
-
-    public init(seconds: TimeInterval) {
-        self.seconds = seconds
-    }
-
-    public static var now: MarkdownStreamTimePoint {
-        MarkdownStreamTimePoint(seconds: ProcessInfo.processInfo.systemUptime)
-    }
-}
-
-public struct MarkdownStreamAnimatedRange: Sendable, Equatable {
-    public let start: Int
-    public let end: Int
-    public let birthTimeSeconds: TimeInterval
-    public let durationSeconds: TimeInterval
-    public let progress: Double
-
-    public init(
-        start: Int,
-        end: Int,
-        birthTimeSeconds: TimeInterval,
-        durationSeconds: TimeInterval,
-        progress: Double
-    ) {
-        self.start = max(0, start)
-        self.end = max(self.start, end)
-        self.birthTimeSeconds = birthTimeSeconds
-        self.durationSeconds = max(0.001, durationSeconds)
-        self.progress = min(1, max(0, progress))
-    }
-}
-
-public struct MarkdownStreamSnapshot: Sendable {
-    public let ref: MarkdownStreamRef
+public struct MarkdownRenderStreamRecord: Sendable {
+    public let ref: MarkdownRenderStreamRef
+    public let documentID: String
     public let revision: Int
+    public let sequence: Int
     public let isFinal: Bool
-    public let textLength: Int
-    public let animatedRanges: [MarkdownStreamAnimatedRange]
-
-    public init(
-        ref: MarkdownStreamRef,
-        revision: Int,
-        isFinal: Bool,
-        textLength: Int,
-        animatedRanges: [MarkdownStreamAnimatedRange]
-    ) {
-        self.ref = ref
-        self.revision = max(0, revision)
-        self.isFinal = isFinal
-        self.textLength = max(0, textLength)
-        self.animatedRanges = animatedRanges
-    }
-}
-
-public struct MarkdownStreamEvent: Sendable {
-    public let snapshot: MarkdownStreamSnapshot
+    public let currentText: String
     public let latestUpdate: MarkdownContract.StreamingRenderUpdate?
 
     public init(
-        snapshot: MarkdownStreamSnapshot,
+        ref: MarkdownRenderStreamRef,
+        documentID: String,
+        revision: Int,
+        sequence: Int,
+        isFinal: Bool,
+        currentText: String,
         latestUpdate: MarkdownContract.StreamingRenderUpdate?
     ) {
-        self.snapshot = snapshot
+        self.ref = ref
+        self.documentID = documentID
+        self.revision = max(0, revision)
+        self.sequence = max(0, sequence)
+        self.isFinal = isFinal
+        self.currentText = currentText
         self.latestUpdate = latestUpdate
     }
 }
 
-public final class MarkdownStreamObservation {
+public struct MarkdownRenderStoreSnapshot: Sendable {
+    public let revision: Int
+    public let streamRecords: [MarkdownRenderStreamRef: MarkdownRenderStreamRecord]
+    public let animationStates: [AnimationEntityKey: AnimationEntityProgressState]
+
+    public init(
+        revision: Int,
+        streamRecords: [MarkdownRenderStreamRef: MarkdownRenderStreamRecord],
+        animationStates: [AnimationEntityKey: AnimationEntityProgressState]
+    ) {
+        self.revision = max(0, revision)
+        self.streamRecords = streamRecords
+        self.animationStates = animationStates
+    }
+
+    public func streamRecord(ref: MarkdownRenderStreamRef) -> MarkdownRenderStreamRecord? {
+        streamRecords[ref]
+    }
+
+    public func animationState(documentID: String, entityID: String) -> AnimationEntityProgressState? {
+        animationStates[AnimationEntityKey(documentId: documentID, entityId: entityID)]
+    }
+}
+
+public enum MarkdownRenderStoreEventKind: Sendable, Equatable {
+    case streamCreated(ref: MarkdownRenderStreamRef)
+    case streamUpdated(ref: MarkdownRenderStreamRef)
+    case streamFinished(ref: MarkdownRenderStreamRef)
+    case streamRemoved(ref: MarkdownRenderStreamRef)
+    case animationStateChanged(key: AnimationEntityKey)
+    case animationStateReset(documentID: String)
+}
+
+public struct MarkdownRenderStoreEvent: Sendable {
+    public let kind: MarkdownRenderStoreEventKind
+    public let snapshot: MarkdownRenderStoreSnapshot
+
+    public init(kind: MarkdownRenderStoreEventKind, snapshot: MarkdownRenderStoreSnapshot) {
+        self.kind = kind
+        self.snapshot = snapshot
+    }
+}
+
+public final class MarkdownRenderStoreObservation {
     private var cancellation: (() -> Void)?
 
     init(cancellation: @escaping () -> Void) {
@@ -97,224 +99,266 @@ public final class MarkdownStreamObservation {
     }
 }
 
-public enum MarkdownStreamStoreError: Error, Equatable {
+public enum MarkdownRenderStoreError: Error, Equatable {
+    case streamingEngineNotConfigured
     case streamNotFound
     case streamAlreadyFinished
 }
 
-@MainActor
-public final class MarkdownStreamStore {
-    public typealias Listener = (MarkdownStreamEvent) -> Void
-
-    private struct BirthRange {
-        var start: Int
-        var end: Int
-        var birthTimeSeconds: TimeInterval
-        var durationSeconds: TimeInterval
-    }
+public final class MarkdownRenderStore: AnimationStateBackingStore {
+    public typealias Listener = (MarkdownRenderStoreEvent) -> Void
 
     private struct StreamState {
         var session: MarkdownContract.StreamingMarkdownSession
+        var documentID: String
         var revision: Int
         var isFinal: Bool
-        var textLength: Int
+        var currentText: String
         var latestUpdate: MarkdownContract.StreamingRenderUpdate?
-        var birthRanges: [BirthRange]
-        var listeners: [UUID: Listener]
     }
 
-    private let engine: MarkdownContractEngine
+    private let defaultEngine: MarkdownContractEngine?
     private let differ: any MarkdownContract.RenderModelDiffer
     private let compiler: any MarkdownContract.RenderModelAnimationCompiler
-    private let defaultRangeDurationSeconds: TimeInterval
 
-    private var statesByRef: [MarkdownStreamRef: StreamState] = [:]
+    private var storeRevision: Int = 0
+    private var streamStatesByRef: [MarkdownRenderStreamRef: StreamState] = [:]
+    private var animationStateByKey: [AnimationEntityKey: AnimationEntityProgressState] = [:]
+
+    private var listeners: [UUID: Listener] = [:]
 
     public init(
-        engine: MarkdownContractEngine,
+        engine: MarkdownContractEngine? = nil,
         differ: any MarkdownContract.RenderModelDiffer = MarkdownContract.DefaultRenderModelDiffer(),
-        compiler: any MarkdownContract.RenderModelAnimationCompiler = MarkdownContract.DefaultRenderModelAnimationCompiler(),
-        defaultRangeDurationSeconds: TimeInterval = 0.75
+        compiler: any MarkdownContract.RenderModelAnimationCompiler = MarkdownContract.DefaultRenderModelAnimationCompiler()
     ) {
-        self.engine = engine
+        self.defaultEngine = engine
         self.differ = differ
         self.compiler = compiler
-        self.defaultRangeDurationSeconds = max(0.001, defaultRangeDurationSeconds)
     }
 
     @discardableResult
     public func createStream(
-        documentID: String? = nil,
+        documentID: String = "document",
         parseOptions: MarkdownContractParserOptions = MarkdownContractParserOptions(),
-        renderOptions: MarkdownContract.CanonicalRenderOptions = MarkdownContract.CanonicalRenderOptions()
-    ) -> MarkdownStreamRef {
-        let ref = MarkdownStreamRef()
-        var options = parseOptions
-        if let documentID, !documentID.isEmpty {
-            options.documentId = documentID
+        renderOptions: MarkdownContract.CanonicalRenderOptions = MarkdownContract.CanonicalRenderOptions(),
+        engine: MarkdownContractEngine? = nil
+    ) throws -> MarkdownRenderStreamRef {
+        guard let resolvedEngine = engine ?? defaultEngine else {
+            throw MarkdownRenderStoreError.streamingEngineNotConfigured
         }
 
+        let ref = MarkdownRenderStreamRef()
+        var options = parseOptions
+        options.documentId = documentID
+
         let session = MarkdownContract.StreamingMarkdownSession(
-            engine: engine,
+            engine: resolvedEngine,
             differ: differ,
             compiler: compiler,
             parseOptions: options,
             renderOptions: renderOptions
         )
 
-        statesByRef[ref] = StreamState(
+        streamStatesByRef[ref] = StreamState(
             session: session,
+            documentID: documentID,
             revision: 0,
             isFinal: false,
-            textLength: 0,
-            latestUpdate: nil,
-            birthRanges: [],
-            listeners: [:]
+            currentText: "",
+            latestUpdate: nil
         )
+        bumpRevision()
+        notify(kind: .streamCreated(ref: ref))
         return ref
     }
 
     @discardableResult
-    public func append(
-        ref: MarkdownStreamRef,
-        chunk: String,
-        at: MarkdownStreamTimePoint = .now
-    ) throws -> MarkdownStreamEvent {
-        guard var state = statesByRef[ref] else {
-            throw MarkdownStreamStoreError.streamNotFound
+    public func appendChunk(
+        ref: MarkdownRenderStreamRef,
+        chunk: String
+    ) throws -> MarkdownRenderStreamRecord {
+        guard var state = streamStatesByRef[ref] else {
+            throw MarkdownRenderStoreError.streamNotFound
         }
         guard !state.isFinal else {
-            throw MarkdownStreamStoreError.streamAlreadyFinished
+            throw MarkdownRenderStoreError.streamAlreadyFinished
         }
 
-        let oldLength = state.textLength
         let update = try state.session.appendChunk(chunk)
         state.revision += 1
-        state.textLength = update.currentText.count
+        state.currentText = update.currentText
         state.latestUpdate = update
+        streamStatesByRef[ref] = state
 
-        if state.textLength > oldLength {
-            state.birthRanges.append(
-                BirthRange(
-                    start: oldLength,
-                    end: state.textLength,
-                    birthTimeSeconds: at.seconds,
-                    durationSeconds: defaultRangeDurationSeconds
-                )
-            )
-        }
-
-        let snapshot = makeSnapshot(ref: ref, state: &state, at: at)
-        statesByRef[ref] = state
-        let event = MarkdownStreamEvent(snapshot: snapshot, latestUpdate: state.latestUpdate)
-        notify(event: event, listeners: state.listeners)
-        return event
+        bumpRevision()
+        notify(kind: .streamUpdated(ref: ref))
+        return makeStreamRecord(ref: ref, state: state)
     }
 
     @discardableResult
-    public func finish(
-        ref: MarkdownStreamRef,
-        at: MarkdownStreamTimePoint = .now
-    ) throws -> MarkdownStreamEvent {
-        guard var state = statesByRef[ref] else {
-            throw MarkdownStreamStoreError.streamNotFound
+    public func finishStream(ref: MarkdownRenderStreamRef) throws -> MarkdownRenderStreamRecord {
+        guard var state = streamStatesByRef[ref] else {
+            throw MarkdownRenderStoreError.streamNotFound
         }
-        guard !state.isFinal else {
-            let snapshot = makeSnapshot(ref: ref, state: &state, at: at)
-            statesByRef[ref] = state
-            return MarkdownStreamEvent(snapshot: snapshot, latestUpdate: state.latestUpdate)
+
+        if state.isFinal {
+            return makeStreamRecord(ref: ref, state: state)
         }
 
         let update = try state.session.finish()
         state.revision += 1
-        state.textLength = update.currentText.count
+        state.currentText = update.currentText
         state.latestUpdate = update
         state.isFinal = true
+        streamStatesByRef[ref] = state
 
-        let snapshot = makeSnapshot(ref: ref, state: &state, at: at)
-        statesByRef[ref] = state
-        let event = MarkdownStreamEvent(snapshot: snapshot, latestUpdate: state.latestUpdate)
-        notify(event: event, listeners: state.listeners)
-        return event
+        bumpRevision()
+        notify(kind: .streamFinished(ref: ref))
+        return makeStreamRecord(ref: ref, state: state)
     }
 
-    public func snapshot(
-        ref: MarkdownStreamRef,
-        at: MarkdownStreamTimePoint = .now
-    ) throws -> MarkdownStreamSnapshot {
-        guard var state = statesByRef[ref] else {
-            throw MarkdownStreamStoreError.streamNotFound
+    public func streamRecord(ref: MarkdownRenderStreamRef) -> MarkdownRenderStreamRecord? {
+        guard let state = streamStatesByRef[ref] else { return nil }
+        return makeStreamRecord(ref: ref, state: state)
+    }
+
+    public func removeStream(ref: MarkdownRenderStreamRef) {
+        guard streamStatesByRef.removeValue(forKey: ref) != nil else { return }
+        bumpRevision()
+        notify(kind: .streamRemoved(ref: ref))
+    }
+
+    public func removeStreams(documentID: String) {
+        let keys = streamStatesByRef.compactMap { key, value in
+            value.documentID == documentID ? key : nil
         }
-        let snapshot = makeSnapshot(ref: ref, state: &state, at: at)
-        statesByRef[ref] = state
-        return snapshot
+        guard !keys.isEmpty else { return }
+        for key in keys {
+            streamStatesByRef.removeValue(forKey: key)
+        }
+        bumpRevision()
+        notify(kind: .animationStateReset(documentID: documentID))
+    }
+
+    public func removeAllStreams() {
+        guard !streamStatesByRef.isEmpty else { return }
+        streamStatesByRef.removeAll()
+        bumpRevision()
+        notify(kind: .animationStateReset(documentID: "*"))
+    }
+
+    public func snapshot() -> MarkdownRenderStoreSnapshot {
+        makeSnapshot()
     }
 
     @discardableResult
-    public func observe(
-        ref: MarkdownStreamRef,
-        listener: @escaping Listener
-    ) throws -> MarkdownStreamObservation {
-        guard var state = statesByRef[ref] else {
-            throw MarkdownStreamStoreError.streamNotFound
-        }
+    public func observe(listener: @escaping Listener) -> MarkdownRenderStoreObservation {
         let token = UUID()
-        state.listeners[token] = listener
-        let snapshot = makeSnapshot(ref: ref, state: &state, at: .now)
-        statesByRef[ref] = state
-        listener(MarkdownStreamEvent(snapshot: snapshot, latestUpdate: state.latestUpdate))
+        listeners[token] = listener
+        listener(MarkdownRenderStoreEvent(kind: .animationStateReset(documentID: "initial"), snapshot: makeSnapshot()))
 
-        return MarkdownStreamObservation { [weak self] in
-            guard let self else { return }
-            self.removeListener(ref: ref, token: token)
+        return MarkdownRenderStoreObservation { [weak self] in
+            self?.listeners.removeValue(forKey: token)
         }
     }
 
-    public func removeStream(ref: MarkdownStreamRef) {
-        statesByRef.removeValue(forKey: ref)
+    public func prepareAnimationState(
+        documentID: String,
+        revealUnitsByEntity: [String: Int]
+    ) {
+        var changed = false
+
+        let keysForDocument = animationStateByKey.keys.filter { $0.documentId == documentID }
+        let activeEntitySet = Set(revealUnitsByEntity.keys)
+
+        for key in keysForDocument where !activeEntitySet.contains(key.entityId) {
+            animationStateByKey.removeValue(forKey: key)
+            changed = true
+        }
+
+        for (entityID, maxUnitsRaw) in revealUnitsByEntity {
+            let key = AnimationEntityKey(documentId: documentID, entityId: entityID)
+            guard let existing = animationStateByKey[key] else { continue }
+
+            let maxUnits = max(0, maxUnitsRaw)
+            let clamped = AnimationEntityProgressState(
+                displayedUnits: min(maxUnits, max(0, existing.displayedUnits)),
+                stableUnits: min(maxUnits, max(0, existing.stableUnits)),
+                targetUnits: min(maxUnits, max(0, existing.targetUnits)),
+                lastVersion: existing.lastVersion
+            )
+
+            if clamped != existing {
+                animationStateByKey[key] = clamped
+                changed = true
+            }
+        }
+
+        guard changed else { return }
+        bumpRevision()
+        notify(kind: .animationStateReset(documentID: documentID))
+    }
+
+    public func animationState(for key: AnimationEntityKey) -> AnimationEntityProgressState? {
+        animationStateByKey[key]
+    }
+
+    public func animationStates(documentID: String) -> [AnimationEntityKey: AnimationEntityProgressState] {
+        animationStateByKey.filter { $0.key.documentId == documentID }
+    }
+
+    public func setAnimationState(_ state: AnimationEntityProgressState, for key: AnimationEntityKey) {
+        if animationStateByKey[key] == state {
+            return
+        }
+        animationStateByKey[key] = state
+        bumpRevision()
+        notify(kind: .animationStateChanged(key: key))
+    }
+
+    public func removeAnimationStates(documentID: String) {
+        let keys = animationStateByKey.keys.filter { $0.documentId == documentID }
+        guard !keys.isEmpty else { return }
+        for key in keys {
+            animationStateByKey.removeValue(forKey: key)
+        }
+        bumpRevision()
+        notify(kind: .animationStateReset(documentID: documentID))
     }
 }
 
-@MainActor
-private extension MarkdownStreamStore {
-    func removeListener(ref: MarkdownStreamRef, token: UUID) {
-        guard var state = statesByRef[ref] else { return }
-        state.listeners.removeValue(forKey: token)
-        statesByRef[ref] = state
-    }
-
-    private func makeSnapshot(
-        ref: MarkdownStreamRef,
-        state: inout StreamState,
-        at timePoint: MarkdownStreamTimePoint
-    ) -> MarkdownStreamSnapshot {
-        state.birthRanges = state.birthRanges.filter { range in
-            let elapsed = max(0, timePoint.seconds - range.birthTimeSeconds)
-            return elapsed < range.durationSeconds
-        }
-
-        let ranges = state.birthRanges.map { range in
-            let elapsed = max(0, timePoint.seconds - range.birthTimeSeconds)
-            let progress = min(1, elapsed / range.durationSeconds)
-            return MarkdownStreamAnimatedRange(
-                start: range.start,
-                end: range.end,
-                birthTimeSeconds: range.birthTimeSeconds,
-                durationSeconds: range.durationSeconds,
-                progress: progress
-            )
-        }
-
-        return MarkdownStreamSnapshot(
+private extension MarkdownRenderStore {
+    private func makeStreamRecord(ref: MarkdownRenderStreamRef, state: StreamState) -> MarkdownRenderStreamRecord {
+        MarkdownRenderStreamRecord(
             ref: ref,
+            documentID: state.documentID,
             revision: state.revision,
+            sequence: state.latestUpdate?.sequence ?? 0,
             isFinal: state.isFinal,
-            textLength: state.textLength,
-            animatedRanges: ranges
+            currentText: state.currentText,
+            latestUpdate: state.latestUpdate
         )
     }
 
-    func notify(event: MarkdownStreamEvent, listeners: [UUID: Listener]) {
+    private func makeSnapshot() -> MarkdownRenderStoreSnapshot {
+        let records = Dictionary(uniqueKeysWithValues: streamStatesByRef.map { key, state in
+            (key, makeStreamRecord(ref: key, state: state))
+        })
+        return MarkdownRenderStoreSnapshot(
+            revision: storeRevision,
+            streamRecords: records,
+            animationStates: animationStateByKey
+        )
+    }
+
+    private func bumpRevision() {
+        storeRevision += 1
+    }
+
+    private func notify(kind: MarkdownRenderStoreEventKind) {
+        guard !listeners.isEmpty else { return }
+        let event = MarkdownRenderStoreEvent(kind: kind, snapshot: makeSnapshot())
         for listener in listeners.values {
             listener(event)
         }

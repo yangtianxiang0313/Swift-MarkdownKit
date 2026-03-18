@@ -98,8 +98,14 @@ enum ExampleMarkdownRuntime {
     }
 
     @MainActor
-    static func makeRuntime() -> MarkdownRuntime {
-        let runtime = MarkdownRuntime(behaviorRegistry: makeBehaviorRegistry())
+    static func makeRuntime(
+        renderStore: MarkdownRenderStore = MarkdownRenderStore()
+    ) -> MarkdownRuntime {
+        let runtime = MarkdownRuntime(
+            behaviorRegistry: makeBehaviorRegistry(),
+            streamingEngine: makeStreamingEngine(),
+            renderStore: renderStore
+        )
         runtime.persistenceAdapter = runtimePersistenceAdapter
         runtime.dataBindingAdapter = runtimeDataBindingAdapter
         return runtime
@@ -340,12 +346,10 @@ enum ExampleMarkdownRuntime {
             canonicalRendererRegistry: canonicalRegistry
         )
         container.contractKit = MarkdownContract.UniversalMarkdownKit(registry: registry)
-        container.contractStreamingEngine = makeStreamingEngine()
         return true
         #else
         // Root pod (UIKit default) has no parser plugin; keep predictable "parser missing" behavior.
         container.contractKit = MarkdownContract.UniversalMarkdownKit()
-        container.contractStreamingEngine = nil
         return false
         #endif
     }

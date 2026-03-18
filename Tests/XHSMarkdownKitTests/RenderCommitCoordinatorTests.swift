@@ -241,6 +241,7 @@ final class RenderCommitCoordinatorTests: XCTestCase {
 private final class SceneHost {
     private let containerView = UIView()
     private let viewGraphCoordinator: ViewGraphCoordinator
+    private let animationStateStore = MarkdownRenderStore()
 
     init() {
         containerView.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
@@ -260,7 +261,8 @@ private final class SceneHost {
                 guard let self else { return 0 }
                 return self.containerView.subviews.map { $0.frame.maxY }.max() ?? 0
             },
-            animateStructuralChanges: { _ in }
+            animateStructuralChanges: { _ in },
+            animationStateStore: animationStateStore
         )
     }
 

@@ -81,11 +81,10 @@ final class StreamingDemoViewController: UIViewController {
     }()
 
     private lazy var viewModel: StreamingDemoViewModel = {
-        let pipeline = StreamingDemoMarkdownPipeline(streamingEngine: ExampleMarkdownRuntime.makeStreamingEngine())
         let vm = StreamingDemoViewModel(
             scenarios: StreamingDemoMockData.scenarios,
             streamService: StreamingDemoStreamService(),
-            markdownPipeline: pipeline
+            runtimeFactory: { ExampleMarkdownRuntime.makeRuntime() }
         )
         vm.output = self
         return vm
@@ -205,7 +204,11 @@ extension StreamingDemoViewController: UITableViewDataSource {
             return UITableViewCell()
         }
 
-        cell.configure(message: message, delegate: self)
+        cell.configure(
+            message: message,
+            runtime: viewModel.runtime(for: message.id),
+            delegate: self
+        )
         return cell
     }
 }
@@ -245,7 +248,11 @@ extension StreamingDemoViewController: StreamingDemoViewModelOutput {
         for indexPath in validIndexPaths {
             guard let message = viewModel.message(at: indexPath.row) else { continue }
             if let visibleCell = tableView.cellForRow(at: indexPath) as? StreamingDemoMessageCell {
-                visibleCell.configure(message: message, delegate: self)
+                visibleCell.configure(
+                    message: message,
+                    runtime: viewModel.runtime(for: message.id),
+                    delegate: self
+                )
             } else {
                 fallbackReloadPaths.append(indexPath)
             }
@@ -285,14 +292,7 @@ enum StreamingDemoMessageRole {
 
 enum StreamingDemoMessageRenderState {
     case text(String)
-    case markdownSnapshot(documentID: String, markdown: String)
-    case markdownStreaming(documentID: String, latestUpdate: MarkdownContract.StreamingRenderUpdate?)
-}
-
-struct StreamingDemoStreamContext {
-    let ref: MarkdownStreamRef
-    let documentID: String
-    var isFinal: Bool
+    case markdown(documentID: String, streamRef: MarkdownRenderStreamRef?)
 }
 
 struct StreamingDemoMessage {
@@ -300,7 +300,6 @@ struct StreamingDemoMessage {
     let role: StreamingDemoMessageRole
     var renderState: StreamingDemoMessageRenderState
     var heightCache: CGFloat
-    var streamContext: StreamingDemoStreamContext?
 }
 
 struct StreamingDemoScenario {
@@ -348,27 +347,32 @@ final class StreamingDemoViewModel {
     }
 
     private let streamService: StreamingDemoStreamService
-    private let markdownPipeline: StreamingDemoMarkdownPipeline
+    private let runtimeFactory: @MainActor () -> MarkdownRuntime
 
     private var messages: [StreamingDemoMessage] = []
     private var selectedScenarioIndex: Int = 0
     private var activeAssistantMessageID: UUID?
     private var activeRunToken = UUID()
     private var lastScenarioIndex: Int?
+    private var runtimeByMessageID: [UUID: MarkdownRuntime] = [:]
 
     init(
         scenarios: [StreamingDemoScenario],
         streamService: StreamingDemoStreamService,
-        markdownPipeline: StreamingDemoMarkdownPipeline
+        runtimeFactory: @escaping @MainActor () -> MarkdownRuntime
     ) {
         self.scenarios = scenarios
         self.streamService = streamService
-        self.markdownPipeline = markdownPipeline
+        self.runtimeFactory = runtimeFactory
     }
 
     func message(at index: Int) -> StreamingDemoMessage? {
         guard messages.indices.contains(index) else { return nil }
         return messages[index]
+    }
+
+    func runtime(for messageID: UUID) -> MarkdownRuntime? {
+        runtimeByMessageID[messageID]
     }
 
     func selectScenario(at index: Int) {
@@ -389,9 +393,10 @@ final class StreamingDemoViewModel {
     func resetConversation() {
         stopStreaming(emitStatus: false)
         messages.removeAll()
+        runtimeByMessageID.values.forEach { $0.resetStreams() }
+        runtimeByMessageID.removeAll()
         activeAssistantMessageID = nil
         activeRunToken = UUID()
-        markdownPipeline.resetAllStreams()
         output?.viewModelDidResetMessages(self)
         output?.viewModel(self, didUpdateStatus: "已重置")
     }
@@ -423,7 +428,13 @@ private extension StreamingDemoViewModel {
             return
         }
 
-        markdownPipeline.cancelStream(for: activeID)
+        if let index = messages.firstIndex(where: { $0.id == activeID }),
+           case let .markdown(documentID, streamRef) = messages[index].renderState {
+            if let runtime = runtimeByMessageID[activeID], let streamRef {
+                runtime.cancelStream(ref: streamRef)
+            }
+            messages[index].renderState = .markdown(documentID: documentID, streamRef: nil)
+        }
         activeAssistantMessageID = nil
         activeRunToken = UUID()
         if emitStatus {
@@ -472,8 +483,7 @@ private extension StreamingDemoViewModel {
             id: id,
             role: .user,
             renderState: .text(scenario.userPrompt),
-            heightCache: 0,
-            streamContext: nil
+            heightCache: 0
         )
         let row = messages.count
         messages.append(message)
@@ -485,15 +495,16 @@ private extension StreamingDemoViewModel {
     func appendAssistantMessage(for scenario: StreamingDemoScenario) -> UUID? {
         let id = UUID()
         let documentID = "example.streaming.\(id.uuidString)"
+        let runtime = runtimeFactory()
 
         do {
-            let streamContext = try markdownPipeline.beginStream(for: id, documentID: documentID)
+            let streamRef = try runtime.startStream(documentID: documentID)
+            runtimeByMessageID[id] = runtime
             let message = StreamingDemoMessage(
                 id: id,
                 role: .assistant,
-                renderState: .markdownStreaming(documentID: documentID, latestUpdate: nil),
-                heightCache: 1,
-                streamContext: streamContext
+                renderState: .markdown(documentID: documentID, streamRef: streamRef),
+                heightCache: 1
             )
             let row = messages.count
             messages.append(message)
@@ -504,8 +515,7 @@ private extension StreamingDemoViewModel {
                 id: id,
                 role: .assistant,
                 renderState: .text("初始化流式管线失败: \(error.localizedDescription)"),
-                heightCache: 0,
-                streamContext: nil
+                heightCache: 0
             )
             let row = messages.count
             messages.append(fallback)
@@ -517,6 +527,10 @@ private extension StreamingDemoViewModel {
     func handle(event: StreamingDemoStreamEvent, for messageID: UUID, runToken: UUID) {
         guard runToken == activeRunToken else { return }
         guard let index = messages.firstIndex(where: { $0.id == messageID }) else { return }
+        guard let runtime = runtimeByMessageID[messageID] else {
+            output?.viewModel(self, didUpdateStatus: "runtime 不存在")
+            return
+        }
 
         switch event {
         case let .started(ttfbMs):
@@ -527,13 +541,13 @@ private extension StreamingDemoViewModel {
 
         case let .chunk(index: chunkIndex, text: text):
             do {
-                let update = try markdownPipeline.appendChunk(text, for: messageID)
-                messages[index].renderState = .markdownStreaming(
-                    documentID: update.model.documentId,
-                    latestUpdate: update
-                )
-                output?.viewModel(self, didReload: [IndexPath(row: index, section: 0)])
-                output?.viewModel(self, didUpdateStatus: "chunk #\(chunkIndex) · seq \(update.sequence)")
+                guard case let .markdown(_, streamRef?) = messages[index].renderState else {
+                    output?.viewModel(self, didUpdateStatus: "流式上下文缺失")
+                    return
+                }
+                try runtime.appendStreamChunk(ref: streamRef, chunk: text)
+                let sequence = runtime.streamRecord(ref: streamRef)?.sequence ?? 0
+                output?.viewModel(self, didUpdateStatus: "chunk #\(chunkIndex) · seq \(sequence)")
                 output?.viewModel(self, didEmitScrollHint: .followBottomIfPossible(animated: true))
             } catch {
                 output?.viewModel(self, didUpdateStatus: "chunk 处理失败: \(error.localizedDescription)")
@@ -541,14 +555,13 @@ private extension StreamingDemoViewModel {
 
         case let .completed(totalChunks, totalBytes):
             do {
-                let update = try markdownPipeline.finishStream(for: messageID)
-                messages[index].renderState = .markdownSnapshot(
-                    documentID: update.model.documentId,
-                    markdown: update.currentText
-                )
-                messages[index].streamContext = nil
-                markdownPipeline.removeStream(for: messageID)
-                output?.viewModel(self, didReload: [IndexPath(row: index, section: 0)])
+                guard case let .markdown(documentID, streamRef?) = messages[index].renderState else {
+                    output?.viewModel(self, didUpdateStatus: "收尾上下文缺失")
+                    return
+                }
+                try runtime.finishStream(ref: streamRef)
+                runtime.cancelStream(ref: streamRef)
+                messages[index].renderState = .markdown(documentID: documentID, streamRef: nil)
                 output?.viewModel(
                     self,
                     didUpdateStatus: "完成 · \(totalChunks) chunks / \(totalBytes) bytes"
@@ -560,10 +573,18 @@ private extension StreamingDemoViewModel {
             activeAssistantMessageID = nil
 
         case let .failed(error):
+            if case let .markdown(documentID, streamRef?) = messages[index].renderState {
+                runtime.cancelStream(ref: streamRef)
+                messages[index].renderState = .markdown(documentID: documentID, streamRef: nil)
+            }
             output?.viewModel(self, didUpdateStatus: "流式失败: \(error.localizedDescription)")
             activeAssistantMessageID = nil
 
         case .cancelled:
+            if case let .markdown(documentID, streamRef?) = messages[index].renderState {
+                runtime.cancelStream(ref: streamRef)
+                messages[index].renderState = .markdown(documentID: documentID, streamRef: nil)
+            }
             output?.viewModel(self, didUpdateStatus: "流式已取消")
             activeAssistantMessageID = nil
         }
@@ -608,88 +629,6 @@ final class StreamingDemoStreamService {
     func stop() {
         task?.cancel()
         task = nil
-    }
-}
-
-// MARK: - Markdown Pipeline
-
-enum StreamingDemoMarkdownPipelineError: Error {
-    case streamingEngineUnavailable
-    case streamNotStarted
-    case missingUpdate
-}
-
-@MainActor
-final class StreamingDemoMarkdownPipeline {
-    private let streamStore: MarkdownStreamStore?
-    private var contextsByMessageID: [UUID: StreamingDemoStreamContext] = [:]
-
-    init(streamingEngine: MarkdownContractEngine?) {
-        if let streamingEngine {
-            self.streamStore = MarkdownStreamStore(engine: streamingEngine)
-        } else {
-            self.streamStore = nil
-        }
-    }
-
-    func beginStream(for messageID: UUID, documentID: String) throws -> StreamingDemoStreamContext {
-        guard let streamStore else {
-            throw StreamingDemoMarkdownPipelineError.streamingEngineUnavailable
-        }
-
-        let ref = streamStore.createStream(documentID: documentID)
-        let context = StreamingDemoStreamContext(ref: ref, documentID: documentID, isFinal: false)
-        contextsByMessageID[messageID] = context
-        return context
-    }
-
-    func appendChunk(_ chunk: String, for messageID: UUID) throws -> MarkdownContract.StreamingRenderUpdate {
-        guard let streamStore, let context = contextsByMessageID[messageID] else {
-            throw StreamingDemoMarkdownPipelineError.streamNotStarted
-        }
-
-        let event = try streamStore.append(ref: context.ref, chunk: chunk)
-        guard let update = event.latestUpdate else {
-            throw StreamingDemoMarkdownPipelineError.missingUpdate
-        }
-        return update
-    }
-
-    func finishStream(for messageID: UUID) throws -> MarkdownContract.StreamingRenderUpdate {
-        guard let streamStore, var context = contextsByMessageID[messageID] else {
-            throw StreamingDemoMarkdownPipelineError.streamNotStarted
-        }
-
-        let event = try streamStore.finish(ref: context.ref)
-        context.isFinal = true
-        contextsByMessageID[messageID] = context
-
-        guard let update = event.latestUpdate else {
-            throw StreamingDemoMarkdownPipelineError.missingUpdate
-        }
-        return update
-    }
-
-    func removeStream(for messageID: UUID) {
-        guard let streamStore, let context = contextsByMessageID.removeValue(forKey: messageID) else {
-            return
-        }
-        streamStore.removeStream(ref: context.ref)
-    }
-
-    func cancelStream(for messageID: UUID) {
-        removeStream(for: messageID)
-    }
-
-    func resetAllStreams() {
-        guard let streamStore else {
-            contextsByMessageID.removeAll()
-            return
-        }
-        for context in contextsByMessageID.values {
-            streamStore.removeStream(ref: context.ref)
-        }
-        contextsByMessageID.removeAll()
     }
 }
 
@@ -783,8 +722,7 @@ final class StreamingDemoMessageCell: UITableViewCell {
 
     private weak var delegate: StreamingDemoMessageCellDelegate?
     private var messageID: UUID?
-    private var currentDocumentID: String?
-    private var currentSequence: Int?
+    private weak var boundRuntime: MarkdownRuntime?
 
     private lazy var bubbleView: UIView = {
         let view = UIView()
@@ -814,12 +752,6 @@ final class StreamingDemoMessageCell: UITableViewCell {
         return view
     }()
 
-    private lazy var runtime: MarkdownRuntime = {
-        let runtime = ExampleMarkdownRuntime.makeRuntime()
-        runtime.attach(to: markdownView)
-        return runtime
-    }()
-
     private var bubbleLeadingConstraint: Constraint?
     private var bubbleTrailingConstraint: Constraint?
     private var bubbleFixedMarkdownWidthConstraint: Constraint?
@@ -840,14 +772,18 @@ final class StreamingDemoMessageCell: UITableViewCell {
         super.prepareForReuse()
         delegate = nil
         messageID = nil
-        currentDocumentID = nil
-        currentSequence = nil
+        boundRuntime?.detach()
+        boundRuntime = nil
         currentMarkdownHeight = 1
         markdownHeightConstraint?.update(offset: 1)
         markdownView.skipAnimation()
     }
 
-    func configure(message: StreamingDemoMessage, delegate: StreamingDemoMessageCellDelegate) {
+    func configure(
+        message: StreamingDemoMessage,
+        runtime: MarkdownRuntime?,
+        delegate: StreamingDemoMessageCellDelegate
+    ) {
         self.delegate = delegate
         self.messageID = message.id
 
@@ -861,59 +797,25 @@ final class StreamingDemoMessageCell: UITableViewCell {
             textLabelView.text = text
             currentMarkdownHeight = 0
             markdownHeightConstraint?.update(offset: 0)
+            boundRuntime?.detach()
+            boundRuntime = nil
 
-        case let .markdownSnapshot(documentID, markdown):
+        case .markdown:
             textLabelView.isHidden = true
             markdownView.isHidden = false
             bubbleFixedMarkdownWidthConstraint?.activate()
             currentMarkdownHeight = max(1, message.heightCache)
             markdownHeightConstraint?.update(offset: currentMarkdownHeight)
-            currentSequence = nil
-
-            if currentDocumentID != documentID {
-                currentDocumentID = documentID
-                try? runtime.setInput(
-                    .markdown(
-                        text: markdown,
-                        documentID: documentID,
-                        rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
-                    )
-                )
-            }
-
-        case let .markdownStreaming(documentID, latestUpdate):
-            textLabelView.isHidden = true
-            markdownView.isHidden = false
-            bubbleFixedMarkdownWidthConstraint?.activate()
-            currentMarkdownHeight = max(1, message.heightCache)
-            markdownHeightConstraint?.update(offset: currentMarkdownHeight)
-
-            if currentDocumentID != documentID {
-                currentDocumentID = documentID
-                currentSequence = nil
-                if let latestUpdate {
-                    runtime.setStreamingRenderUpdate(latestUpdate, mode: .snapshot)
-                    currentSequence = latestUpdate.sequence
-                    return
-                }
-
-                try? runtime.setInput(
-                    .markdown(
-                        text: "",
-                        documentID: documentID,
-                        rewritePipeline: ExampleMarkdownRuntime.makeRewritePipeline()
-                    )
-                )
+            guard let runtime else {
+                boundRuntime?.detach()
+                boundRuntime = nil
                 return
             }
-
-            guard let latestUpdate else { return }
-            if currentSequence == latestUpdate.sequence {
-                return
+            if boundRuntime !== runtime {
+                boundRuntime?.detach()
+                runtime.attach(to: markdownView)
+                boundRuntime = runtime
             }
-
-            runtime.setStreamingRenderUpdate(latestUpdate, mode: .incremental)
-            currentSequence = latestUpdate.sequence
         }
     }
 }

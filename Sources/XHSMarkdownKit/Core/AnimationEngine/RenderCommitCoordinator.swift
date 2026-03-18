@@ -51,18 +51,6 @@ public final class RenderCommitCoordinator {
     public var onAnimationComplete: (() -> Void)?
     public var onHeightChange: ((CGFloat) -> Void)?
 
-    private struct AnimationEntityKey: Hashable {
-        let documentId: String
-        let entityId: String
-    }
-
-    private struct ProgressState {
-        var displayedUnits: Int
-        var stableUnits: Int
-        var lastTargetUnits: Int
-        var lastVersion: Int
-    }
-
     private struct ContentTrack {
         let entityId: String
         let revealStartUnits: Int
@@ -107,24 +95,25 @@ public final class RenderCommitCoordinator {
     private let viewForEntity: (String) -> UIView?
     private let measureHeight: () -> CGFloat
     private let animateStructuralChanges: ([StructuralSceneChange]) -> Void
+    private let animationStateStore: any AnimationStateBackingStore
 
     private var activeTransaction: ActiveTransaction?
     private var pendingQueue: [RenderFrame] = []
     private var cancellationToken: Int = 0
     private var nextExpectedVersion: Int = 1
-    private var activeDocumentID: String?
-    private var progressByEntity: [AnimationEntityKey: ProgressState] = [:]
 
     public init(
         applyScene: @escaping (RenderScene) -> Void,
         viewForEntity: @escaping (String) -> UIView?,
         measureHeight: @escaping () -> CGFloat,
-        animateStructuralChanges: @escaping ([StructuralSceneChange]) -> Void
+        animateStructuralChanges: @escaping ([StructuralSceneChange]) -> Void,
+        animationStateStore: any AnimationStateBackingStore
     ) {
         self.applyScene = applyScene
         self.viewForEntity = viewForEntity
         self.measureHeight = measureHeight
         self.animateStructuralChanges = animateStructuralChanges
+        self.animationStateStore = animationStateStore
     }
 
     public func submit(_ frame: RenderFrame) {
@@ -312,7 +301,7 @@ public final class RenderCommitCoordinator {
     private func makeTracks(
         _ contentChanges: [ContentSceneChange],
         targetScene: RenderScene,
-        progressSnapshot: inout [AnimationEntityKey: ProgressState]
+        progressSnapshot: inout [AnimationEntityKey: AnimationEntityProgressState]
     ) -> [ContentTrack] {
         contentChanges.compactMap { change in
             guard let node = targetScene.componentNodeByID(change.entityId),
@@ -391,11 +380,16 @@ public final class RenderCommitCoordinator {
                 elapsedMilliseconds: elapsedMilliseconds
             )
             component.reveal(view: view, state: revealState)
-            progressByEntity[animationEntityKey(documentID: targetScene.documentId, entityID: track.entityId)] = ProgressState(
-                displayedUnits: displayed,
-                stableUnits: stableUnits,
-                lastTargetUnits: track.targetUnits,
-                lastVersion: version
+
+            let key = animationEntityKey(documentID: targetScene.documentId, entityID: track.entityId)
+            animationStateStore.setAnimationState(
+                AnimationEntityProgressState(
+                    displayedUnits: displayed,
+                    stableUnits: stableUnits,
+                    targetUnits: track.targetUnits,
+                    lastVersion: version
+                ),
+                for: key
             )
 
             if let appearance = component as? any AppearanceAnimatableComponent {
@@ -408,36 +402,27 @@ public final class RenderCommitCoordinator {
     }
 
     private func prepareProgressStore(for targetScene: RenderScene) {
-        if activeDocumentID != targetScene.documentId {
-            activeDocumentID = targetScene.documentId
-            progressByEntity.removeAll()
-        }
-
-        var revealUnitsByID: [AnimationEntityKey: Int] = [:]
+        var revealUnitsByEntity: [String: Int] = [:]
         for node in targetScene.flattenRenderableNodes() {
             guard let reveal = node.component as? any RevealAnimatableComponent else { continue }
-            revealUnitsByID[animationEntityKey(documentID: targetScene.documentId, entityID: node.id)] = max(0, reveal.revealUnitCount)
+            revealUnitsByEntity[node.id] = max(0, reveal.revealUnitCount)
         }
-
-        progressByEntity = progressByEntity.filter { revealUnitsByID[$0.key] != nil }
-        for (key, maxUnits) in revealUnitsByID {
-            guard var existing = progressByEntity[key] else { continue }
-            existing.displayedUnits = min(maxUnits, max(0, existing.displayedUnits))
-            existing.stableUnits = min(existing.displayedUnits, max(0, existing.stableUnits))
-            existing.lastTargetUnits = min(maxUnits, max(existing.lastTargetUnits, existing.displayedUnits))
-            progressByEntity[key] = existing
-        }
+        animationStateStore.prepareAnimationState(documentID: targetScene.documentId, revealUnitsByEntity: revealUnitsByEntity)
     }
 
     private func applyFullyVisibleState(to scene: RenderScene, elapsedMilliseconds: Int, version: Int) {
         for node in scene.flattenRenderableNodes() {
             guard let component = node.component as? any RevealAnimatableComponent else { continue }
             let totalUnits = max(0, component.revealUnitCount)
-            progressByEntity[animationEntityKey(documentID: scene.documentId, entityID: node.id)] = ProgressState(
-                displayedUnits: totalUnits,
-                stableUnits: totalUnits,
-                lastTargetUnits: totalUnits,
-                lastVersion: version
+
+            animationStateStore.setAnimationState(
+                AnimationEntityProgressState(
+                    displayedUnits: totalUnits,
+                    stableUnits: totalUnits,
+                    targetUnits: totalUnits,
+                    lastVersion: version
+                ),
+                for: animationEntityKey(documentID: scene.documentId, entityID: node.id)
             )
 
             guard let view = viewForEntity(node.id) else { continue }
@@ -460,15 +445,15 @@ public final class RenderCommitCoordinator {
         guard !stages.isEmpty else { return [] }
 
         var works: [StageWork] = []
-        var progressSnapshot = progressByEntity
+        var progressSnapshot = animationStateStore.animationStates(documentID: frame.targetScene.documentId)
 
         for stage in stages {
             let tracks = makeTracks(stage.contentChanges, targetScene: frame.targetScene, progressSnapshot: &progressSnapshot)
             for track in tracks {
-                progressSnapshot[animationEntityKey(documentID: frame.targetScene.documentId, entityID: track.entityId)] = ProgressState(
+                progressSnapshot[animationEntityKey(documentID: frame.targetScene.documentId, entityID: track.entityId)] = AnimationEntityProgressState(
                     displayedUnits: track.targetUnits,
                     stableUnits: track.targetUnits,
-                    lastTargetUnits: track.targetUnits,
+                    targetUnits: track.targetUnits,
                     lastVersion: frame.version
                 )
             }

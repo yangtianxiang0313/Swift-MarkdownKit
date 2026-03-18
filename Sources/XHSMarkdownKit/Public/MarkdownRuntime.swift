@@ -256,6 +256,12 @@ public final class MarkdownStateStore {
 }
 
 @MainActor
+public enum MarkdownRuntimeStreamError: Error, Equatable {
+    case streamingEngineNotConfigured
+    case streamNotOwned
+}
+
+@MainActor
 public final class MarkdownRuntime {
     public var eventHandler: ((MarkdownEvent) -> MarkdownEventDecision)?
     public weak var persistenceAdapter: (any MarkdownStatePersistenceAdapter)?
@@ -264,6 +270,9 @@ public final class MarkdownRuntime {
     public let behaviorRegistry: MarkdownContract.NodeBehaviorRegistry
     public let stateStore: MarkdownStateStore
     public let effectRunner: MarkdownEffectRunner
+    public let renderStore: MarkdownRenderStore
+
+    public var streamingEngine: MarkdownContractEngine?
 
     public var stateSnapshot: MarkdownStateSnapshot {
         stateStore.snapshot
@@ -278,24 +287,40 @@ public final class MarkdownRuntime {
     private var preparedDocumentID: String?
     private var syntheticUpdateSequence: Int = 0
 
+    private var ownedStreamRefs: Set<MarkdownRenderStreamRef> = []
+    private var renderStoreObservation: MarkdownRenderStoreObservation?
+
     public init(
         behaviorRegistry: MarkdownContract.NodeBehaviorRegistry? = nil,
         stateStore: MarkdownStateStore,
-        effectRunner: MarkdownEffectRunner
+        effectRunner: MarkdownEffectRunner,
+        streamingEngine: MarkdownContractEngine? = nil,
+        renderStore: MarkdownRenderStore = MarkdownRenderStore()
     ) {
         self.behaviorRegistry = behaviorRegistry ?? MarkdownRuntime.makeDefaultBehaviorRegistry()
         self.stateStore = stateStore
         self.effectRunner = effectRunner
+        self.streamingEngine = streamingEngine
+        self.renderStore = renderStore
+        observeRenderStore()
     }
 
     public convenience init(
-        behaviorRegistry: MarkdownContract.NodeBehaviorRegistry? = nil
+        behaviorRegistry: MarkdownContract.NodeBehaviorRegistry? = nil,
+        streamingEngine: MarkdownContractEngine? = nil,
+        renderStore: MarkdownRenderStore = MarkdownRenderStore()
     ) {
         self.init(
             behaviorRegistry: behaviorRegistry,
             stateStore: MarkdownStateStore(),
-            effectRunner: MarkdownEffectRunner()
+            effectRunner: MarkdownEffectRunner(),
+            streamingEngine: streamingEngine,
+            renderStore: renderStore
         )
+    }
+
+    deinit {
+        renderStoreObservation?.cancel()
     }
 
     public func attach(to view: MarkdownContainerView) {
@@ -307,8 +332,14 @@ public final class MarkdownRuntime {
         view.sceneInteractionHandler = { [weak self] node, interaction in
             self?.handleSceneInteraction(node: node, interaction: interaction) ?? true
         }
+        view.bindAnimationStateStore(renderStore)
 
         renderCurrentModel()
+    }
+
+    public func detach() {
+        containerView?.sceneInteractionHandler = nil
+        containerView = nil
     }
 
     public func setInput(
@@ -318,11 +349,10 @@ public final class MarkdownRuntime {
         self.businessContext = businessContext
 
         let resolved = try resolveInput(from: input)
-        let update = makeSyntheticFinalUpdate(
+        commitProjectedFinalModel(
             newModel: resolved.model,
             currentText: resolved.currentText
         )
-        setStreamingRenderUpdate(update, mode: .snapshot)
     }
 
     public func setRenderModel(
@@ -333,31 +363,66 @@ public final class MarkdownRuntime {
         if let businessContext {
             self.businessContext = businessContext
         }
-        let update = makeSyntheticFinalUpdate(newModel: model, currentText: "")
-        setStreamingRenderUpdate(update, mode: .snapshot)
+        commitProjectedFinalModel(newModel: model, currentText: "")
     }
 
-    public func setStreamingRenderUpdate(
-        _ update: MarkdownContract.StreamingRenderUpdate,
-        mode: MarkdownStreamingApplyMode = .incremental,
-        businessContext: [String: MarkdownContract.Value]? = nil
-    ) {
-        if let businessContext {
-            self.businessContext = businessContext
+    @discardableResult
+    public func startStream(
+        documentID: String = "document",
+        parseOptions: MarkdownContractParserOptions = MarkdownContractParserOptions(),
+        renderOptions: MarkdownContract.CanonicalRenderOptions = MarkdownContract.CanonicalRenderOptions()
+    ) throws -> MarkdownRenderStreamRef {
+        guard let streamingEngine else {
+            throw MarkdownRuntimeStreamError.streamingEngineNotConfigured
         }
 
-        currentRawModel = update.model
-        prepareState(for: update.model.documentId)
-
-        guard let containerView else { return }
-        let projected = stateProjector.project(
-            model: update.model,
-            snapshot: stateStore.snapshot,
-            behaviorRegistry: behaviorRegistry
+        let ref = try renderStore.createStream(
+            documentID: documentID,
+            parseOptions: parseOptions,
+            renderOptions: renderOptions,
+            engine: streamingEngine
         )
-        var projectedUpdate = update
-        projectedUpdate.model = projected
-        containerView.applyContractStreamingUpdate(projectedUpdate, mode: mode)
+        ownedStreamRefs.insert(ref)
+        return ref
+    }
+
+    public func appendStreamChunk(ref: MarkdownRenderStreamRef, chunk: String) throws {
+        guard ownedStreamRefs.contains(ref) else {
+            throw MarkdownRuntimeStreamError.streamNotOwned
+        }
+        _ = try renderStore.appendChunk(ref: ref, chunk: chunk)
+    }
+
+    public func finishStream(ref: MarkdownRenderStreamRef) throws {
+        guard ownedStreamRefs.contains(ref) else {
+            throw MarkdownRuntimeStreamError.streamNotOwned
+        }
+        _ = try renderStore.finishStream(ref: ref)
+    }
+
+    public func cancelStream(ref: MarkdownRenderStreamRef) {
+        ownedStreamRefs.remove(ref)
+        renderStore.removeStream(ref: ref)
+    }
+
+    public func resetStreams(documentID: String? = nil) {
+        if let documentID {
+            for ref in ownedStreamRefs {
+                guard let record = renderStore.streamRecord(ref: ref), record.documentID == documentID else { continue }
+                renderStore.removeStream(ref: ref)
+                ownedStreamRefs.remove(ref)
+            }
+            return
+        }
+
+        for ref in ownedStreamRefs {
+            renderStore.removeStream(ref: ref)
+        }
+        ownedStreamRefs.removeAll()
+    }
+
+    public func streamRecord(ref: MarkdownRenderStreamRef) -> MarkdownRenderStreamRecord? {
+        renderStore.streamRecord(ref: ref)
     }
 
     public func dispatch(_ event: MarkdownEvent) {
@@ -392,6 +457,62 @@ private extension MarkdownRuntime {
                 )
             ]
         )
+    }
+
+    func observeRenderStore() {
+        renderStoreObservation?.cancel()
+        renderStoreObservation = renderStore.observe { [weak self] event in
+            guard let self else { return }
+            self.handleStoreEvent(event)
+        }
+    }
+
+    func handleStoreEvent(_ event: MarkdownRenderStoreEvent) {
+        switch event.kind {
+        case let .streamUpdated(ref), let .streamFinished(ref):
+            guard ownedStreamRefs.contains(ref),
+                  let record = event.snapshot.streamRecord(ref: ref),
+                  let update = record.latestUpdate else {
+                return
+            }
+            applyProjectedStreamingUpdate(update, mode: .incremental)
+            if record.isFinal {
+                ownedStreamRefs.remove(ref)
+            }
+
+        case let .streamRemoved(ref):
+            ownedStreamRefs.remove(ref)
+
+        case .streamCreated, .animationStateChanged, .animationStateReset:
+            break
+        }
+    }
+
+    func applyProjectedStreamingUpdate(
+        _ update: MarkdownContract.StreamingRenderUpdate,
+        mode: MarkdownStreamingApplyMode
+    ) {
+        currentRawModel = update.model
+        prepareState(for: update.model.documentId)
+
+        guard let containerView else { return }
+        let projected = stateProjector.project(
+            model: update.model,
+            snapshot: stateStore.snapshot,
+            behaviorRegistry: behaviorRegistry
+        )
+
+        var projectedUpdate = update
+        projectedUpdate.model = projected
+        containerView.applyStreamingUpdateFromRuntime(projectedUpdate, mode: mode)
+    }
+
+    func commitProjectedFinalModel(
+        newModel: MarkdownContract.RenderModel,
+        currentText: String
+    ) {
+        let update = makeSyntheticFinalUpdate(newModel: newModel, currentText: currentText)
+        applyProjectedStreamingUpdate(update, mode: .snapshot)
     }
 
     func resolveInput(from input: MarkdownRuntimeInput) throws -> ResolvedRuntimeInput {
@@ -654,7 +775,6 @@ private extension MarkdownRuntime {
         return false
     }
 }
-
 private struct MarkdownStateProjector {
     func project(
         model: MarkdownContract.RenderModel,

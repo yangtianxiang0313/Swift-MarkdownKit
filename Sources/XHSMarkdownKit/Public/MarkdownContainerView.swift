@@ -3,6 +3,34 @@ import UIKit
 import XHSMarkdownCore
 #endif
 
+private final class AnimationStateStoreProxy: AnimationStateBackingStore {
+    var base: any AnimationStateBackingStore
+
+    init(base: any AnimationStateBackingStore = MarkdownRenderStore()) {
+        self.base = base
+    }
+
+    func prepareAnimationState(documentID: String, revealUnitsByEntity: [String: Int]) {
+        base.prepareAnimationState(documentID: documentID, revealUnitsByEntity: revealUnitsByEntity)
+    }
+
+    func animationState(for key: AnimationEntityKey) -> AnimationEntityProgressState? {
+        base.animationState(for: key)
+    }
+
+    func animationStates(documentID: String) -> [AnimationEntityKey: AnimationEntityProgressState] {
+        base.animationStates(documentID: documentID)
+    }
+
+    func setAnimationState(_ state: AnimationEntityProgressState, for key: AnimationEntityKey) {
+        base.setAnimationState(state, for: key)
+    }
+
+    func removeAnimationStates(documentID: String) {
+        base.removeAnimationStates(documentID: documentID)
+    }
+}
+
 public final class MarkdownContainerView: UIView, SceneAnimationHost {
 
     // MARK: - Animation
@@ -39,7 +67,6 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
     }
 
     public var contractKit: MarkdownContract.UniversalMarkdownKit
-    public var contractStreamingEngine: MarkdownContractEngine?
     public var contractRenderAdapter: MarkdownContract.RenderModelUIKitAdapter
 
     // MARK: - Delegate
@@ -56,6 +83,7 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
     // MARK: - State
 
     private let contentView = UIView()
+    private let animationStateStoreProxy = AnimationStateStoreProxy()
     private lazy var viewGraphCoordinator = ViewGraphCoordinator(containerView: contentView)
     var sceneInteractionHandler: ((RenderScene.Node, SceneInteractionPayload) -> Bool)? {
         didSet {
@@ -75,7 +103,8 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
         },
         animateStructuralChanges: { [weak self] changes in
             self?.viewGraphCoordinator.animateStructuralChanges(changes)
-        }
+        },
+        animationStateStore: animationStateStoreProxy
     )
 
     private var currentScene: RenderScene
@@ -85,7 +114,6 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
     private var lastNotifiedContentHeight: CGFloat = -1
 
     private var currentContractModel: MarkdownContract.RenderModel?
-    private var contractStreamingSession: MarkdownContract.StreamingMarkdownSession?
     private let contractModelDiffer: any MarkdownContract.RenderModelDiffer = MarkdownContract.DefaultRenderModelDiffer()
     private let contractAnimationCompiler: any MarkdownContract.RenderModelAnimationCompiler = MarkdownContract.DefaultRenderModelAnimationCompiler()
     private let contractAnimationPlanMapper: any ContractAnimationPlanMapping = DefaultContractAnimationPlanMapper()
@@ -95,12 +123,10 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
     public init(
         theme: MarkdownTheme = .default,
         contractKit: MarkdownContract.UniversalMarkdownKit = MarkdownContract.UniversalMarkdownKit(),
-        contractStreamingEngine: MarkdownContractEngine? = nil,
         contractRenderAdapter: MarkdownContract.RenderModelUIKitAdapter? = nil
     ) {
         self.theme = theme
         self.contractKit = contractKit
-        self.contractStreamingEngine = contractStreamingEngine
         self.contractRenderAdapter = contractRenderAdapter ?? MarkdownContract.RenderModelUIKitAdapter(
             mergePolicy: MarkdownContract.FirstBlockAnchoredMergePolicy(),
             blockMapperChain: MarkdownContract.RenderModelUIKitAdapter.makeDefaultBlockMapperChain()
@@ -126,7 +152,6 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
     ) {
         let oldModel = currentContractModel
         currentContractModel = model
-        contractStreamingSession = nil
         rerender(
             isFinal: true,
             forceInstant: forceInstant,
@@ -152,107 +177,6 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
             renderOptions: renderOptions
         )
         setContractRenderModel(model)
-    }
-
-    public func resetContractStreamingSession(
-        engine: MarkdownContractEngine? = nil,
-        differ: any MarkdownContract.RenderModelDiffer = MarkdownContract.DefaultRenderModelDiffer(),
-        parseOptions: MarkdownContractParserOptions = MarkdownContractParserOptions(),
-        renderOptions: MarkdownContract.CanonicalRenderOptions = MarkdownContract.CanonicalRenderOptions()
-    ) {
-        if let engine {
-            contractStreamingEngine = engine
-        }
-        guard let resolvedEngine = contractStreamingEngine else {
-            contractStreamingSession = nil
-            return
-        }
-        contractStreamingSession = MarkdownContract.StreamingMarkdownSession(
-            engine: resolvedEngine,
-            differ: differ,
-            parseOptions: parseOptions,
-            renderOptions: renderOptions
-        )
-    }
-
-    @discardableResult
-    public func appendContractStreamChunk(_ chunk: String) throws -> MarkdownContract.StreamingRenderUpdate {
-        if contractStreamingSession == nil {
-            guard let contractStreamingEngine else {
-                throw MarkdownContract.ModelError(
-                    code: .requiredFieldMissing,
-                    message: "Streaming engine not configured",
-                    path: "MarkdownContainerView.contractStreamingEngine"
-                )
-            }
-            contractStreamingSession = MarkdownContract.StreamingMarkdownSession(engine: contractStreamingEngine)
-        }
-
-        guard let session = contractStreamingSession else {
-            throw MarkdownContract.ModelError(
-                code: .requiredFieldMissing,
-                message: "Streaming session not initialized",
-                path: "contractStreamingSession"
-            )
-        }
-
-        let update = try session.appendChunk(chunk)
-        applyContractStreamingUpdate(update, mode: .incremental)
-        return update
-    }
-
-    @discardableResult
-    public func finishContractStreaming() throws -> MarkdownContract.StreamingRenderUpdate {
-        if contractStreamingSession == nil {
-            guard let contractStreamingEngine else {
-                throw MarkdownContract.ModelError(
-                    code: .requiredFieldMissing,
-                    message: "Streaming engine not configured",
-                    path: "MarkdownContainerView.contractStreamingEngine"
-                )
-            }
-            contractStreamingSession = MarkdownContract.StreamingMarkdownSession(engine: contractStreamingEngine)
-        }
-
-        guard let session = contractStreamingSession else {
-            throw MarkdownContract.ModelError(
-                code: .requiredFieldMissing,
-                message: "Streaming session not initialized",
-                path: "contractStreamingSession"
-            )
-        }
-
-        let update = try session.finish()
-        applyContractStreamingUpdate(update, mode: .incremental)
-        return update
-    }
-
-    public func applyContractStreamingUpdate(
-        _ update: MarkdownContract.StreamingRenderUpdate,
-        mode: MarkdownStreamingApplyMode = .incremental
-    ) {
-        let oldModel = currentContractModel
-        currentContractModel = update.model
-
-        switch mode {
-        case .incremental:
-            rerender(
-                isFinal: update.isFinal,
-                oldContractModel: oldModel,
-                compiledAnimationPlan: update.compiledAnimationPlan
-            )
-        case .snapshot:
-            rerender(
-                isFinal: update.isFinal,
-                forceInstant: true,
-                oldContractModel: oldModel,
-                compiledAnimationPlan: nil
-            )
-        }
-
-        if update.isFinal {
-            contractStreamingSession = nil
-        }
     }
 
     public func skipAnimation() {
@@ -284,6 +208,37 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
         currentScene = scene
         measuredContentHeight = viewGraphCoordinator.apply(scene: scene, maxWidth: max(bounds.width, 1))
         notifyHeightChange()
+    }
+
+    // MARK: - Runtime Bridge
+
+    func bindAnimationStateStore(_ store: any AnimationStateBackingStore) {
+        animationStateStoreProxy.base = store
+    }
+
+    func applyStreamingUpdateFromRuntime(
+        _ update: MarkdownContract.StreamingRenderUpdate,
+        mode: MarkdownStreamingApplyMode
+    ) {
+        let oldModel = currentContractModel
+        currentContractModel = update.model
+
+        switch mode {
+        case .incremental:
+            rerender(
+                isFinal: update.isFinal,
+                oldContractModel: oldModel,
+                compiledAnimationPlan: update.compiledAnimationPlan
+            )
+
+        case .snapshot:
+            rerender(
+                isFinal: update.isFinal,
+                forceInstant: true,
+                oldContractModel: oldModel,
+                compiledAnimationPlan: nil
+            )
+        }
     }
 
     // MARK: - Internal

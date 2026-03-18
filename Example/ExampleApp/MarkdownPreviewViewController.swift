@@ -693,9 +693,12 @@ class MarkdownPreviewViewController: UIViewController {
     ExampleMarkdownRuntime.installMarkdownn(into: container)
     container.setAnimationPreset(.typing(charactersPerSecond: 30))
     container.delegate = self
-    
-    try? container.appendContractStreamChunk("# Hello World\n\nThis is a **streaming** demo with animation preset API.")
-    try? container.finishContractStreaming()
+
+    let runtime = MarkdownRuntime(streamingEngine: ExampleMarkdownRuntime.makeStreamingEngine())
+    runtime.attach(to: container)
+    let ref = try runtime.startStream(documentID: "preview.streaming")
+    try runtime.appendStreamChunk(ref: ref, chunk: "# Hello World\n\nThis is a **streaming** demo with animation preset API.")
+    try runtime.finishStream(ref: ref)
     ```
     
     ## 14. 空内容测试

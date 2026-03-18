@@ -106,7 +106,9 @@ private extension StreamingDemoMockData {
     ```swift
     let runtime = MarkdownRuntime()
     runtime.attach(to: markdownView)
-    runtime.setStreamingRenderUpdate(update, mode: .incremental)
+    let ref = try runtime.startStream(documentID: "demo")
+    try runtime.appendStreamChunk(ref: ref, chunk: "Hello")
+    try runtime.finishStream(ref: ref)
     ```
 
     | item | status | note |
@@ -189,7 +191,8 @@ private extension StreamingDemoMockData {
     }
 
     func apply(update: MarkdownContract.StreamingRenderUpdate) {
-        runtime.setStreamingRenderUpdate(update, mode: .incremental)
+        let ref = try runtime.startStream(documentID: "example.streaming.demo")
+        try runtime.appendStreamChunk(ref: ref, chunk: "...")
     }
     ```
 

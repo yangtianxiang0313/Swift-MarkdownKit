@@ -21,7 +21,7 @@
 | 延迟副作用 | `EffectRunner` + `NodeBehaviorSchema.effectSpecs` | 声明 action -> 延迟 emitted action | `codeBlock copy -> 5s reset`（Runtime 页） |
 | 状态持久化 | `MarkdownStatePersistenceAdapter` | 只实现 load/save | `CustomRendererDemo` -> `状态恢复` |
 | 关联数据透传 | `MarkdownDataBindingAdapter` | 组装业务关联字段到 `associatedData` | `CustomRendererDemo` -> `Runtime` / `状态恢复` 事件日志 |
-| 动画与流式 | `StreamingSession + SceneDiff` | 配置动画策略，不持有业务状态 | `流式+动画` / `动画参数` |
+| 动画与流式 | `MarkdownRuntime + MarkdownRenderStore + SceneDiff` | 仅通过 runtime stream API 驱动，View 不持有业务状态 | `流式+动画` / `动画参数` |
 
 ## 3. 新增节点标准流程
 

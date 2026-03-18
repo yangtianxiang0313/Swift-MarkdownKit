@@ -93,8 +93,7 @@ MarkdownnAdapter.install(into: registry, nodeSpecRegistry: specs)
 
 let view = MarkdownContainerView(
     theme: .default,
-    contractKit: MarkdownContract.UniversalMarkdownKit(registry: registry),
-    contractStreamingEngine: MarkdownnAdapter.makeEngine(nodeSpecRegistry: specs)
+    contractKit: MarkdownContract.UniversalMarkdownKit(registry: registry)
 )
 view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
 try view.setContractMarkdown("# Hello")
@@ -181,12 +180,16 @@ adapter.registerBlockMapper(forExtension: "ext.demo.card") { block, _, adapter i
 ## 5. Streaming
 
 ```swift
-let u1 = try view.appendContractStreamChunk("Hello")
-let u2 = try view.appendContractStreamChunk(" world")
-let final = try view.finishContractStreaming()
+let runtime = MarkdownRuntime(streamingEngine: engine)
+runtime.attach(to: view)
+
+let ref = try runtime.startStream(documentID: "doc.streaming")
+try runtime.appendStreamChunk(ref: ref, chunk: "Hello")
+try runtime.appendStreamChunk(ref: ref, chunk: " world")
+try runtime.finishStream(ref: ref)
 ```
 
-Each update carries `model`, `diff`, and `compiledAnimationPlan` (contract timeline).
+Streaming and animation state are both persisted in `MarkdownRenderStore` (single source of truth), and `MarkdownContainerView` only consumes runtime-projected render frames.
 
 ## 6. Error Handling
 
