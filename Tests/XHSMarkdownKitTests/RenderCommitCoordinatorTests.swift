@@ -162,7 +162,10 @@ final class RenderCommitCoordinatorTests: XCTestCase {
         coordinator.concurrencyPolicy = .fullyOrdered
 
         let completion = expectation(description: "first animation completed")
+        var didFulfill = false
         coordinator.onAnimationComplete = {
+            guard !didFulfill else { return }
+            didFulfill = true
             completion.fulfill()
         }
 
@@ -278,8 +281,178 @@ final class RenderCommitCoordinatorTests: XCTestCase {
         XCTAssertTrue(host.hasView(for: "code"))
     }
 
+    func testInsertedRuleStaysHiddenUntilContentAnimationCompletes() {
+        let host = SceneHost()
+        let coordinator = host.makeCoordinator()
+        coordinator.concurrencyPolicy = .fullyOrdered
+
+        let completion = expectation(description: "animation completed")
+        coordinator.onAnimationComplete = {
+            completion.fulfill()
+        }
+
+        let target = RenderScene(
+            documentId: "doc.rule.hidden",
+            nodes: [
+                .init(
+                    id: "text",
+                    kind: "paragraph",
+                    component: MergedTextSceneComponent(attributedText: NSAttributedString(string: String(repeating: "a", count: 40)))
+                ),
+                .init(
+                    id: "rule",
+                    kind: "rule",
+                    component: RuleSceneComponent(color: .separator, height: 1, verticalPadding: 8)
+                )
+            ]
+        )
+        let structural = [
+            StructuralSceneChange(kind: .insert, entityId: "text", toIndex: 0),
+            StructuralSceneChange(kind: .insert, entityId: "rule", toIndex: 1)
+        ]
+        let content = [
+            ContentSceneChange(entityId: "text", stableUnits: 0, targetUnits: 40, inserted: true)
+        ]
+        let plan = RenderExecutionPlan(stages: [
+            .init(
+                id: "structure",
+                phase: .structure,
+                effectKey: .segmentFade,
+                structuralChanges: structural
+            ),
+            .init(
+                id: "content",
+                phase: .content,
+                effectKey: .typing,
+                contentChanges: content
+            )
+        ])
+
+        let frame = RenderFrame(
+            version: 1,
+            previousScene: .empty(documentId: "doc.rule.hidden"),
+            targetScene: target,
+            diff: SceneDiff(changes: [
+                SceneChange(kind: .insert, entityId: "text", toIndex: 0),
+                SceneChange(kind: .insert, entityId: "rule", toIndex: 1)
+            ]),
+            delta: SceneDelta(structuralChanges: structural, contentChanges: content),
+            executionPlan: plan,
+            isFinal: false,
+            animationMode: .dualPhase,
+            defaultEffectKey: .typing,
+            entityAppearanceMode: .sequential,
+            unitsPerSecond: 24
+        )
+        coordinator.submit(frame)
+
+        runMainLoop(for: 0.25)
+        XCTAssertTrue(host.hasView(for: "text"))
+        XCTAssertFalse(host.hasView(for: "rule"))
+
+        wait(for: [completion], timeout: 3.0)
+        XCTAssertTrue(host.hasView(for: "rule"))
+    }
+
+    func testTailLeadingCharacterCanReachFullAlphaDuringReveal() {
+        let host = SceneHost()
+        let coordinator = host.makeCoordinator()
+        coordinator.concurrencyPolicy = .fullyOrdered
+
+        let text = String(repeating: "a", count: 80)
+        let target = makeScene(documentID: "doc.tail.alpha", text: text, entityID: "text")
+        let frame = makeFrame(
+            version: 1,
+            previousScene: .empty(documentId: "doc.tail.alpha"),
+            targetScene: target,
+            diffChanges: [SceneChange(kind: .insert, entityId: "text", toIndex: 0)],
+            contentChanges: [ContentSceneChange(entityId: "text", stableUnits: 0, targetUnits: 80, inserted: true)],
+            unitsPerSecond: 24
+        )
+        coordinator.submit(frame)
+
+        let reached = waitUntil(timeout: 2.0) {
+            host.displayedUnits(for: "text") >= 14
+        }
+        XCTAssertTrue(reached)
+
+        let displayed = host.displayedUnits(for: "text")
+        XCTAssertLessThan(displayed, 80)
+
+        guard let rendered = host.renderedText(for: "text") else {
+            XCTFail("Expected rendered text")
+            return
+        }
+        let tailLeadingIndex = max(0, displayed - 12)
+        XCTAssertLessThan(tailLeadingIndex, rendered.length)
+
+        let color = rendered.attribute(.foregroundColor, at: tailLeadingIndex, effectiveRange: nil) as? UIColor
+        let alpha = color?.cgColor.alpha ?? 1
+        XCTAssertGreaterThanOrEqual(alpha, 0.995)
+    }
+
+    func testRevealAlphaUsesBaseColorAlphaProgress() {
+        let host = SceneHost()
+        let coordinator = host.makeCoordinator()
+        coordinator.concurrencyPolicy = .fullyOrdered
+
+        let baseAlpha: CGFloat = 0.35
+        let attributed = NSAttributedString(
+            string: String(repeating: "x", count: 40),
+            attributes: [.foregroundColor: UIColor.systemRed.withAlphaComponent(baseAlpha)]
+        )
+        let target = RenderScene(
+            documentId: "doc.base.alpha",
+            nodes: [
+                .init(
+                    id: "text",
+                    kind: "paragraph",
+                    component: MergedTextSceneComponent(attributedText: attributed)
+                )
+            ]
+        )
+        let frame = makeFrame(
+            version: 1,
+            previousScene: .empty(documentId: "doc.base.alpha"),
+            targetScene: target,
+            diffChanges: [SceneChange(kind: .insert, entityId: "text", toIndex: 0)],
+            contentChanges: [ContentSceneChange(entityId: "text", stableUnits: 0, targetUnits: 40, inserted: true)],
+            unitsPerSecond: 20
+        )
+        coordinator.submit(frame)
+
+        let reached = waitUntil(timeout: 2.0) {
+            host.displayedUnits(for: "text") >= 8
+        }
+        XCTAssertTrue(reached)
+        XCTAssertLessThan(host.displayedUnits(for: "text"), 40)
+
+        guard let rendered = host.renderedText(for: "text") else {
+            XCTFail("Expected rendered text")
+            return
+        }
+
+        var maxObservedAlpha: CGFloat = 0
+        for index in 0..<rendered.length {
+            let color = rendered.attribute(.foregroundColor, at: index, effectiveRange: nil) as? UIColor
+            maxObservedAlpha = max(maxObservedAlpha, color?.cgColor.alpha ?? 0)
+        }
+        XCTAssertLessThanOrEqual(maxObservedAlpha, baseAlpha + 0.01)
+    }
+
     private func runMainLoop(for seconds: TimeInterval) {
         RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+    }
+
+    private func waitUntil(timeout: TimeInterval, condition: @escaping () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() {
+                return true
+            }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        return condition()
     }
 
     private func makeScene(documentID: String, text: String, entityID: String) -> RenderScene {

@@ -556,14 +556,15 @@ private final class MergedTextSceneView: UIView, UITextViewDelegate, SceneIntera
             let safeLength = min(characterRange.length, visible.length - characterRange.location)
             let safeRange = NSRange(location: characterRange.location, length: safeLength)
             let distanceFromTail = clampedDisplayGlyph - 1 - glyphIndex
-            let normalized = min(1, CGFloat(distanceFromTail) / CGFloat(tailRamp))
-            let alpha = min(1, appearanceProfile.initialAlpha + normalized * (1 - appearanceProfile.initialAlpha))
+            let normalized = min(1, CGFloat(distanceFromTail + 1) / CGFloat(tailRamp))
+            let alphaProgress = min(1, appearanceProfile.initialAlpha + normalized * (1 - appearanceProfile.initialAlpha))
 
             visible.enumerateAttribute(.xhsBaseForegroundColor, in: safeRange, options: []) { value, range, _ in
                 let baseColor = (value as? UIColor)
                     ?? (visible.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? UIColor)
                     ?? UIColor.label
-                visible.addAttribute(.foregroundColor, value: baseColor.withAlphaComponent(alpha), range: range)
+                let resolvedAlpha = max(0, min(1, baseColor.cgColor.alpha * alphaProgress))
+                visible.addAttribute(.foregroundColor, value: baseColor.withAlphaComponent(resolvedAlpha), range: range)
             }
         }
 

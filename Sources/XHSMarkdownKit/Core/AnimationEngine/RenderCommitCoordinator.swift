@@ -70,7 +70,6 @@ public final class RenderCommitCoordinator {
         let frame: RenderFrame
         let stageWorks: [StageWork]
         let totalDeltaUnits: Int
-        let insertedEntitiesWithContent: Set<String>
 
         var stageIndex: Int = 0
         var completedDeltaUnits: Int = 0
@@ -89,14 +88,12 @@ public final class RenderCommitCoordinator {
             frame: RenderFrame,
             stageWorks: [StageWork],
             totalDeltaUnits: Int,
-            insertedEntitiesWithContent: Set<String>,
             hiddenInsertedEntityIDs: Set<String>,
             cancellationToken: Int
         ) {
             self.frame = frame
             self.stageWorks = stageWorks
             self.totalDeltaUnits = totalDeltaUnits
-            self.insertedEntitiesWithContent = insertedEntitiesWithContent
             self.hiddenInsertedEntityIDs = hiddenInsertedEntityIDs
             self.cancellationToken = cancellationToken
         }
@@ -184,12 +181,20 @@ public final class RenderCommitCoordinator {
         }
 
         let stageWorks = makeStageWorks(for: frame)
+        let totalDelta = stageWorks.reduce(0) { $0 + $1.totalDeltaUnits }
+        if totalDelta <= 0 {
+            applyScene(frame.targetScene)
+            applyFullyVisibleState(to: frame.targetScene, elapsedMilliseconds: 0, version: frame.version)
+            publishCompletedProgress(for: frame)
+            finalize(version: frame.version)
+            return
+        }
+
         let hiddenInsertedEntityIDs = initialHiddenInsertedEntityIDs(for: frame, stageWorks: stageWorks)
         applyProjectedScene(
             targetScene: frame.targetScene,
             hiddenInsertedEntityIDs: hiddenInsertedEntityIDs
         )
-        let totalDelta = stageWorks.reduce(0) { $0 + $1.totalDeltaUnits }
 
         guard !stageWorks.isEmpty else {
             applyScene(frame.targetScene)
@@ -200,14 +205,10 @@ public final class RenderCommitCoordinator {
         }
 
         cancellationToken += 1
-        let insertedEntitiesWithContent = Set(stageWorks.flatMap { work in
-            work.tracks.compactMap { $0.inserted ? $0.entityId : nil }
-        })
         let transaction = ActiveTransaction(
             frame: frame,
             stageWorks: stageWorks,
             totalDeltaUnits: totalDelta,
-            insertedEntitiesWithContent: insertedEntitiesWithContent,
             hiddenInsertedEntityIDs: hiddenInsertedEntityIDs,
             cancellationToken: cancellationToken
         )
@@ -547,7 +548,6 @@ public final class RenderCommitCoordinator {
         }
 
         let work = transaction.stageWorks[transaction.stageIndex]
-        activateStructuralInsertionsIfNeeded(work: work, transaction: transaction)
         if !work.stage.structuralChanges.isEmpty {
             applyStructuralChanges(changes: work.stage.structuralChanges, effectKey: work.stage.effectKey)
         }
@@ -654,27 +654,6 @@ public final class RenderCommitCoordinator {
 
     private func animationEntityKey(documentID: String, entityID: String) -> AnimationEntityKey {
         AnimationEntityKey(documentId: documentID, entityId: entityID)
-    }
-
-    private func activateStructuralInsertionsIfNeeded(work: StageWork, transaction: ActiveTransaction) {
-        let stageInsertedIDs = Set(
-            work.stage.structuralChanges.compactMap { change in
-                change.kind == .insert ? change.entityId : nil
-            }
-        )
-        guard !stageInsertedIDs.isEmpty else { return }
-
-        let immediateIDs = stageInsertedIDs.subtracting(transaction.insertedEntitiesWithContent)
-        guard !immediateIDs.isEmpty else { return }
-
-        let beforeCount = transaction.hiddenInsertedEntityIDs.count
-        transaction.hiddenInsertedEntityIDs.subtract(immediateIDs)
-        guard transaction.hiddenInsertedEntityIDs.count != beforeCount else { return }
-
-        applyProjectedScene(
-            targetScene: transaction.frame.targetScene,
-            hiddenInsertedEntityIDs: transaction.hiddenInsertedEntityIDs
-        )
     }
 
     private func revealInsertedEntitiesIfNeeded(
