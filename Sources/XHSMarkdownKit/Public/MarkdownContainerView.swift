@@ -167,7 +167,7 @@ public final class MarkdownContainerView: UIView, SceneAnimationHost {
         parserID: MarkdownContract.ParserID? = nil,
         rendererID: MarkdownContract.RendererID? = nil,
         parseOptions: MarkdownContractParserOptions = MarkdownContractParserOptions(),
-        rewritePipeline: MarkdownContract.CanonicalRewritePipeline = MarkdownContract.CanonicalRewritePipeline(),
+        rewritePipeline: MarkdownContract.CanonicalRewritePipeline? = nil,
         renderOptions: MarkdownContract.CanonicalRenderOptions = MarkdownContract.CanonicalRenderOptions()
     ) throws {
         let model = try contractKit.render(

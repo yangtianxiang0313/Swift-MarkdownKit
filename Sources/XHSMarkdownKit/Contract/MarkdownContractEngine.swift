@@ -2,12 +2,12 @@ import Foundation
 
 public struct MarkdownContractEngine {
     public let parser: MarkdownContractParser?
-    public let rewritePipeline: MarkdownContract.CanonicalRewritePipeline
+    public let rewritePipeline: MarkdownContract.CanonicalRewritePipeline?
     public let renderer: (any MarkdownContract.CanonicalRenderer)?
 
     public init(
         parser: MarkdownContractParser? = nil,
-        rewritePipeline: MarkdownContract.CanonicalRewritePipeline = .init(),
+        rewritePipeline: MarkdownContract.CanonicalRewritePipeline? = nil,
         renderer: (any MarkdownContract.CanonicalRenderer)? = nil
     ) {
         self.parser = parser
@@ -30,7 +30,7 @@ public struct MarkdownContractEngine {
     }
 
     public func transform(_ document: MarkdownContract.CanonicalDocument) throws -> MarkdownContract.CanonicalDocument {
-        try rewritePipeline.rewrite(document)
+        try resolvedRewritePipeline().rewrite(document)
     }
 
     public func render(
@@ -55,5 +55,33 @@ public struct MarkdownContractEngine {
     ) throws -> MarkdownContract.RenderModel {
         let document = try parse(markdown, options: parseOptions)
         return try render(document, options: renderOptions)
+    }
+
+    private func resolvedRewritePipeline() throws -> MarkdownContract.CanonicalRewritePipeline {
+        if let rewritePipeline {
+            return rewritePipeline
+        }
+
+        let parserRegistry = (parser as? MarkdownContract.NodeSpecRegistryProviding)?.nodeSpecRegistry
+        let rendererRegistry = (renderer as? MarkdownContract.NodeSpecRegistryProviding)?.nodeSpecRegistry
+
+        if let parserRegistry, let rendererRegistry,
+           !parserRegistry.isEquivalent(to: rendererRegistry) {
+            throw MarkdownContract.ModelError(
+                code: .schemaInvalid,
+                message: "Parser and renderer must share the same NodeSpecRegistry when rewritePipeline is not provided",
+                path: "MarkdownContractEngine.rewritePipeline",
+                details: [
+                    "parserSpecCount": .int(parserRegistry.specCount),
+                    "rendererSpecCount": .int(rendererRegistry.specCount)
+                ]
+            )
+        }
+
+        if let sharedRegistry = parserRegistry ?? rendererRegistry {
+            return MarkdownContract.CanonicalRewritePipeline(nodeSpecRegistry: sharedRegistry)
+        }
+
+        return MarkdownContract.CanonicalRewritePipeline()
     }
 }

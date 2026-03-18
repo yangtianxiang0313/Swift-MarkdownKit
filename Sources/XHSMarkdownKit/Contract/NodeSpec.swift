@@ -1,6 +1,10 @@
 import Foundation
 
 extension MarkdownContract {
+    public protocol NodeSpecRegistryProviding {
+        var nodeSpecRegistry: NodeSpecRegistry { get }
+    }
+
     public enum NodeRole: String, Sendable, Equatable, Hashable, Codable {
         case root
         case blockLeaf
@@ -137,6 +141,16 @@ extension MarkdownContract {
 
         public func tagPairingMode(forHTMLTagName tagName: String) -> TagPairingMode? {
             tagPairingModeByHTMLTagName[tagName.lowercased()]
+        }
+
+        public var specCount: Int {
+            specsByKind.count
+        }
+
+        public func isEquivalent(to other: NodeSpecRegistry) -> Bool {
+            specsByKind == other.specsByKind
+                && kindByAlias == other.kindByAlias
+                && tagPairingModeByHTMLTagName == other.tagPairingModeByHTMLTagName
         }
 
         public static func core() -> NodeSpecRegistry {

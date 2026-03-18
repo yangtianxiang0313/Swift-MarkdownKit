@@ -22,7 +22,7 @@ public enum MarkdownnAdapter {
     }
 
     public static func makeEngine(
-        rewritePipeline: MarkdownContract.CanonicalRewritePipeline = .init(),
+        rewritePipeline: MarkdownContract.CanonicalRewritePipeline? = nil,
         nodeSpecRegistry: MarkdownContract.NodeSpecRegistry = .core(),
         canonicalRendererRegistry: MarkdownContract.CanonicalRendererRegistry = .makeDefault()
     ) -> MarkdownContractEngine {

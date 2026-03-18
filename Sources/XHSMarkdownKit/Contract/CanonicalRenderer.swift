@@ -159,7 +159,7 @@ extension MarkdownContract {
         }
     }
 
-    public struct DefaultCanonicalRenderer: CanonicalRenderer {
+    public struct DefaultCanonicalRenderer: CanonicalRenderer, NodeSpecRegistryProviding {
         public let registry: CanonicalRendererRegistry
         public let nodeSpecRegistry: NodeSpecRegistry
         private let treeValidator: TreeValidator

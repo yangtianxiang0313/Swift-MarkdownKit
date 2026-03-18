@@ -74,10 +74,16 @@ extension MarkdownContract {
             parserID: ParserID? = nil,
             rendererID: RendererID? = nil,
             parseOptions: MarkdownContractParserOptions = MarkdownContractParserOptions(),
-            rewritePipeline: CanonicalRewritePipeline = CanonicalRewritePipeline(),
+            rewritePipeline: CanonicalRewritePipeline? = nil,
             renderOptions: CanonicalRenderOptions = CanonicalRenderOptions()
         ) throws -> RenderModel {
-            let document = try parse(markdown, parserID: parserID, options: parseOptions)
+            guard let parser = registry.parser(for: parserID) else {
+                throw ModelError(
+                    code: ModelError.Code.requiredFieldMissing.rawValue,
+                    message: "Parser not found: \(parserID ?? registry.defaultParserID)",
+                    path: "parserID"
+                )
+            }
 
             guard let renderer = registry.renderer(for: rendererID) else {
                 throw ModelError(
@@ -87,8 +93,16 @@ extension MarkdownContract {
                 )
             }
 
-            let rewritten = try rewritePipeline.rewrite(document)
-            return try renderer.render(document: rewritten, options: renderOptions)
+            let engine = MarkdownContractEngine(
+                parser: parser,
+                rewritePipeline: rewritePipeline,
+                renderer: renderer
+            )
+            return try engine.render(
+                markdown,
+                parseOptions: parseOptions,
+                renderOptions: renderOptions
+            )
         }
     }
 }

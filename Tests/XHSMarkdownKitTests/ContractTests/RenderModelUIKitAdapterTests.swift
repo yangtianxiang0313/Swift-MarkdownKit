@@ -538,6 +538,28 @@ final class RenderModelUIKitAdapterTests: XCTestCase {
         XCTAssertTrue(mergedText(from: scene).contains("[CALLOUT]"))
     }
 
+    func testAdapterFailsFastForExtensionBlockWithoutRenderableContent() {
+        let model = MarkdownContract.RenderModel(
+            documentId: "doc-empty-extension",
+            blocks: [
+                MarkdownContract.RenderBlock(
+                    id: "ext-empty",
+                    kind: .ext(.init(namespace: "demo", name: "empty"))
+                )
+            ]
+        )
+
+        let adapter = makeAdapter()
+        XCTAssertThrowsError(try adapter.render(model: model, theme: .default, maxWidth: 320)) { error in
+            guard let modelError = error as? MarkdownContract.ModelError else {
+                XCTFail("Expected ModelError")
+                return
+            }
+            XCTAssertEqual(modelError.code, MarkdownContract.ModelError.Code.unknownNodeKind.rawValue)
+            XCTAssertEqual(modelError.path, "RenderModelUIKitAdapter.block[ext-empty]")
+        }
+    }
+
     private func makeAdapter() -> MarkdownContract.RenderModelUIKitAdapter {
         MarkdownContract.RenderModelUIKitAdapter(
             mergePolicy: MarkdownContract.FirstBlockAnchoredMergePolicy(),

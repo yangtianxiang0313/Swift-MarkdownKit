@@ -94,4 +94,62 @@ final class UniversalMarkdownKitTests: XCTestCase {
             XCTAssertEqual(modelError.path, "rendererID")
         }
     }
+
+    func testRenderInfersRewritePipelineFromParserRendererNodeSpecs() throws {
+        let specs = ExtensionNodeTestSupport.makeNodeSpecRegistry()
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: specs)
+        let renderer = MarkdownContract.DefaultCanonicalRenderer(
+            registry: ExtensionNodeTestSupport.makeRendererRegistry(),
+            nodeSpecRegistry: specs
+        )
+
+        let registry = MarkdownContract.AdapterRegistry(
+            defaultParserID: MarkdownnAdapter.parserID,
+            defaultRendererID: MarkdownnAdapter.rendererID
+        )
+        registry.registerParser(parser, id: MarkdownnAdapter.parserID)
+        registry.registerRenderer(renderer, id: MarkdownnAdapter.rendererID)
+
+        let kit = MarkdownContract.UniversalMarkdownKit(registry: registry)
+        let model = try kit.render(
+            "@Callout",
+            parseOptions: .init(parseBlockDirectives: true)
+        )
+
+        XCTAssertTrue(model.blocks.contains(where: { $0.kind == ExtensionNodeTestSupport.calloutKind }))
+    }
+
+    func testRenderFailsFastWhenParserRendererNodeSpecRegistriesMismatch() {
+        let parserSpecs = ExtensionNodeTestSupport.makeNodeSpecRegistry()
+        let rendererSpecs = MarkdownContract.NodeSpecRegistry.core()
+
+        let parser = XYMarkdownContractParser(nodeSpecRegistry: parserSpecs)
+        let renderer = MarkdownContract.DefaultCanonicalRenderer(
+            registry: ExtensionNodeTestSupport.makeRendererRegistry(),
+            nodeSpecRegistry: rendererSpecs
+        )
+
+        let registry = MarkdownContract.AdapterRegistry(
+            defaultParserID: MarkdownnAdapter.parserID,
+            defaultRendererID: MarkdownnAdapter.rendererID
+        )
+        registry.registerParser(parser, id: MarkdownnAdapter.parserID)
+        registry.registerRenderer(renderer, id: MarkdownnAdapter.rendererID)
+
+        let kit = MarkdownContract.UniversalMarkdownKit(registry: registry)
+
+        XCTAssertThrowsError(
+            try kit.render(
+                "@Callout",
+                parseOptions: .init(parseBlockDirectives: true)
+            )
+        ) { error in
+            guard let modelError = error as? MarkdownContract.ModelError else {
+                XCTFail("Expected ModelError")
+                return
+            }
+            XCTAssertEqual(modelError.code, MarkdownContract.ModelError.Code.schemaInvalid.rawValue)
+            XCTAssertEqual(modelError.path, "MarkdownContractEngine.rewritePipeline")
+        }
+    }
 }

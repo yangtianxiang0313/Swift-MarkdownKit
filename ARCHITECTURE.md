@@ -40,6 +40,9 @@
 1. Markdown text -> parser adapter -> `CanonicalDocument`.
 2. `TreeValidator` validates parse output against `NodeSpecRegistry` (strict fail).
 3. Rewrite pipeline transforms canonical nodes.
+   - `MarkdownContractEngine` resolves rewrite schema from parser/renderer `NodeSpecRegistry` when `rewritePipeline == nil`.
+   - If parser and renderer expose different registries, engine fails fast with `schema_invalid` at `MarkdownContractEngine.rewritePipeline`.
+   - Explicit rewrite pipeline still has highest priority when caller provides one.
 4. `TreeValidator` validates rewritten tree again (strict fail).
 5. Canonical renderer outputs `RenderModel`.
 6. UIKit adapter converts `RenderModel` to `RenderScene` (stable node IDs).
@@ -62,6 +65,7 @@
   - `childPolicy` (`allowedChildRoles + minChildren + maxChildren`)
   - `parseAliases` (`sourceKind + name` -> `NodeKind`)
 - `NodeSpecRegistry` is the only source of truth for node structure contracts.
+- Parser/renderer/rewrite must share the same `NodeSpecRegistry` semantics. There is no implicit fallback contract when extension schema is present.
 - `TreeValidator` runs in parser/rewrite/renderer paths and throws:
   - `unknown_node_kind` for unregistered kinds
   - `schema_invalid` for child-role/cardinality violations
@@ -85,6 +89,8 @@
   - HTML tag `spoiler` -> `ext.demo.spoiler` (inline container)
 - Canonical renderer must register renderer per extension `NodeKind`; missing registration is a hard error.
 - UIKit layer can override extension rendering by extension key (`registerBlockRenderer(forExtension:)`, `registerInlineRenderer(forExtension:)`).
+- Adding an extension node should only require spec + parser alias + renderer/mapper registration. Framework entrypoints should not need code changes.
+- UIKit extension block fallback is fail-fast: if an extension block has no inline output and no child output (and `uiState.collapsed != true`), adapter throws `unknown_node_kind` instead of silently dropping it.
 
 ## Animation Strategy
 

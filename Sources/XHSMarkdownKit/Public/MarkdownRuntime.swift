@@ -11,7 +11,7 @@ public enum MarkdownRuntimeInput {
         parserID: MarkdownContract.ParserID? = nil,
         rendererID: MarkdownContract.RendererID? = nil,
         parseOptions: MarkdownContractParserOptions = MarkdownContractParserOptions(),
-        rewritePipeline: MarkdownContract.CanonicalRewritePipeline = MarkdownContract.CanonicalRewritePipeline(),
+        rewritePipeline: MarkdownContract.CanonicalRewritePipeline? = nil,
         renderOptions: MarkdownContract.CanonicalRenderOptions = MarkdownContract.CanonicalRenderOptions()
     )
     case renderModel(MarkdownContract.RenderModel)

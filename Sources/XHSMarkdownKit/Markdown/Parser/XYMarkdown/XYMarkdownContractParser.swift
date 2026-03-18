@@ -4,7 +4,7 @@ import XHSMarkdownCore
 #endif
 import XYMarkdown
 
-public struct XYMarkdownContractParser: MarkdownContractParser {
+public struct XYMarkdownContractParser: MarkdownContractParser, MarkdownContract.NodeSpecRegistryProviding {
     public let nodeSpecRegistry: MarkdownContract.NodeSpecRegistry
     private let treeValidator: MarkdownContract.TreeValidator
 

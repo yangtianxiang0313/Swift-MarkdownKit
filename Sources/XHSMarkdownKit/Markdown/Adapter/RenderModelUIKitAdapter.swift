@@ -808,7 +808,20 @@ private extension MarkdownContract.RenderModelUIKitAdapter {
             return [.mergeSegment(segment)]
         }
 
-        return try mapBlocks(block.children, context: context)
+        let childResults = try mapBlocks(block.children, context: context)
+        if !childResults.isEmpty {
+            return childResults
+        }
+
+        if block.kind.isExtension, block.contractUIStateBool(for: "collapsed") != true {
+            throw MarkdownContract.ModelError(
+                code: .unknownNodeKind,
+                message: "No UIKit block mapper handled extension block \(block.kind.rawValue)",
+                path: "RenderModelUIKitAdapter.block[\(block.id)]"
+            )
+        }
+
+        return []
     }
 
     func merge(mappedResults: [MarkdownContract.BlockMappingResult], theme: MarkdownTheme) -> [RenderScene.Node] {
@@ -1566,6 +1579,16 @@ public extension MarkdownContract.RenderBlock {
             return nil
         }
         guard case let .string(value)? = uiState[key] else {
+            return nil
+        }
+        return value
+    }
+
+    func contractUIStateBool(for key: String) -> Bool? {
+        guard case let .object(uiState)? = metadata["uiState"] else {
+            return nil
+        }
+        guard case let .bool(value)? = uiState[key] else {
             return nil
         }
         return value

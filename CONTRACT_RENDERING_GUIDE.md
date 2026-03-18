@@ -99,6 +99,9 @@ view.frame = CGRect(x: 0, y: 0, width: 320, height: 1)
 try view.setContractMarkdown("# Hello")
 ```
 
+`rewritePipeline` is optional on public entrypoints. When omitted, engine derives rewrite schema from parser/renderer `NodeSpecRegistry`.
+You only pass an explicit rewrite pipeline when intentionally overriding default rewrite behavior.
+
 ## 3.1 Runtime-Managed State and Unified Event Bus
 
 ```swift
@@ -176,6 +179,17 @@ adapter.registerBlockMapper(forExtension: "ext.demo.card") { block, _, adapter i
 }
 ```
 
+### 4.1 Extension Onboarding Rule (No Framework Touchpoints)
+
+To add a new extension node kind, modify only extension-layer wiring:
+
+1. Register `NodeSpec` and parse alias in your shared `NodeSpecRegistry`.
+2. Ensure parser and renderer are built with that same registry.
+3. Register canonical renderer for the extension `NodeKind`.
+4. Optionally register UIKit extension mapper/inline renderer.
+
+Do not patch framework entrypoints for each new node. `UniversalMarkdownKit` and `MarkdownContractEngine` resolve rewrite pipeline automatically from parser/renderer schema when `rewritePipeline` is not provided.
+
 ## 5. Streaming
 
 ```swift
@@ -206,6 +220,10 @@ Common `ModelError.code`:
 
 `schema_invalid` is expected for:
 - role/cardinality violations (for example block container node with inline child)
+- parser/renderer `NodeSpecRegistry` mismatch when rewrite pipeline is not explicitly provided
+
+`unknown_node_kind` is also expected for:
+- extension blocks that produce no inline output and no child output in UIKit fallback (unless `uiState.collapsed == true`)
 
 ## 7. Test Commands
 
